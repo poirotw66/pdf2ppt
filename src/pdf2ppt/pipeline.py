@@ -6,13 +6,14 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from statistics import median
 from typing import Any
 
 import fitz
 import numpy as np
-from PIL import Image, ImageDraw, ImageStat
+from PIL import Image, ImageDraw, ImageFont, ImageStat
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
@@ -22,6 +23,8 @@ from .models import ConversionReport, ImagePlacement, PageKind, PageResult, Qual
 
 
 EMU_PER_PT = 12700
+DEFAULT_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+DEFAULT_CJK_FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
 
 @dataclass(slots=True)
@@ -177,6 +180,11 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
             text_blocks=[block for block in text_blocks if block.source == "ocr"] or ocr_blocks,
             page_rect=page.rect,
         )
+        write_text_fit_debug_report(
+            debug_dir=options.debug_dir,
+            page_number=page.number + 1,
+            text_blocks=[block for block in text_blocks if block.source == "ocr"] or ocr_blocks,
+        )
 
     return PageResult(
         page_number=page.number + 1,
@@ -236,7 +244,7 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
     text_frame.margin_right = 0
     text_frame.margin_top = 0
     text_frame.margin_bottom = 0
-    text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    text_frame.auto_size = MSO_AUTO_SIZE.NONE
     text_frame.clear()
 
     paragraph = text_frame.paragraphs[0]
@@ -456,7 +464,7 @@ def enrich_ocr_blocks(blocks: list[TextBlock], image: Image.Image) -> list[TextB
         crop = safe_crop(image, block.bbox)
         gray_crop = safe_crop(grayscale, block.bbox)
         color = estimate_text_color(crop, gray_crop)
-        font_size = estimate_font_size(block.bbox)
+        font_size = estimate_font_size(block.text, block.bbox)
         enriched.append(
             TextBlock(
                 id=block.id or f"ocr_{index}",
@@ -511,9 +519,124 @@ def map_blocks_to_page_coordinates(
     return sort_text_blocks(mapped)
 
 
-def estimate_font_size(bbox: tuple[float, float, float, float]) -> float:
+def estimate_font_size(text: str, bbox: tuple[float, float, float, float]) -> float:
     height = max(1.0, bbox[3] - bbox[1])
-    return max(8.0, min(32.0, height * 0.72))
+    width = max(1.0, bbox[2] - bbox[0])
+    script = classify_text_script(text)
+    script_height_ratio = {
+        "cjk": 0.74,
+        "latin": 0.78,
+        "numeric": 0.82,
+        "mixed": 0.76,
+        "other": 0.76,
+    }.get(script, 0.76)
+    base_size = max(6.0, min(72.0, height * script_height_ratio))
+    font_path = choose_measurement_font(script)
+    if font_path is None:
+        return base_size
+
+    best_size = base_size
+    best_score = float("inf")
+    min_size = max(6, int(base_size * 0.65))
+    max_size = max(min_size + 2, int(base_size * 1.5) + 2)
+    target_width = width * script_target_width_ratio(script, text)
+    target_height = height * script_target_height_ratio(script)
+
+    for size in range(min_size, min(max_size, 96) + 1):
+        measured_width, measured_height = measure_text_dimensions(text, size, font_path)
+        if measured_width <= 0 or measured_height <= 0:
+            continue
+        width_error = abs(measured_width - target_width) / max(target_width, 1.0)
+        height_error = abs(measured_height - target_height) / max(target_height, 1.0)
+        overflow_penalty = 0.0
+        if measured_width > width * 1.02:
+            overflow_penalty += (measured_width - width) / max(width, 1.0)
+        if measured_height > height * 1.02:
+            overflow_penalty += (measured_height - height) / max(height, 1.0)
+        score = width_error * 0.7 + height_error * 1.15 + overflow_penalty * 1.5
+        if score < best_score:
+            best_score = score
+            best_size = float(size)
+
+    return best_size
+
+
+def classify_text_script(text: str) -> str:
+    stripped = re.sub(r"\s+", "", text)
+    if not stripped:
+        return "other"
+    cjk_count = sum(1 for char in stripped if is_cjk(char))
+    latin_count = sum(1 for char in stripped if char.isascii() and char.isalpha())
+    numeric_count = sum(1 for char in stripped if char.isdigit())
+    counts = {
+        "cjk": cjk_count,
+        "latin": latin_count,
+        "numeric": numeric_count,
+    }
+    dominant = max(counts, key=counts.get)
+    dominant_count = counts[dominant]
+    if dominant_count == 0:
+        return "other"
+    if dominant_count >= len(stripped) * 0.8:
+        return dominant
+    return "mixed"
+
+
+def is_cjk(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+    )
+
+
+def choose_measurement_font(script: str) -> str | None:
+    candidates = [DEFAULT_FONT_PATH]
+    if script in {"cjk", "mixed"}:
+        candidates = [DEFAULT_CJK_FONT_PATH, DEFAULT_FONT_PATH]
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def script_target_width_ratio(script: str, text: str) -> float:
+    if script == "numeric":
+        return 0.88
+    if script == "latin":
+        return 0.92
+    if script == "cjk":
+        return 0.94
+    if "\n" in text:
+        return 0.96
+    return 0.93
+
+
+def script_target_height_ratio(script: str) -> float:
+    if script == "numeric":
+        return 0.82
+    if script == "latin":
+        return 0.84
+    if script == "cjk":
+        return 0.9
+    return 0.87
+
+
+@lru_cache(maxsize=512)
+def measure_text_dimensions(text: str, font_size: int, font_path: str) -> tuple[float, float]:
+    font = ImageFont.truetype(font_path, font_size)
+    lines = text.splitlines() or [text]
+    widths: list[float] = []
+    heights: list[float] = []
+    for line in lines:
+        sample = line or " "
+        left, top, right, bottom = font.getbbox(sample)
+        widths.append(float(right - left))
+        heights.append(float(bottom - top))
+    line_gap = max(0.0, font_size * 0.15)
+    total_height = sum(heights) + max(0, len(lines) - 1) * line_gap
+    return max(widths, default=0.0), total_height
 
 
 def estimate_text_color(color_crop: Image.Image, gray_crop: Image.Image) -> str:
@@ -586,6 +709,74 @@ def write_debug_artifacts(
         debug_dir / f"{prefix}_mask_overlay.png"
     )
     masked_image.convert("RGB").save(debug_dir / f"{prefix}_masked.png")
+
+
+def write_text_fit_debug_report(
+    *,
+    debug_dir: Path,
+    page_number: int,
+    text_blocks: list[TextBlock],
+) -> None:
+    entries = [build_text_fit_debug_entry(block) for block in text_blocks if block.source == "ocr"]
+    if not entries:
+        return
+
+    width_abs_ratios = [abs(entry["width_error_ratio"]) for entry in entries]
+    height_abs_ratios = [abs(entry["height_error_ratio"]) for entry in entries]
+    payload = {
+        "page": page_number,
+        "block_count": len(entries),
+        "summary": {
+            "mean_abs_width_error_ratio": round(sum(width_abs_ratios) / len(width_abs_ratios), 4),
+            "mean_abs_height_error_ratio": round(sum(height_abs_ratios) / len(height_abs_ratios), 4),
+            "max_abs_width_error_ratio": round(max(width_abs_ratios), 4),
+            "max_abs_height_error_ratio": round(max(height_abs_ratios), 4),
+        },
+        "blocks": entries,
+    }
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    output_path = debug_dir / f"page_{page_number:03d}_text_fit.json"
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def build_text_fit_debug_entry(block: TextBlock) -> dict[str, object]:
+    script = classify_text_script(block.text)
+    font_path = choose_measurement_font(script)
+    font_size = max(6.0, block.font_size or 12.0)
+    if font_path is None:
+        estimated_width = 0.0
+        estimated_height = 0.0
+    else:
+        estimated_width, estimated_height = measure_text_dimensions(
+            block.text,
+            max(1, int(round(font_size))),
+            font_path,
+        )
+
+    target_width = max(1.0, block.bbox[2] - block.bbox[0])
+    target_height = max(1.0, block.bbox[3] - block.bbox[1])
+    width_error = estimated_width - target_width
+    height_error = estimated_height - target_height
+
+    return {
+        "id": block.id,
+        "text": block.text,
+        "script": script,
+        "font_size_pt": round(font_size, 2),
+        "font_path": font_path,
+        "target_bbox_pt": {
+            "width": round(target_width, 2),
+            "height": round(target_height, 2),
+        },
+        "estimated_ppt_text_pt": {
+            "width": round(estimated_width, 2),
+            "height": round(estimated_height, 2),
+        },
+        "width_error_pt": round(width_error, 2),
+        "height_error_pt": round(height_error, 2),
+        "width_error_ratio": round(width_error / target_width, 4),
+        "height_error_ratio": round(height_error / target_height, 4),
+    }
 
 
 def build_mask_shapes(
