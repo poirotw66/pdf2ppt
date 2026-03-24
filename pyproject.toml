@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf2ppt"
+version = "0.1.0"
+description = "Hybrid PDF to editable PPTX converter"
+readme = "spec.md"
+requires-python = ">=3.11"
+dependencies = [
+  "PyMuPDF>=1.27.0",
+  "python-pptx>=1.0.0",
+  "paddleocr>=3.4.0",
+  "opencv-python-headless>=4.10.0",
+  "Pillow>=10.0.0",
+  "numpy>=1.26.0",
+]
+
+[project.scripts]
+pdf2ppt = "pdf2ppt.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
