@@ -22,6 +22,7 @@ The project is optimized for presentation-style documents and uses a hybrid pipe
   - `auto` routing
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
+- Show page-level conversion progress in the CLI.
 
 ## Requirements
 
@@ -160,6 +161,9 @@ Main arguments:
 - `--report`: path for the JSON conversion report
 - `--mode`: `editable`, `fidelity`, or `fast`
 - `--lang`: PaddleOCR language code, default `ch`
+- `--ocr-det-thresh`: PaddleOCR text detection threshold, optional, uses the PaddleOCR default when omitted
+- `--ocr-det-box-thresh`: PaddleOCR detection box threshold, optional, uses the PaddleOCR default when omitted
+- `--ocr-drop-score`: PaddleOCR recognition score threshold, optional, uses the PaddleOCR default when omitted
 - `--dpi`: render DPI for OCR and background generation
 - `--debug-dir`: directory for per-page debug images and analysis files
 - `--enable-doc-unwarping`: enable PaddleOCR UVDoc unwarping

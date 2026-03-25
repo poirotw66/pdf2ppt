@@ -1,9 +1,44 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+from typing import Callable, TextIO
 
 from .pipeline import ConversionOptions, convert_pdf
+
+
+def format_progress_line(completed: int, total: int, *, width: int = 24) -> str:
+    if total <= 0:
+        return "Converting pages [------------------------] 0/0 (  0%)"
+    safe_completed = min(max(completed, 0), total)
+    filled = int(round((safe_completed / total) * width))
+    bar = "#" * filled + "-" * (width - filled)
+    percent = int(round((safe_completed / total) * 100))
+    return f"Converting pages [{bar}] {safe_completed}/{total} ({percent:>3}%)"
+
+
+def build_progress_callback(
+    stream: TextIO,
+    *,
+    width: int = 24,
+) -> Callable[[int, int], None]:
+    last_line: str | None = None
+    interactive = bool(getattr(stream, "isatty", lambda: False)())
+
+    def callback(completed: int, total: int) -> None:
+        nonlocal last_line
+        line = format_progress_line(completed, total, width=width)
+        if interactive:
+            stream.write(f"\r{line}")
+            if total > 0 and completed >= total:
+                stream.write("\n")
+        elif line != last_line:
+            stream.write(f"{line}\n")
+        stream.flush()
+        last_line = line
+
+    return callback
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +60,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--lang",
         default="ch",
         help="PaddleOCR language code. Defaults to 'ch' for Traditional/Chinese-heavy documents.",
+    )
+    parser.add_argument(
+        "--ocr-det-thresh",
+        type=float,
+        help="PaddleOCR text detection threshold. Omit to use the PaddleOCR default.",
+    )
+    parser.add_argument(
+        "--ocr-det-box-thresh",
+        type=float,
+        help="PaddleOCR text detection box threshold. Omit to use the PaddleOCR default.",
+    )
+    parser.add_argument(
+        "--ocr-drop-score",
+        type=float,
+        help="PaddleOCR recognition score threshold. Omit to use the PaddleOCR default.",
     )
     parser.add_argument(
         "--dpi",
@@ -101,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
         report_path=report_path,
         mode=args.mode,
         lang=args.lang,
+        ocr_det_thresh=args.ocr_det_thresh,
+        ocr_det_box_thresh=args.ocr_det_box_thresh,
+        ocr_drop_score=args.ocr_drop_score,
         render_dpi=args.dpi,
         debug_dir=args.debug_dir or args.output_pptx.with_suffix("").with_name(f"{args.output_pptx.stem}_debug"),
         use_doc_unwarping=args.enable_doc_unwarping,
@@ -113,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         diffusion_max_crop_edge=args.diffusion_max_crop_edge,
         diffusion_complexity_threshold=args.diffusion_complexity_threshold,
     )
-    report = convert_pdf(options)
+    report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
     print(
         f"Converted {report.input_path} -> {report.output_path} "
         f"({len(report.pages)} pages, report: {report_path})"

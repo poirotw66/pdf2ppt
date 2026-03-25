@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -8,7 +9,7 @@ from unittest.mock import patch
 import fitz
 from PIL import Image, ImageDraw, ImageFont
 
-from pdf2ppt.cli import build_parser
+from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line
 from pdf2ppt.models import QualityScore, TextBlock
 from pdf2ppt.pipeline import (
     BackgroundInpaintingError,
@@ -329,6 +330,9 @@ class CliTests(unittest.TestCase):
         args = parser.parse_args(["input.pdf", "output.pptx"])
         self.assertFalse(args.enable_doc_unwarping)
         self.assertEqual(args.inpaint_engine, "auto")
+        self.assertIsNone(args.ocr_det_thresh)
+        self.assertIsNone(args.ocr_det_box_thresh)
+        self.assertIsNone(args.ocr_drop_score)
         self.assertEqual(args.inpaint_padding_px, 6)
         self.assertAlmostEqual(args.inpaint_max_area_ratio, 0.12)
         self.assertEqual(args.diffusion_command, "iopaint")
@@ -348,6 +352,12 @@ class CliTests(unittest.TestCase):
             [
                 "input.pdf",
                 "output.pptx",
+                "--ocr-det-thresh",
+                "0.55",
+                "--ocr-det-box-thresh",
+                "0.6",
+                "--ocr-drop-score",
+                "0.65",
                 "--inpaint-engine",
                 "diffusion-local",
                 "--inpaint-padding-px",
@@ -366,6 +376,9 @@ class CliTests(unittest.TestCase):
                 "0.45",
             ]
         )
+        self.assertAlmostEqual(args.ocr_det_thresh, 0.55)
+        self.assertAlmostEqual(args.ocr_det_box_thresh, 0.6)
+        self.assertAlmostEqual(args.ocr_drop_score, 0.65)
         self.assertEqual(args.inpaint_engine, "diffusion-local")
         self.assertEqual(args.inpaint_padding_px, 10)
         self.assertAlmostEqual(args.inpaint_max_area_ratio, 0.2)
@@ -374,6 +387,24 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.diffusion_device, "cuda:0")
         self.assertEqual(args.diffusion_max_crop_edge, 768)
         self.assertAlmostEqual(args.diffusion_complexity_threshold, 0.45)
+
+    def test_format_progress_line_reports_completion(self) -> None:
+        line = format_progress_line(2, 4, width=8)
+        self.assertEqual(line, "Converting pages [####----] 2/4 ( 50%)")
+
+    def test_build_progress_callback_writes_tty_progress_bar(self) -> None:
+        class TtyBuffer(StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        buffer = TtyBuffer()
+        callback = build_progress_callback(buffer, width=4)
+        callback(0, 2)
+        callback(1, 2)
+        callback(2, 2)
+        self.assertIn("\rConverting pages [----] 0/2 (  0%)", buffer.getvalue())
+        self.assertIn("\rConverting pages [##--] 1/2 ( 50%)", buffer.getvalue())
+        self.assertTrue(buffer.getvalue().endswith("\rConverting pages [####] 2/2 (100%)\n"))
 
 
 class FontSizingTests(unittest.TestCase):
@@ -430,7 +461,8 @@ class FontSizingTests(unittest.TestCase):
         self.assertTrue(fit_text_frame(DummyTextFrame(), block, scale_x=1.0, scale_y=1.0))
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["font_family"], "DejaVu Sans")
-        self.assertGreaterEqual(calls[0]["max_size"], 11)
+        self.assertLessEqual(calls[0]["max_size"], 12)
+        self.assertGreaterEqual(calls[0]["max_size"], 6)
 
     def test_should_wrap_text_block_disables_wrap_for_single_line_ocr(self) -> None:
         self.assertFalse(

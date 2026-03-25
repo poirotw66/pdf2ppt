@@ -22,6 +22,7 @@
   - `auto` 自動路由
 - 每次轉換都可輸出 JSON 報告。
 - 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
+- CLI 會顯示逐頁轉換進度條。
 
 ## 環境需求
 
@@ -160,6 +161,9 @@ pdf2ppt input.pdf output.pptx \
 - `--report`：JSON report 輸出路徑
 - `--mode`：`editable`、`fidelity`、`fast`
 - `--lang`：PaddleOCR 語言代碼，預設為 `ch`
+- `--ocr-det-thresh`：PaddleOCR 文字偵測門檻，可選；省略時使用 PaddleOCR 官方預設
+- `--ocr-det-box-thresh`：PaddleOCR 偵測框門檻，可選；省略時使用 PaddleOCR 官方預設
+- `--ocr-drop-score`：PaddleOCR 辨識分數門檻，可選；省略時使用 PaddleOCR 官方預設
 - `--dpi`：OCR 與背景生成的渲染 DPI
 - `--debug-dir`：逐頁 debug 圖與分析檔輸出資料夾
 - `--enable-doc-unwarping`：啟用 PaddleOCR UVDoc 去扭曲

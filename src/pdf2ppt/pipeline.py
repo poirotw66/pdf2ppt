@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import fitz
@@ -38,6 +38,9 @@ class ConversionOptions:
     report_path: Path
     mode: str = "editable"
     lang: str = "ch"
+    ocr_det_thresh: float | None = None
+    ocr_det_box_thresh: float | None = None
+    ocr_drop_score: float | None = None
     render_dpi: int = 144
     debug_dir: Path | None = None
     use_doc_unwarping: bool = False
@@ -154,9 +157,20 @@ class DiffusionLocalInpaintingEngine(BackgroundInpaintingEngine):
 
 
 class OcrEngine:
-    def __init__(self, lang: str, *, use_doc_unwarping: bool) -> None:
+    def __init__(
+        self,
+        lang: str,
+        *,
+        use_doc_unwarping: bool,
+        det_thresh: float | None,
+        det_box_thresh: float | None,
+        drop_score: float | None,
+    ) -> None:
         self.lang = lang
         self.use_doc_unwarping = use_doc_unwarping
+        self.det_thresh = det_thresh
+        self.det_box_thresh = det_box_thresh
+        self.drop_score = drop_score
         self._engine: Any | None = None
 
     def _get_engine(self) -> Any:
@@ -164,11 +178,21 @@ class OcrEngine:
             os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
             from paddleocr import PaddleOCR
 
+            engine_kwargs: dict[str, Any] = {
+                "lang": self.lang,
+                "ocr_version": "PP-OCRv5",
+                "use_doc_orientation_classify": True,
+                "use_doc_unwarping": self.use_doc_unwarping,
+            }
+            if self.det_thresh is not None:
+                engine_kwargs["text_det_thresh"] = self.det_thresh
+            if self.det_box_thresh is not None:
+                engine_kwargs["text_det_box_thresh"] = self.det_box_thresh
+            if self.drop_score is not None:
+                engine_kwargs["text_rec_score_thresh"] = self.drop_score
+
             self._engine = PaddleOCR(
-                lang=self.lang,
-                ocr_version="PP-OCRv5",
-                use_doc_orientation_classify=True,
-                use_doc_unwarping=self.use_doc_unwarping,
+                **engine_kwargs,
             )
         return self._engine
 
@@ -189,13 +213,23 @@ class OcrEngine:
         return OcrPageData(blocks=blocks, image=reference_image)
 
 
-def convert_pdf(options: ConversionOptions) -> ConversionReport:
+ProgressCallback = Callable[[int, int], None]
+
+
+def convert_pdf(
+    options: ConversionOptions,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> ConversionReport:
     options.output_path.parent.mkdir(parents=True, exist_ok=True)
     options.report_path.parent.mkdir(parents=True, exist_ok=True)
 
     ocr_engine = OcrEngine(
         lang=options.lang,
         use_doc_unwarping=options.use_doc_unwarping,
+        det_thresh=options.ocr_det_thresh,
+        det_box_thresh=options.ocr_det_box_thresh,
+        drop_score=options.ocr_drop_score,
     )
     page_results: list[PageResult] = []
 
@@ -205,8 +239,11 @@ def convert_pdf(options: ConversionOptions) -> ConversionReport:
         presentation.slide_width = pt_to_emu(first_page.rect.width)
         presentation.slide_height = pt_to_emu(first_page.rect.height)
         blank_layout = presentation.slide_layouts[6]
+        total_pages = document.page_count
+        if progress_callback is not None:
+            progress_callback(0, total_pages)
 
-        for page_index in range(document.page_count):
+        for page_index in range(total_pages):
             page = document[page_index]
             page_result = analyze_page(page, options, ocr_engine)
             page_results.append(page_result)
@@ -217,6 +254,8 @@ def convert_pdf(options: ConversionOptions) -> ConversionReport:
                 slide_width_pt=first_page.rect.width,
                 slide_height_pt=first_page.rect.height,
             )
+            if progress_callback is not None:
+                progress_callback(page_index + 1, total_pages)
 
         presentation.save(options.output_path)
 
@@ -387,13 +426,16 @@ def fit_text_frame(text_frame: Any, block: TextBlock, *, scale_x: float, scale_y
 
     font_family = block.font_family or default_font_family(script)
     base_size = max(6, int(round((block.font_size or 12.0) * min(scale_x, scale_y))))
-    max_size = resolve_ocr_fit_max_size(
+    max_size = min(
+        base_size,
+        resolve_ocr_fit_max_size(
         block,
         font_path=font_path,
         base_size=base_size,
         scale_x=scale_x,
         scale_y=scale_y,
         script=script,
+        ),
     )
     try:
         text_frame.fit_text(

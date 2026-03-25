@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 spec.md
 src/pdf2ppt/__init__.py
