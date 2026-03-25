@@ -1,0 +1,327 @@
+Metadata-Version: 2.4
+Name: pdf2ppt
+Version: 0.1.0
+Summary: Hybrid PDF to editable PPTX converter
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: PyMuPDF>=1.27.0
+Requires-Dist: python-pptx>=1.0.0
+Requires-Dist: paddleocr>=3.4.0
+Requires-Dist: opencv-python-headless>=4.10.0
+Requires-Dist: Pillow>=10.0.0
+Requires-Dist: numpy>=1.26.0
+
+# PDF 轉 PPT 工具規格書（優化版）
+
+## 1. 產品定位
+
+本系統為一套 **PDF 轉可編輯 PPTX** 的轉換工具，採用 **原生 PDF 解析優先、PP-OCRv5 補強、版面分析、條件式去字與多級回退** 的混合式轉換架構，以在「保留視覺相似度」與「提升可編輯性」之間取得平衡。PP-OCRv5 官方支援繁中、英文等主要文字類型，適合用於你的繁中簡報場景。([paddleocr.ai][1])
+
+## 2. 核心設計原則
+
+第一原則是 **能不用 OCR 就不用 OCR**。對可抽取文字的 PDF，優先使用 PDF 原生文字物件、字型與座標資訊；對掃描頁或圖片型頁面，再使用 PP-OCRv5。第二原則是 **版面先分區，再重建**，避免文字、表格、圖片互相干擾。第三原則是 **分級輸出**，當某頁無法完整還原時，仍能產出可用結果。這些做法與 PyMuPDF 的文字抽取能力、PaddleOCR 的 layout/document preprocessing 模組能力相符。([pymupdf.readthedocs.io][3])
+
+## 3. 系統處理流程（修正版）
+
+你原本的 6 步驟可以改成下面這版：
+
+1. 上傳 PDF / 建立任務
+2. **PDF 類型判斷**（Digital / Scanned / Hybrid）
+3. 頁面預覽與頁面渲染
+4. **版面分析**（標題、段落、圖片、表格、頁眉頁尾等）
+5. 文字取得
+
+   * Digital PDF：原生抽取優先
+   * Scanned / Hybrid：PP-OCRv5 偵測 + 辨識
+6. 樣式恢復
+
+   * 原生 span 樣式優先
+   * OCR 頁面走估算與 fallback
+7. 背景生成
+
+   * 能分離元素就不整頁貼底圖
+   * 必要時才做去字 / inpainting
+8. PPTX 生成
+9. 品質檢查與回退
+10. 完成 / 下載結果
+
+這個流程比原版更穩，因為它把「去字」從固定步驟改成條件式步驟，也加入了 PDF 類型判斷與版面分析。PaddleOCR 的 document orientation、text image unwarping 與 layout analysis 都可以插入這個流程。([paddleocr.ai][6])
+
+## 4. 模型與引擎規格
+
+### 4.1 OCR
+
+* 文字偵測：**PP-OCRv5 Detection**
+* 文字辨識：**PP-OCRv5 Recognition**
+* 適用頁型：掃描頁、圖片頁、原生抽取失敗區塊
+* 支援語系：繁中、英文、日文等主要類型。([paddleocr.ai][1])
+
+### 4.2 文件前處理
+
+* 文件方向校正：PaddleOCR document orientation classification
+* 影像去扭曲：text image unwarping
+* 啟用時機：掃描頁、拍照頁、歪斜頁。([paddleocr.ai][6])
+
+### 4.3 版面分析
+
+* 模組：PaddleOCR Layout Analysis / Layout Detection
+* 目標：辨識標題、內文、圖片、表格等區塊，建立閱讀順序。([paddleocr.ai][4])
+
+### 4.4 PDF 原生解析
+
+* 引擎：PyMuPDF 為主，必要時可輔以 pdfplumber 做字符級或表格輔助分析
+* 可取得資訊：words、blocks、spans、位置資訊，部分情況可取得 font / size / color。([pymupdf.readthedocs.io][3])
+
+### 4.5 PPTX 生成
+
+* 引擎：python-pptx
+* 可用能力：新增 slide、text box、picture、控制文字框、使用 fit_text / 長度單位工具。([python-pptx.readthedocs.io][7])
+
+---
+
+## 5. 頁面分類規則
+
+這一段建議你正式寫進規格書，因為它會直接影響準確率與成本。
+
+### 5.1 Digital PDF
+
+判定條件：
+
+* 可從 PDF 抽到足量文字物件
+* 抽出的文字區塊與頁面視覺位置能對齊
+
+處理策略：
+
+* 直接用 PyMuPDF 抽 text blocks / spans
+* 不走全頁 OCR
+* 樣式以 PDF 原生資訊為主
+* 非文字元素另行抽取或底圖化。([pymupdf.readthedocs.io][3])
+
+### 5.2 Scanned PDF
+
+判定條件：
+
+* 幾乎抽不到原生文字
+* 頁面主要由 raster image 組成
+
+處理策略：
+
+* 啟用方向校正與去扭曲
+* 使用 PP-OCRv5 做 detection + recognition
+* 必要時做去字與背景重建。([paddleocr.ai][6])
+
+### 5.3 Hybrid PDF
+
+判定條件：
+
+* 同頁同時含原生文字與圖片文字
+* 或頁內局部區塊可原生抽取、局部需 OCR
+
+處理策略：
+
+* 區塊級決策
+* 原生文字區塊優先
+* 無法抽取區塊再 OCR。
+  這是工程上的最佳化策略，但是否採區塊級或頁級，可視時程選擇。PyMuPDF 與 OCR block 資訊足以支持此設計。([pymupdf.readthedocs.io][3])
+
+---
+
+## 6. 優化後功能規格
+
+### 6.1 上傳與預覽
+
+除原本的檔名、大小、頁數、縮圖外，建議新增：
+
+* 預估頁型比例：digital / scanned / hybrid
+* 預估輸出等級：高可編輯 / 標準 / 底圖優先
+* 可選擇轉換模式：高擬真 / 高可編輯 / 快速模式
+
+這能讓使用者在轉換前理解結果預期。這是基於混合式文件處理實務上的產品建議。([paddleocr.ai][2])
+
+### 6.2 PDF 解析與渲染
+
+規格應拆成兩條管線：
+
+* **原生解析管線**：抽取 blocks / words / spans / images / drawing cues
+* **影像渲染管線**：頁面轉圖供 OCR、版面分析、預覽使用
+
+不要只寫「轉成圖片」。因為只轉圖會直接損失原生字型與向量資訊。PyMuPDF 本身就擅長文件抽取與轉換。([pymupdf.readthedocs.io][8])
+
+### 6.3 文字取得
+
+原規格應改成「文字取得模組」，而不是只有「偵測文字」。
+
+輸出建議分兩層：
+
+* **logical_text_blocks**：段落 / 標題 / 列表等邏輯塊
+* **render_text_spans**：實際需在 PPT 重建的細粒度文字片段
+
+資料結構建議：
+
+```json
+{
+  "page": 1,
+  "source_type": "digital|ocr|hybrid",
+  "text_blocks": [
+    {
+      "id": "tb_001",
+      "source": "native",
+      "bbox": [120, 80, 860, 150],
+      "text": "2025 年度營運規劃",
+      "confidence": 0.99,
+      "font_family": "Noto Sans TC",
+      "font_size": 28,
+      "font_color": "#1F1F1F",
+      "bold": true,
+      "italic": false,
+      "reading_order": 1,
+      "block_role": "title"
+    }
+  ]
+}
+```
+
+PyMuPDF 的 words / blocks / dict / textpage 能支援位置與細節資訊；PP-OCRv5 則適合補足 OCR 區塊。([pymupdf.readthedocs.io][3])
+
+### 6.4 文字移除與背景重建
+
+這段要重寫成 **「條件式背景生成」**。
+
+建議分 3 種模式：
+
+* **模式 A：元素分離模式**
+  對 digital PDF，不生成整頁背景圖，直接重建文字，圖片與圖形另行處理。
+* **模式 B：底圖 + 文字覆蓋模式**
+  產生背景圖，但只移除將要重建的文字區域。
+* **模式 C：整頁底圖模式**
+  失敗頁或高風險頁直接整頁貼圖。
+
+只有 B 模式需要去字。OpenCV 官方與文件影像修補相關研究都指出，inpainting 比較適合影像上的文字消除，但效果會受到背景複雜度影響。([OpenCV][9])
+
+### 6.5 PPTX 生成
+
+這段建議補 4 個規則：
+
+**(a) 投影片尺寸**
+需支援依原始 PDF 頁面比例建立 slide size，避免先天變形。python-pptx 可用長度單位與 slide API 進行尺寸控制。([python-pptx-fix.readthedocs.io][10])
+
+**(b) 文字框生成策略**
+優先用多行文字框重建段落，不要把每一行都拆成獨立 textbox，否則後續編輯體驗會很差。必要時可用 fit_text 或文字框自適應策略做微調。([python-pptx.readthedocs.io][11])
+
+**(c) 圖片與圖表策略**
+v1 不強求圖表語意重建，先以圖片保真為主。因為 python-pptx 雖可加 chart，但要把 PDF 圖表逆向還原成真正的 chart object，成本高且穩定性差。([python-pptx.readthedocs.io][12])
+
+**(d) 單位換算**
+規格書要直接定義影像像素、PDF point、PPT EMU 三者的轉換責任，避免工程實作時每個模組各算各的。python-pptx 的長度類別可處理 Emu / Pt / Inches 等。([python-pptx-fix.readthedocs.io][10])
+
+---
+
+## 7. 新增一段：品質評分與回退策略
+
+這是目前規格書最欠缺、但實務上最重要的一段。
+
+每頁轉換後都應產生 `quality_score`，至少包含：
+
+* `text_confidence`
+* `layout_overlap_score`
+* `style_recovery_score`
+* `editable_ratio`
+
+並定義回退規則：
+
+* `editable_ratio >= 0.8`：輸出可編輯頁
+* `0.4 <= editable_ratio < 0.8`：底圖 + 可編輯文字
+* `< 0.4`：整頁圖片模式
+
+這是工程與產品面都很重要的保險絲，因為 OCR 與 PDF 結構差異很大，沒有回退策略就很難穩定交付。這段是基於前述工具能力與文件型態差異所做的系統設計建議。([pymupdf.readthedocs.io][3])
+
+---
+
+## 8. 非功能需求（建議加強）
+
+### 效能
+
+建議把單頁 SLA 分成不同模式，不要只訂一個數字：
+
+* digital PDF：較快
+* scanned PDF：較慢
+* hybrid PDF：中等
+  因為原生抽取與 OCR 成本本來就不同。這是從工具能力差異推導出的合理規格拆分。([pymupdf.readthedocs.io][3])
+
+### 可觀測性
+
+每頁保留：
+
+* 原生解析結果
+* OCR 結果
+* 版面分析結果
+* 最終 PPT 元件清單
+* 回退原因
+  這樣才方便除錯與 A/B 測試。這是混合管線系統的必要工程設計。
+
+### 安全性
+
+補上：
+
+* 暫存檔加密或隔離
+* 任務完成後刪除策略
+* 不落地模式選項（若未來做企業版）
+  這些是文件處理服務常見要求，屬通用工程建議。
+
+---
+
+## 9. 驗收標準（重寫版）
+
+原本的「文字可編輯率 ≥ 85%」太粗。建議拆成：
+
+### 功能驗收
+
+* 可上傳 PDF 並建立任務
+* 可判定頁型：digital / scanned / hybrid
+* 掃描頁可使用 PP-OCRv5 完成 detection + recognition
+* 可輸出 PPTX 並成功開啟
+* 可顯示逐頁進度與錯誤訊息
+
+### 品質驗收
+
+* Digital PDF：文字重建準確率高於 scanned PDF
+* 原生文字頁可保留主要字型、字級、顏色資訊
+* 掃描頁在複雜背景時允許退回底圖模式
+* 每頁都能標示輸出等級與回退原因
+
+### 體驗驗收
+
+* 使用者能在完成前看到預估模式與處理進度
+* 使用者能下載完整結果與錯誤報告
+* 部分失敗不影響整體交付
+
+這樣比單一命中率更適合產品驗收。
+
+---
+
+## 10. 我對你原規格書的最終審視結論
+
+你的原版規格書已經有一個不錯的骨架，但它有 4 個結構性問題：
+
+1. **把所有 PDF 都視為 OCR 問題**，會讓 digital PDF 的品質與速度都吃虧。([paddleocr.ai][2])
+2. **把去字當成必要步驟**，其實應改為條件式步驟。([OpenCV][9])
+3. **沒有 layout analysis 層**，會影響閱讀順序、表格/圖片區分與最終可編輯性。([paddleocr.ai][4])
+4. **沒有品質分級與回退設計**，實作後會很難穩定交付。這是從現有工具能力與 PDF 多樣性推導出的高風險缺口。([pymupdf.readthedocs.io][3])
+
+如果你要往可落地版本推進，我建議你的 **v1 規格** 應該改成：
+
+* **v1**
+
+  * Digital PDF：原生文字抽取 + 基本圖片保留 + PPT 重建
+  * Scanned PDF：PP-OCRv5 + 底圖 + 可編輯文字覆蓋
+  * 回退：整頁圖片模式
+* **v1.5**
+
+  * 加入 layout analysis
+  * 改善段落合併、標題判斷、頁眉頁尾過濾
+  * 改善字型/顏色估計
+* **v2**
+
+  * 表格、圖表、向量元素進階重建
+  * 區塊級 hybrid 決策
+  * 更高可編輯率與更好的 fidelity

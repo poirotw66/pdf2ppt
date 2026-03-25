@@ -1,1 +1,4 @@
 output_debug/
+rag_diffusion_debug/
+rag_opencv_debug/
+__pycache__/

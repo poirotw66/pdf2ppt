@@ -57,6 +57,8 @@ class PageResult:
     text_blocks: list[TextBlock]
     quality_score: QualityScore
     fallback_reason: str | None
+    background_inpaint_engine: str | None = None
+    background_inpaint_note: str | None = None
     background_png: bytes | None = field(default=None, repr=False)
     image_elements: list[ImagePlacement] = field(default_factory=list, repr=False)
 
@@ -68,6 +70,8 @@ class PageResult:
             "page_size_pt": [self.width_pt, self.height_pt],
             "quality_score": self.quality_score.to_dict(),
             "fallback_reason": self.fallback_reason,
+            "background_inpaint_engine": self.background_inpaint_engine,
+            "background_inpaint_note": self.background_inpaint_note,
             "text_blocks": [block.to_dict() for block in self.text_blocks],
         }
 

@@ -4,6 +4,9 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
@@ -11,9 +14,10 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
+import cv2
 import fitz
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageStat
+from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
@@ -37,6 +41,14 @@ class ConversionOptions:
     render_dpi: int = 144
     debug_dir: Path | None = None
     use_doc_unwarping: bool = False
+    inpaint_engine: str = "auto"
+    inpaint_padding_px: int = 6
+    inpaint_max_area_ratio: float = 0.12
+    diffusion_command: str = "iopaint"
+    diffusion_model: str = "brushnet"
+    diffusion_device: str = "cuda"
+    diffusion_max_crop_edge: int = 1024
+    diffusion_complexity_threshold: float = 0.3
 
 
 @dataclass(slots=True)
@@ -51,6 +63,94 @@ class PageSignals:
 class OcrPageData:
     blocks: list[TextBlock]
     image: Image.Image
+
+
+@dataclass(slots=True)
+class BackgroundRenderResult:
+    image: Image.Image
+    engine_name: str | None
+    note: str | None
+    mask_image: Image.Image | None = None
+
+
+class BackgroundInpaintingError(RuntimeError):
+    pass
+
+
+class BackgroundInpaintingEngine:
+    name = "base"
+
+    def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
+        raise NotImplementedError
+
+
+class WhiteBoxInpaintingEngine(BackgroundInpaintingEngine):
+    name = "white-box"
+
+    def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
+        mask_array = np.array(mask_image.convert("L")) > 0
+        result = np.array(page_image.convert("RGB"), copy=True)
+        result[mask_array] = 255
+        return Image.fromarray(result, mode="RGB")
+
+
+class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
+    name = "opencv-fast"
+
+    def __init__(self, *, radius: float = 3.0) -> None:
+        self.radius = radius
+
+    def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
+        mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
+        if np.count_nonzero(mask_array) == 0:
+            return page_image.convert("RGB").copy()
+        source = cv2.cvtColor(np.array(page_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        repaired = cv2.inpaint(source, mask_array, self.radius, cv2.INPAINT_TELEA)
+        return Image.fromarray(cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB))
+
+
+class DiffusionLocalInpaintingEngine(BackgroundInpaintingEngine):
+    name = "diffusion-local"
+
+    def __init__(
+        self,
+        *,
+        command: str,
+        model: str,
+        device: str,
+        max_crop_edge: int,
+        crop_padding_px: int,
+    ) -> None:
+        self.command = command
+        self.model = model
+        self.device = device
+        self.max_crop_edge = max(64, max_crop_edge)
+        self.crop_padding_px = max(0, crop_padding_px)
+
+    def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
+        if shutil.which(self.command) is None:
+            raise BackgroundInpaintingError(
+                f"Diffusion backend command '{self.command}' was not found in PATH."
+            )
+
+        crop_box = compute_mask_crop_box(mask_image, padding_px=self.crop_padding_px)
+        if crop_box is None:
+            return page_image.convert("RGB").copy()
+
+        base_image = page_image.convert("RGB")
+        crop_image = base_image.crop(crop_box)
+        crop_mask = mask_image.convert("L").crop(crop_box)
+        processed_crop = invoke_diffusion_backend(
+            crop_image,
+            crop_mask,
+            command=self.command,
+            model=self.model,
+            device=self.device,
+            max_crop_edge=self.max_crop_edge,
+        )
+        result = base_image.copy()
+        result.paste(processed_crop, crop_box)
+        return result
 
 
 class OcrEngine:
@@ -158,17 +258,25 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
 
     background_png: bytes | None = None
     image_elements: list[ImagePlacement] = []
+    background_inpaint_engine: str | None = None
+    background_inpaint_note: str | None = None
+    mask_image: Image.Image | None = None
     if background_mode == "elements":
         image_elements = extract_image_elements(page, image_boxes, options.render_dpi)
     else:
         background_image = ocr_reference_image if need_ocr else page_image
         if background_mode == "overlay" and text_blocks:
             mask_blocks = [block for block in text_blocks if block.source == "ocr"] or text_blocks
-            background_image = mask_text_regions_with_white_boxes(
+            background_result = render_overlay_background(
                 background_image,
                 mask_blocks,
                 page.rect,
+                options=options,
             )
+            background_image = background_result.image
+            background_inpaint_engine = background_result.engine_name
+            background_inpaint_note = background_result.note
+            mask_image = background_result.mask_image
         background_png = pil_to_png_bytes(background_image)
 
     if options.debug_dir is not None and ocr_blocks:
@@ -177,8 +285,11 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
             page_number=page.number + 1,
             page_image=ocr_reference_image,
             masked_image=background_image if background_mode == "overlay" else ocr_reference_image,
+            mask_image=mask_image,
             text_blocks=[block for block in text_blocks if block.source == "ocr"] or ocr_blocks,
             page_rect=page.rect,
+            engine_name=background_inpaint_engine,
+            engine_note=background_inpaint_note,
         )
         write_text_fit_debug_report(
             debug_dir=options.debug_dir,
@@ -195,6 +306,8 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         text_blocks=text_blocks if background_mode != "full-page" else [],
         quality_score=quality,
         fallback_reason=fallback_reason,
+        background_inpaint_engine=background_inpaint_engine,
+        background_inpaint_note=background_inpaint_note,
         background_png=background_png,
         image_elements=image_elements,
     )
@@ -239,7 +352,7 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
     left, top, width, height = bbox_to_shape_geometry(block.bbox, scale_x, scale_y)
     textbox = slide.shapes.add_textbox(left, top, max(width, Emu(1)), max(height, Emu(1)))
     text_frame = textbox.text_frame
-    text_frame.word_wrap = True
+    text_frame.word_wrap = should_wrap_text_block(block)
     text_frame.margin_left = 0
     text_frame.margin_right = 0
     text_frame.margin_top = 0
@@ -251,16 +364,78 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
     paragraph.alignment = PP_ALIGN.LEFT
     run = paragraph.add_run()
     run.text = block.text
+    used_fit_text = fit_text_frame(text_frame, block, scale_x=scale_x, scale_y=scale_y)
 
     font = run.font
     if block.font_family:
         font.name = block.font_family
-    if block.font_size:
+    if block.font_size and not used_fit_text:
         font.size = Pt(max(6.0, block.font_size * min(scale_x, scale_y)))
     if block.font_color:
         font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
     font.bold = block.bold
     font.italic = block.italic
+
+
+def fit_text_frame(text_frame: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> bool:
+    if block.source != "ocr" or not block.text.strip():
+        return False
+    script = classify_text_script(block.text)
+    font_path = choose_measurement_font(script)
+    if font_path is None:
+        return False
+
+    font_family = block.font_family or default_font_family(script)
+    base_size = max(6, int(round((block.font_size or 12.0) * min(scale_x, scale_y))))
+    max_size = resolve_ocr_fit_max_size(
+        block,
+        font_path=font_path,
+        base_size=base_size,
+        scale_x=scale_x,
+        scale_y=scale_y,
+        script=script,
+    )
+    try:
+        text_frame.fit_text(
+            font_family=font_family,
+            max_size=max_size,
+            bold=block.bold,
+            italic=block.italic,
+            font_file=font_path,
+        )
+        return True
+    except TypeError:
+        return False
+
+
+def should_wrap_text_block(block: TextBlock) -> bool:
+    if block.source == "ocr" and "\n" not in block.text:
+        return False
+    return True
+
+
+def resolve_ocr_fit_max_size(
+    block: TextBlock,
+    *,
+    font_path: str,
+    base_size: int,
+    scale_x: float,
+    scale_y: float,
+    script: str,
+) -> int:
+    height_pt = max(1.0, (block.bbox[3] - block.bbox[1]) * scale_y)
+    max_size = min(96, max(base_size + 3, int(round(height_pt * ocr_fit_height_cap_ratio(script)))))
+    if "\n" in block.text:
+        return max_size
+
+    width_pt = max(1.0, (block.bbox[2] - block.bbox[0]) * scale_x)
+    width_limit = width_pt * single_line_fit_width_ratio(script)
+    size_cap = max(6, max_size)
+    for size in range(size_cap, 5, -1):
+        measured_width, measured_height = measure_text_dimensions(block.text, size, font_path)
+        if measured_width <= width_limit and measured_height <= height_pt * 1.03:
+            return size
+    return min(base_size, max_size)
 
 
 def render_page_image(page: fitz.Page, dpi: int) -> Image.Image:
@@ -464,6 +639,7 @@ def enrich_ocr_blocks(blocks: list[TextBlock], image: Image.Image) -> list[TextB
         crop = safe_crop(image, block.bbox)
         gray_crop = safe_crop(grayscale, block.bbox)
         color = estimate_text_color(crop, gray_crop)
+        bold = estimate_text_bold(block.text, gray_crop)
         font_size = estimate_font_size(block.text, block.bbox)
         enriched.append(
             TextBlock(
@@ -475,7 +651,7 @@ def enrich_ocr_blocks(blocks: list[TextBlock], image: Image.Image) -> list[TextB
                 font_family=None,
                 font_size=font_size,
                 font_color=color,
-                bold=False,
+                bold=bold,
                 italic=False,
                 reading_order=block.reading_order,
                 block_role=block.block_role,
@@ -484,6 +660,7 @@ def enrich_ocr_blocks(blocks: list[TextBlock], image: Image.Image) -> list[TextB
             )
         )
     assign_block_roles(enriched)
+    promote_ocr_bold_blocks(enriched)
     return sort_text_blocks(enriched)
 
 
@@ -601,6 +778,12 @@ def choose_measurement_font(script: str) -> str | None:
     return None
 
 
+def default_font_family(script: str) -> str:
+    if script in {"cjk", "mixed"}:
+        return "Noto Sans CJK TC"
+    return "DejaVu Sans"
+
+
 def script_target_width_ratio(script: str, text: str) -> float:
     if script == "numeric":
         return 0.88
@@ -623,6 +806,26 @@ def script_target_height_ratio(script: str) -> float:
     return 0.87
 
 
+def ocr_fit_height_cap_ratio(script: str) -> float:
+    if script == "numeric":
+        return 1.25
+    if script == "latin":
+        return 1.18
+    if script == "cjk":
+        return 1.12
+    return 1.15
+
+
+def single_line_fit_width_ratio(script: str) -> float:
+    if script == "numeric":
+        return 0.92
+    if script == "latin":
+        return 0.96
+    if script == "cjk":
+        return 0.94
+    return 0.95
+
+
 @lru_cache(maxsize=512)
 def measure_text_dimensions(text: str, font_size: int, font_path: str) -> tuple[float, float]:
     font = ImageFont.truetype(font_path, font_size)
@@ -639,18 +842,92 @@ def measure_text_dimensions(text: str, font_size: int, font_path: str) -> tuple[
     return max(widths, default=0.0), total_height
 
 
+def extract_text_foreground_mask(gray_crop: Image.Image) -> np.ndarray | None:
+    gray = np.array(gray_crop.convert("L"), dtype=np.uint8)
+    if gray.size == 0:
+        return None
+    if float(np.std(gray)) < 6.0:
+        return None
+
+    samples = gray.reshape(-1, 1).astype(np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 12, 1.0)
+    _compactness, labels, centers = cv2.kmeans(
+        samples,
+        2,
+        None,
+        criteria,
+        4,
+        cv2.KMEANS_PP_CENTERS,
+    )
+    label_map = labels.reshape(gray.shape)
+    counts = np.bincount(labels.flatten(), minlength=2)
+    foreground_index = int(np.argmin(counts))
+    if counts[foreground_index] < max(4, int(gray.size * 0.01)):
+        foreground_index = int(np.argmax(np.abs(centers.flatten() - np.mean(gray))))
+    return label_map == foreground_index
+
+
 def estimate_text_color(color_crop: Image.Image, gray_crop: Image.Image) -> str:
     if color_crop.width == 0 or color_crop.height == 0:
         return "#1F1F1F"
-    color_stat = ImageStat.Stat(color_crop)
-    gray_stat = ImageStat.Stat(gray_crop)
-    mean_luma = gray_stat.mean[0]
-    if mean_luma < 120:
-        return "#FFFFFF"
-    mean_rgb = [int(channel) for channel in color_stat.mean[:3]]
-    if max(mean_rgb) - min(mean_rgb) < 10:
+    color = np.array(color_crop.convert("RGB"), dtype=np.uint8)
+    if color.size == 0:
         return "#1F1F1F"
-    return "#{:02X}{:02X}{:02X}".format(*mean_rgb)
+
+    foreground_mask = extract_text_foreground_mask(gray_crop)
+    if foreground_mask is None:
+        mean_rgb = tuple(int(round(channel)) for channel in np.mean(color.reshape(-1, 3), axis=0))
+        return "#{:02X}{:02X}{:02X}".format(*mean_rgb)
+
+    foreground_pixels = color[foreground_mask]
+    if foreground_pixels.size == 0:
+        foreground_pixels = color.reshape(-1, 3)
+
+    dominant_rgb = np.median(foreground_pixels, axis=0)
+    rgb = tuple(int(np.clip(round(channel), 0, 255)) for channel in dominant_rgb[:3])
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+
+def estimate_text_bold(text: str, gray_crop: Image.Image) -> bool:
+    foreground_mask = extract_text_foreground_mask(gray_crop)
+    if foreground_mask is None:
+        return False
+
+    foreground_pixels = int(np.count_nonzero(foreground_mask))
+    total_pixels = int(foreground_mask.size)
+    if foreground_pixels < max(12, int(total_pixels * 0.02)):
+        return False
+
+    ys, xs = np.where(foreground_mask)
+    if len(xs) == 0 or len(ys) == 0:
+        return False
+
+    bbox_width = max(1, int(xs.max() - xs.min() + 1))
+    bbox_height = max(1, int(ys.max() - ys.min() + 1))
+    bbox_area = bbox_width * bbox_height
+    fill_ratio = foreground_pixels / max(1, bbox_area)
+
+    mask_uint8 = (foreground_mask.astype(np.uint8) * 255)
+    distance = cv2.distanceTransform(mask_uint8, cv2.DIST_L2, 3)
+    mean_stroke = float(distance[foreground_mask].mean()) if foreground_pixels else 0.0
+    normalized_stroke = mean_stroke / max(1.0, bbox_height)
+
+    script = classify_text_script(text)
+    fill_threshold = {
+        "latin": 0.3,
+        "numeric": 0.34,
+        "cjk": 0.38,
+        "mixed": 0.34,
+        "other": 0.34,
+    }.get(script, 0.34)
+    stroke_threshold = {
+        "latin": 0.07,
+        "numeric": 0.075,
+        "cjk": 0.085,
+        "mixed": 0.078,
+        "other": 0.078,
+    }.get(script, 0.078)
+    return fill_ratio >= fill_threshold and normalized_stroke >= stroke_threshold
 
 
 def mask_text_regions_with_white_boxes(
@@ -658,15 +935,236 @@ def mask_text_regions_with_white_boxes(
     text_blocks: list[TextBlock],
     page_rect: fitz.Rect,
 ) -> Image.Image:
-    masked_image = page_image.convert("RGB").copy()
-    draw = ImageDraw.Draw(masked_image)
-    for shape in build_mask_shapes(text_blocks, page_image.size, page_rect):
-        if shape["kind"] == "polygon":
-            draw.polygon(shape["points"], fill=(255, 255, 255))
-        else:
-            draw.rectangle(shape["bbox"], fill=(255, 255, 255))
+    mask_image = build_text_mask_image(text_blocks, page_image.size, page_rect, padding_px=0)
+    return WhiteBoxInpaintingEngine().inpaint(page_image, mask_image)
 
-    return masked_image
+
+def build_text_mask_image(
+    text_blocks: list[TextBlock],
+    image_size: tuple[int, int],
+    page_rect: fitz.Rect,
+    *,
+    padding_px: int = 0,
+) -> Image.Image:
+    mask = Image.new("L", image_size, 0)
+    draw = ImageDraw.Draw(mask)
+    for shape in build_mask_shapes(text_blocks, image_size, page_rect):
+        if shape["kind"] == "polygon":
+            draw.polygon(shape["points"], fill=255)
+        else:
+            draw.rectangle(shape["bbox"], fill=255)
+
+    if padding_px <= 0:
+        return mask
+
+    mask_array = np.array(mask, dtype=np.uint8)
+    kernel_size = max(1, padding_px * 2 + 1)
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    expanded = cv2.dilate(mask_array, kernel, iterations=1)
+    return Image.fromarray(expanded, mode="L")
+
+
+def render_overlay_background(
+    page_image: Image.Image,
+    text_blocks: list[TextBlock],
+    page_rect: fitz.Rect,
+    *,
+    options: ConversionOptions,
+) -> BackgroundRenderResult:
+    mask_image = build_text_mask_image(
+        text_blocks,
+        page_image.size,
+        page_rect,
+        padding_px=max(0, options.inpaint_padding_px),
+    )
+    mask_array = np.array(mask_image, dtype=np.uint8)
+    if np.count_nonzero(mask_array) == 0:
+        return BackgroundRenderResult(
+            image=page_image.convert("RGB").copy(),
+            engine_name=None,
+            note="No overlay mask pixels were generated.",
+            mask_image=mask_image,
+        )
+
+    engine, note = resolve_background_inpainting_engine(page_image, mask_image, options)
+    fallback_engine = OpenCvFastInpaintingEngine() if mask_area_ratio(mask_array) <= options.inpaint_max_area_ratio else WhiteBoxInpaintingEngine()
+    if engine.name == fallback_engine.name:
+        return BackgroundRenderResult(
+            image=engine.inpaint(page_image, mask_image),
+            engine_name=engine.name,
+            note=note,
+            mask_image=mask_image,
+        )
+
+    try:
+        rendered_image = engine.inpaint(page_image, mask_image)
+        rendered_note = note
+    except BackgroundInpaintingError as error:
+        rendered_image = fallback_engine.inpaint(page_image, mask_image)
+        rendered_note = f"{note} Fallback to {fallback_engine.name}: {error}"
+    return BackgroundRenderResult(
+        image=rendered_image,
+        engine_name=engine.name if rendered_note == note else fallback_engine.name,
+        note=rendered_note,
+        mask_image=mask_image,
+    )
+
+
+def mask_area_ratio(mask_array: np.ndarray) -> float:
+    return float(np.count_nonzero(mask_array)) / float(mask_array.size)
+
+
+def estimate_background_complexity(page_image: Image.Image, mask_image: Image.Image) -> float:
+    image_array = np.array(page_image.convert("RGB"), dtype=np.uint8)
+    gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+    mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
+    kernel = np.ones((9, 9), dtype=np.uint8)
+    outer_ring = cv2.dilate(mask_array, kernel, iterations=1)
+    context_ring = np.logical_and(outer_ring > 0, mask_array == 0)
+    if not np.any(context_ring):
+        context_ring = mask_array == 0
+    context_pixels = gray[context_ring]
+    if context_pixels.size == 0:
+        return 0.0
+
+    luma_std = float(np.std(context_pixels))
+    edges = cv2.Canny(gray, 80, 160)
+    edge_density = float(np.count_nonzero(edges[context_ring])) / float(context_pixels.size)
+    variance_score = min(1.0, luma_std / 64.0)
+    edge_score = min(1.0, edge_density / 0.12)
+    return round(variance_score * 0.65 + edge_score * 0.35, 4)
+
+
+def compute_mask_crop_box(mask_image: Image.Image, *, padding_px: int) -> tuple[int, int, int, int] | None:
+    mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
+    points = cv2.findNonZero(mask_array)
+    if points is None:
+        return None
+    x, y, width, height = cv2.boundingRect(points)
+    image_width, image_height = mask_image.size
+    left = max(0, x - padding_px)
+    top = max(0, y - padding_px)
+    right = min(image_width, x + width + padding_px)
+    bottom = min(image_height, y + height + padding_px)
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def invoke_diffusion_backend(
+    crop_image: Image.Image,
+    crop_mask: Image.Image,
+    *,
+    command: str,
+    model: str,
+    device: str,
+    max_crop_edge: int,
+) -> Image.Image:
+    prepared_image = crop_image.convert("RGB")
+    prepared_mask = crop_mask.convert("L")
+    original_size = prepared_image.size
+    longest_edge = max(original_size)
+    if longest_edge > max_crop_edge:
+        scale = float(max_crop_edge) / float(longest_edge)
+        resized_size = (
+            max(1, int(round(original_size[0] * scale))),
+            max(1, int(round(original_size[1] * scale))),
+        )
+        prepared_image = prepared_image.resize(resized_size, Image.Resampling.LANCZOS)
+        prepared_mask = prepared_mask.resize(resized_size, Image.Resampling.NEAREST)
+
+    with tempfile.TemporaryDirectory(prefix="pdf2ppt-inpaint-") as temp_dir:
+        temp_path = Path(temp_dir)
+        image_dir = temp_path / "images"
+        image_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = temp_path / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        image_path = image_dir / "crop.png"
+        mask_path = temp_path / "mask.png"
+        prepared_image.save(image_path)
+        prepared_mask.save(mask_path)
+
+        result = subprocess.run(
+            [
+                command,
+                "run",
+                f"--model={model}",
+                f"--device={device}",
+                f"--image={image_dir}",
+                f"--mask={mask_path}",
+                f"--output={output_dir}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip() or "unknown backend failure"
+            raise BackgroundInpaintingError(
+                f"Diffusion backend command failed with exit code {result.returncode}: {stderr}"
+            )
+
+        output_candidates = sorted(output_dir.glob("*.png"))
+        if not output_candidates:
+            raise BackgroundInpaintingError(
+                f"Diffusion backend command '{command}' did not produce any PNG output."
+            )
+
+        output_image = Image.open(output_candidates[0]).convert("RGB")
+        if output_image.size != original_size:
+            output_image = output_image.resize(original_size, Image.Resampling.LANCZOS)
+        return output_image
+
+
+def resolve_background_inpainting_engine(
+    page_image: Image.Image,
+    mask_image: Image.Image,
+    options: ConversionOptions,
+) -> tuple[BackgroundInpaintingEngine, str]:
+    requested_engine = options.inpaint_engine
+    mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
+    mask_ratio = mask_area_ratio(mask_array)
+    diffusion_engine = DiffusionLocalInpaintingEngine(
+        command=options.diffusion_command,
+        model=options.diffusion_model,
+        device=options.diffusion_device,
+        max_crop_edge=options.diffusion_max_crop_edge,
+        crop_padding_px=max(24, options.inpaint_padding_px * 3),
+    )
+    if requested_engine == "white-box":
+        return WhiteBoxInpaintingEngine(), f"Selected white-box engine explicitly (mask area ratio {mask_ratio:.4f})."
+    if requested_engine == "opencv-fast":
+        return OpenCvFastInpaintingEngine(), (
+            f"Selected opencv-fast engine explicitly (mask area ratio {mask_ratio:.4f})."
+        )
+    if requested_engine == "diffusion-local":
+        return diffusion_engine, (
+            f"Selected diffusion-local engine explicitly (mask area ratio {mask_ratio:.4f}, "
+            f"model {options.diffusion_model}, device {options.diffusion_device})."
+        )
+
+    if mask_ratio > options.inpaint_max_area_ratio:
+        return WhiteBoxInpaintingEngine(), (
+            f"Auto route fell back to white-box because mask area ratio {mask_ratio:.4f} "
+            f"exceeded threshold {options.inpaint_max_area_ratio:.4f}."
+        )
+    complexity = estimate_background_complexity(page_image, mask_image)
+    backend_available = shutil.which(options.diffusion_command) is not None
+    if backend_available and complexity >= options.diffusion_complexity_threshold:
+        return diffusion_engine, (
+            f"Auto route selected diffusion-local because complexity score {complexity:.4f} "
+            f"met threshold {options.diffusion_complexity_threshold:.4f}."
+        )
+    if not backend_available and complexity >= options.diffusion_complexity_threshold:
+        return OpenCvFastInpaintingEngine(), (
+            f"Auto route fell back to opencv-fast because complexity score {complexity:.4f} "
+            f"met threshold {options.diffusion_complexity_threshold:.4f} but diffusion command "
+            f"'{options.diffusion_command}' was unavailable."
+        )
+    return OpenCvFastInpaintingEngine(), (
+        f"Auto route selected opencv-fast because complexity score {complexity:.4f} "
+        f"was below threshold {options.diffusion_complexity_threshold:.4f}."
+    )
 
 
 def write_debug_artifacts(
@@ -675,8 +1173,11 @@ def write_debug_artifacts(
     page_number: int,
     page_image: Image.Image,
     masked_image: Image.Image,
+    mask_image: Image.Image | None,
     text_blocks: list[TextBlock],
     page_rect: fitz.Rect,
+    engine_name: str | None,
+    engine_note: str | None,
 ) -> None:
     debug_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"page_{page_number:03d}"
@@ -709,6 +1210,18 @@ def write_debug_artifacts(
         debug_dir / f"{prefix}_mask_overlay.png"
     )
     masked_image.convert("RGB").save(debug_dir / f"{prefix}_masked.png")
+    if mask_image is not None:
+        mask_image.convert("L").save(debug_dir / f"{prefix}_mask.png")
+    if engine_name or engine_note:
+        payload = {
+            "page": page_number,
+            "engine": engine_name,
+            "note": engine_note,
+        }
+        (debug_dir / f"{prefix}_background.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
 
 def write_text_fit_debug_report(
@@ -839,6 +1352,14 @@ def assign_block_roles(blocks: list[TextBlock]) -> None:
             block.block_role = "list"
         else:
             block.block_role = "body"
+
+
+def promote_ocr_bold_blocks(blocks: list[TextBlock]) -> None:
+    for block in blocks:
+        if block.bold or block.font_size is None:
+            continue
+        if block.block_role == "title":
+            block.bold = True
 
 
 def bbox_to_shape_geometry(

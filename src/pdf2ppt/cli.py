@@ -42,6 +42,51 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable PaddleOCR UVDoc unwarping. Disabled by default because it can distort slide layouts.",
     )
+    parser.add_argument(
+        "--inpaint-engine",
+        choices=("auto", "white-box", "opencv-fast", "diffusion-local"),
+        default="auto",
+        help="Background reconstruction engine for overlay pages.",
+    )
+    parser.add_argument(
+        "--inpaint-padding-px",
+        type=int,
+        default=6,
+        help="Extra mask dilation padding in pixels before background reconstruction.",
+    )
+    parser.add_argument(
+        "--inpaint-max-area-ratio",
+        type=float,
+        default=0.12,
+        help="Fallback to white-box masking when the overlay mask covers more than this fraction of the page.",
+    )
+    parser.add_argument(
+        "--diffusion-command",
+        default="iopaint",
+        help="Command used to invoke the local diffusion inpainting backend.",
+    )
+    parser.add_argument(
+        "--diffusion-model",
+        default="brushnet",
+        help="Model name passed to the diffusion inpainting backend.",
+    )
+    parser.add_argument(
+        "--diffusion-device",
+        default="cuda",
+        help="Device passed to the diffusion inpainting backend, e.g. cuda or cpu.",
+    )
+    parser.add_argument(
+        "--diffusion-max-crop-edge",
+        type=int,
+        default=1024,
+        help="Resize local diffusion crops so their longest edge does not exceed this size.",
+    )
+    parser.add_argument(
+        "--diffusion-complexity-threshold",
+        type=float,
+        default=0.3,
+        help="When using auto routing, backgrounds above this complexity score prefer diffusion-local if available.",
+    )
     return parser
 
 
@@ -59,6 +104,14 @@ def main(argv: list[str] | None = None) -> int:
         render_dpi=args.dpi,
         debug_dir=args.debug_dir or args.output_pptx.with_suffix("").with_name(f"{args.output_pptx.stem}_debug"),
         use_doc_unwarping=args.enable_doc_unwarping,
+        inpaint_engine=args.inpaint_engine,
+        inpaint_padding_px=args.inpaint_padding_px,
+        inpaint_max_area_ratio=args.inpaint_max_area_ratio,
+        diffusion_command=args.diffusion_command,
+        diffusion_model=args.diffusion_model,
+        diffusion_device=args.diffusion_device,
+        diffusion_max_crop_edge=args.diffusion_max_crop_edge,
+        diffusion_complexity_threshold=args.diffusion_complexity_threshold,
     )
     report = convert_pdf(options)
     print(

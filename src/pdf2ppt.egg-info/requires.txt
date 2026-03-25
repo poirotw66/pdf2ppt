@@ -1,0 +1,6 @@
+PyMuPDF>=1.27.0
+python-pptx>=1.0.0
+paddleocr>=3.4.0
+opencv-python-headless>=4.10.0
+Pillow>=10.0.0
+numpy>=1.26.0
