@@ -73,6 +73,73 @@ pdf2ppt input.pdf output.pptx \
   --debug-dir output_debug
 ```
 
+### `opencv-fast` 的技術原理
+
+`opencv-fast` 是本專案在 `overlay` 頁面上使用的輕量級背景重建路徑。
+
+它的設計目標是：
+
+- 不需要下載模型
+- 不需要 GPU
+- 直接在本機用 OpenCV 完成
+- 對純色、漸層、簡單紋理的投影片背景通常效果最好
+
+技術流程如下：
+
+1. 先找出之後要重建成可編輯 PowerPoint 文字的文字區塊。
+2. 透過 `build_text_mask_image()` 把這些文字區域轉成二值遮罩。
+3. 可利用 `--inpaint-padding-px` 擴張遮罩，蓋住抗鋸齒邊緣與 OCR 框略小的情況。
+4. `OpenCvFastInpaintingEngine` 會把頁面影像轉成 NumPy / OpenCV 格式。
+5. 接著呼叫 `cv2.inpaint(..., cv2.INPAINT_TELEA)`，用小半徑做局部修補。
+6. 修補後的影像成為背景，再把可編輯文字方塊疊回 PowerPoint。
+
+實作細節：
+
+- 修補演算法：OpenCV Telea 方法（`cv2.INPAINT_TELEA`）
+- 預設半徑：`3.0`
+- 遮罩格式：8-bit 單通道二值 mask
+- 影像流程：PIL RGB -> OpenCV BGR -> Telea 修補 -> PIL RGB
+
+為什麼它很快：
+
+- 它是傳統影像處理，不是生成式模型。
+- 核心做法是從遮罩邊界往內推估周邊顏色與結構。
+- 主要成本來自影像尺寸與遮罩大小，不需要模型載入與神經網路推論。
+
+適合的情境：
+
+- 純色背景簡報
+- 輕微漸層背景
+- 文字後方只有簡單紋理或幾何圖形
+- 想快速迭代、快速預覽轉換結果
+
+效果較差的情境：
+
+- 文字後方是密集插圖或照片
+- 遮罩區域很大
+- 複雜圖案無法只靠鄰近像素合理補回
+- 被移除的文字剛好壓在重要邊線、圖示或細線圖表上
+
+它與 `auto` 路由的關係：
+
+- 如果遮罩覆蓋面積太大，`auto` 會為了安全改用 `white-box`
+- 如果背景複雜度較低，`auto` 會優先選 `opencv-fast`
+- 複雜度會依據遮罩周圍區域的灰階變異與邊緣密度估算
+- 如果複雜度高，且本地 diffusion 後端可用，`auto` 會改選 `diffusion-local`
+
+常用參數：
+
+- `--inpaint-engine opencv-fast`：強制指定使用此引擎
+- `--inpaint-padding-px`：先擴張文字遮罩再修補
+- `--inpaint-max-area-ratio`：當遮罩過大時避免使用局部修補
+- `--debug-dir`：輸出 mask 與背景決策結果方便檢查
+
+實務建議：
+
+- 一般簡報 PDF 可以先從 `opencv-fast` 開始
+- 如果文字邊緣殘留白邊或光暈，可小幅提高 `--inpaint-padding-px`
+- 只有在背景真的夠複雜時，再切換到 `diffusion-local`
+
 使用本地 diffusion 後端：
 
 ```bash
