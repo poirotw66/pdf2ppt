@@ -31,6 +31,7 @@ from pdf2ppt.pipeline import (
     measure_text_dimensions,
     promote_ocr_bold_blocks,
     resolve_ocr_fit_max_size,
+    resolve_vertical_anchor,
     PageSignals,
     choose_background_mode,
     classify_page,
@@ -584,8 +585,26 @@ class FontSizingTests(unittest.TestCase):
         self.assertTrue(fit_text_frame(DummyTextFrame(), block, scale_x=1.0, scale_y=1.0))
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["font_family"], "DejaVu Sans")
-        self.assertLessEqual(calls[0]["max_size"], 12)
         self.assertGreaterEqual(calls[0]["max_size"], 6)
+
+    @patch("pdf2ppt.ppt_render.resolve_ocr_fit_max_size", return_value=18)
+    def test_fit_text_frame_uses_resolved_cap_for_ocr_blocks(self, _resolve_max_size: unittest.mock.Mock) -> None:
+        calls: list[dict[str, object]] = []
+
+        class DummyTextFrame:
+            def fit_text(self, **kwargs: object) -> None:
+                calls.append(kwargs)
+
+        block = TextBlock(
+            id="ocr_fit_2",
+            source="ocr",
+            bbox=(0, 0, 200, 36),
+            text="NotebookLM",
+            confidence=0.9,
+            font_size=12,
+        )
+        self.assertTrue(fit_text_frame(DummyTextFrame(), block, scale_x=1.0, scale_y=1.0))
+        self.assertEqual(calls[0]["max_size"], 18)
 
     def test_should_wrap_text_block_disables_wrap_for_single_line_ocr(self) -> None:
         self.assertFalse(
@@ -610,6 +629,30 @@ class FontSizingTests(unittest.TestCase):
                 )
             )
         )
+
+    def test_resolve_vertical_anchor_uses_middle_for_single_line_ocr(self) -> None:
+        anchor = resolve_vertical_anchor(
+            TextBlock(
+                id="ocr_anchor_1",
+                source="ocr",
+                bbox=(0, 0, 100, 20),
+                text="VECTOR EMBEDDINGS",
+                confidence=0.9,
+            )
+        )
+        self.assertEqual(int(anchor), 3)
+
+    def test_resolve_vertical_anchor_uses_top_for_multiline_text(self) -> None:
+        anchor = resolve_vertical_anchor(
+            TextBlock(
+                id="ocr_anchor_2",
+                source="ocr",
+                bbox=(0, 0, 100, 40),
+                text="LINE 1\nLINE 2",
+                confidence=0.9,
+            )
+        )
+        self.assertEqual(int(anchor), 1)
 
     def test_resolve_ocr_fit_max_size_respects_single_line_width(self) -> None:
         size = resolve_ocr_fit_max_size(

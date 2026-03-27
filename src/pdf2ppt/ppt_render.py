@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from pptx.dml.color import RGBColor
-from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
+from pptx.enum.text import MSO_AUTO_SIZE, MSO_VERTICAL_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Pt
 
 from .models import TextBlock
@@ -63,6 +63,7 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
     textbox = slide.shapes.add_textbox(left, top, max(width, Emu(1)), max(height, Emu(1)))
     text_frame = textbox.text_frame
     text_frame.word_wrap = should_wrap_text_block(block)
+    text_frame.vertical_anchor = resolve_vertical_anchor(block)
     text_frame.margin_left = 0
     text_frame.margin_right = 0
     text_frame.margin_top = 0
@@ -98,8 +99,8 @@ def fit_text_frame(text_frame: Any, block: TextBlock, *, scale_x: float, scale_y
 
     font_family = block.font_family or default_font_family(script)
     base_size = max(6, int(round((block.font_size or 12.0) * min(scale_x, scale_y))))
-    max_size = min(
-        base_size,
+    max_size = max(
+        6,
         resolve_ocr_fit_max_size(
             block,
             font_path=font_path,
@@ -127,6 +128,12 @@ def should_wrap_text_block(block: TextBlock) -> bool:
     if block.source == "ocr" and "\n" not in block.text:
         return False
     return True
+
+
+def resolve_vertical_anchor(block: TextBlock) -> MSO_VERTICAL_ANCHOR:
+    if block.source == "ocr" and "\n" not in block.text:
+        return MSO_VERTICAL_ANCHOR.MIDDLE
+    return MSO_VERTICAL_ANCHOR.TOP
 
 
 def resolve_ocr_fit_max_size(

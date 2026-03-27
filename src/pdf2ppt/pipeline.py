@@ -64,6 +64,7 @@ from .ppt_render import (
     fit_text_frame,
     pt_to_emu,
     render_page_to_slide,
+    resolve_vertical_anchor,
     resolve_ocr_fit_max_size,
     should_wrap_text_block,
 )
@@ -313,6 +314,7 @@ __all__ = [
     "render_page_to_slide",
     "resolve_background_inpainting_engine",
     "resolve_ocr_fit_max_size",
+    "resolve_vertical_anchor",
     "resolve_render_dpi",
     "safe_crop",
     "score_page",
