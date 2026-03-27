@@ -26,6 +26,7 @@ from pdf2ppt.pipeline import (
     estimate_text_bold,
     estimate_text_color,
     fit_text_frame,
+    filter_suspicious_ocr_blocks,
     invoke_diffusion_backend,
     measure_text_dimensions,
     promote_ocr_bold_blocks,
@@ -103,6 +104,39 @@ class BlockSelectionTests(unittest.TestCase):
     def test_intersection_ratio(self) -> None:
         ratio = intersection_ratio((0, 0, 10, 10), (5, 5, 15, 15))
         self.assertAlmostEqual(ratio, 0.25)
+
+    def test_filter_suspicious_ocr_blocks_drops_large_low_confidence_short_text(self) -> None:
+        blocks = [
+            TextBlock(
+                id="ocr_bad",
+                source="ocr",
+                bbox=(600, 350, 780, 590),
+                text="具",
+                confidence=0.15,
+            ),
+            TextBlock(
+                id="ocr_good",
+                source="ocr",
+                bbox=(200, 360, 520, 400),
+                text="縮小至50-100份候選文檔",
+                confidence=0.94,
+            ),
+        ]
+        filtered = filter_suspicious_ocr_blocks(blocks, fitz.Rect(0, 0, 1376, 768))
+        self.assertEqual([block.id for block in filtered], ["ocr_good"])
+
+    def test_filter_suspicious_ocr_blocks_keeps_small_low_confidence_short_text(self) -> None:
+        blocks = [
+            TextBlock(
+                id="ocr_small",
+                source="ocr",
+                bbox=(100, 100, 130, 124),
+                text="A",
+                confidence=0.2,
+            )
+        ]
+        filtered = filter_suspicious_ocr_blocks(blocks, fitz.Rect(0, 0, 1376, 768))
+        self.assertEqual([block.id for block in filtered], ["ocr_small"])
 
 
 class BackgroundModeTests(unittest.TestCase):

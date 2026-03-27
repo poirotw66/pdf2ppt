@@ -76,6 +76,35 @@ def select_text_blocks(
     return sort_text_blocks(combined)
 
 
+def filter_suspicious_ocr_blocks(
+    blocks: list[TextBlock],
+    page_rect: fitz.Rect,
+    *,
+    min_confidence: float = 0.35,
+    max_short_text_length: int = 2,
+    min_large_block_area_ratio: float = 0.015,
+    min_large_block_height_ratio: float = 0.18,
+) -> list[TextBlock]:
+    page_area = max(page_rect.width * page_rect.height, 1.0)
+    filtered: list[TextBlock] = []
+    for block in blocks:
+        normalized_text = re.sub(r"\s+", "", block.text)
+        block_height = max(0.0, block.bbox[3] - block.bbox[1])
+        area_ratio = bbox_area(block.bbox) / page_area
+        height_ratio = block_height / max(page_rect.height, 1.0)
+        is_suspicious = (
+            block.confidence < min_confidence
+            and len(normalized_text) <= max_short_text_length
+            and (
+                area_ratio >= min_large_block_area_ratio
+                or height_ratio >= min_large_block_height_ratio
+            )
+        )
+        if not is_suspicious:
+            filtered.append(block)
+    return filtered
+
+
 def score_page(
     page_kind: PageKind,
     selected_blocks: list[TextBlock],

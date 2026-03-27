@@ -31,6 +31,7 @@ from .block_analysis import (
     classify_page,
     compute_page_signals,
     enrich_ocr_blocks,
+    filter_suspicious_ocr_blocks,
     intersection_ratio,
     map_blocks_to_page_coordinates,
     resolve_render_dpi,
@@ -166,6 +167,15 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         ocr_reference_image = ocr_page_data.image
         ocr_blocks = enrich_ocr_blocks(ocr_page_data.blocks, ocr_reference_image)
         ocr_blocks = map_blocks_to_page_coordinates(ocr_blocks, ocr_reference_image.size, page.rect)
+        filtered_ocr_blocks = filter_suspicious_ocr_blocks(ocr_blocks, page.rect)
+        removed_block_count = len(ocr_blocks) - len(filtered_ocr_blocks)
+        if removed_block_count > 0:
+            logger.info(
+                "Filtered %s suspicious OCR block(s) on page %s",
+                removed_block_count,
+                page.number + 1,
+            )
+        ocr_blocks = filtered_ocr_blocks
 
     text_blocks = select_text_blocks(page_kind, native_blocks, ocr_blocks)
     quality = score_page(page_kind, text_blocks, native_blocks, ocr_blocks)
@@ -285,6 +295,7 @@ __all__ = [
     "extract_image_elements",
     "extract_native_text_blocks",
     "extract_text_foreground_mask",
+    "filter_suspicious_ocr_blocks",
     "fit_text_frame",
     "intersection_ratio",
     "invoke_diffusion_backend",
