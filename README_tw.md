@@ -29,6 +29,7 @@
 - Python 3.11 以上
 - 建議使用 Linux
 - 依賴套件定義於 `pyproject.toml`
+- 若要使用 OCR，建議使用獨立的 Conda 環境並固定 `numpy<2`
 - OCR 需要：
   - PaddleOCR 執行環境與模型下載
 - 若要使用本地 diffusion inpainting，建議：
@@ -37,13 +38,43 @@
 
 ## 安裝方式
 
-建立並啟用 Python 環境後，使用 editable mode 安裝：
+建議的 OCR 執行環境：
 
 ```bash
+conda create -n ppocr python=3.12 numpy=1.26.4 -y
+conda activate ppocr
 python -m pip install -e .
 ```
 
+建議這樣安裝的原因：
+
+- `PaddleOCR` / `PaddleX` 目前在 `numpy<2` 的環境下較穩定。
+- 使用獨立 Conda 環境，可降低 `pyarrow`、`scikit-learn` 等全域套件相依衝突。
+
+如果你已經有現成環境，至少請先確認符合 `pyproject.toml` 中的 NumPy 限制：
+
+```bash
+python -m pip install "numpy<2"
+python -m pip install -e .
+```
+
+如果你要執行測試，請另外安裝：
+
+```bash
+python -m pip install pytest
+```
+
 如果你要使用本地 diffusion inpainting，請另外安裝並確認後端可正常執行。本專案目前已驗證過 `iopaint` 流程。
+
+快速確認環境是否正常：
+
+```bash
+python - <<'PY'
+import numpy
+print(numpy.__version__)
+PY
+python -m pdf2ppt input.pdf output.pptx
+```
 
 ## 快速開始
 

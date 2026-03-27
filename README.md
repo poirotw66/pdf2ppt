@@ -29,6 +29,7 @@ The project is optimized for presentation-style documents and uses a hybrid pipe
 - Python 3.11 or newer
 - Linux environment recommended
 - Dependencies listed in `pyproject.toml`
+- For the OCR stack, use a dedicated Conda environment with `numpy<2`
 - For OCR:
   - PaddleOCR runtime and model downloads
 - Optional for faster local inpainting:
@@ -37,13 +38,43 @@ The project is optimized for presentation-style documents and uses a hybrid pipe
 
 ## Installation
 
-Create and activate your Python environment, then install the project in editable mode:
+Recommended setup for OCR-enabled runs:
 
 ```bash
+conda create -n ppocr python=3.12 numpy=1.26.4 -y
+conda activate ppocr
 python -m pip install -e .
 ```
 
+Why this environment is recommended:
+
+- `PaddleOCR` / `PaddleX` currently work more reliably with `numpy<2`.
+- A dedicated Conda environment helps avoid conflicts with `pyarrow`, `scikit-learn`, and other globally installed packages.
+
+If you already have an environment, make sure it satisfies the NumPy constraint from `pyproject.toml`:
+
+```bash
+python -m pip install "numpy<2"
+python -m pip install -e .
+```
+
+Optional development dependency for running tests:
+
+```bash
+python -m pip install pytest
+```
+
 If you want to use local diffusion inpainting, install and verify your backend separately. For example, this project has been tested with an `iopaint`-based workflow.
+
+Quick environment check:
+
+```bash
+python - <<'PY'
+import numpy
+print(numpy.__version__)
+PY
+python -m pdf2ppt input.pdf output.pptx
+```
 
 ## Quick Start
 
