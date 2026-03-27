@@ -92,6 +92,11 @@ def is_cjk(char: str) -> bool:
 
 
 def choose_measurement_font(script: str) -> str | None:
+    return _choose_measurement_font_cached(script)
+
+
+@lru_cache(maxsize=8)
+def _choose_measurement_font_cached(script: str) -> str | None:
     candidates = [DEFAULT_FONT_PATH]
     if script in {"cjk", "mixed"}:
         candidates = [DEFAULT_CJK_FONT_PATH, DEFAULT_FONT_PATH]
@@ -151,7 +156,7 @@ def single_line_fit_width_ratio(script: str) -> float:
 
 @lru_cache(maxsize=512)
 def measure_text_dimensions(text: str, font_size: int, font_path: str) -> tuple[float, float]:
-    font = ImageFont.truetype(font_path, font_size)
+    font = load_measurement_font(font_path, font_size)
     lines = text.splitlines() or [text]
     widths: list[float] = []
     heights: list[float] = []
@@ -163,6 +168,11 @@ def measure_text_dimensions(text: str, font_size: int, font_path: str) -> tuple[
     line_gap = max(0.0, font_size * 0.15)
     total_height = sum(heights) + max(0, len(lines) - 1) * line_gap
     return max(widths, default=0.0), total_height
+
+
+@lru_cache(maxsize=128)
+def load_measurement_font(font_path: str, font_size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(font_path, font_size)
 
 
 def extract_text_foreground_mask(gray_crop: Image.Image) -> np.ndarray | None:

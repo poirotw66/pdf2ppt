@@ -64,7 +64,8 @@ class OcrEngine:
         return self._engine
 
     def extract_text_blocks(self, image: Image.Image, page_number: int) -> OcrPageData:
-        image_array = np.array(image.convert("RGB"))
+        rgb_image = image.convert("RGB")
+        image_array = np.array(rgb_image)
         try:
             results = self._get_engine().predict(image_array)
         except OcrInitializationError:
@@ -72,7 +73,7 @@ class OcrEngine:
         except Exception as error:
             raise OcrProcessingError(f"OCR prediction failed for page {page_number}: {error}") from error
         blocks: list[TextBlock] = []
-        reference_image = image.convert("RGB")
+        reference_image = rgb_image
         order = 1
         for result in results:
             payload = _coerce_ocr_payload(result)

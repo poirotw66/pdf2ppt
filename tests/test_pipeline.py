@@ -14,6 +14,7 @@ from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_l
 from pdf2ppt.models import QualityScore, TextBlock
 from pdf2ppt.pipeline import (
     BackgroundInpaintingError,
+    analyze_page,
     build_text_fit_debug_entry,
     build_mask_shapes,
     build_text_mask_image,
@@ -341,6 +342,67 @@ class BackgroundModeTests(unittest.TestCase):
                 timeout_sec=2.5,
             )
         self.assertIn("timed out", str(context.exception))
+
+
+class AnalyzePagePerformanceTests(unittest.TestCase):
+    @patch("pdf2ppt.pipeline.extract_image_elements", return_value=[])
+    @patch("pdf2ppt.pipeline.render_page_image")
+    @patch("pdf2ppt.pipeline.choose_background_mode", return_value=("elements", None))
+    @patch(
+        "pdf2ppt.pipeline.score_page",
+        return_value=QualityScore(
+            text_confidence=0.98,
+            layout_overlap_score=0.95,
+            style_recovery_score=1.0,
+            editable_ratio=1.0,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.select_text_blocks")
+    @patch("pdf2ppt.pipeline.classify_page", return_value="digital")
+    @patch(
+        "pdf2ppt.pipeline.compute_page_signals",
+        return_value=PageSignals(
+            native_char_count=100,
+            native_text_area_ratio=0.2,
+            image_area_ratio=0.0,
+            drawing_count=0,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.extract_native_text_blocks")
+    def test_analyze_page_skips_render_for_elements_mode(
+        self,
+        extract_native_text_blocks_mock: unittest.mock.Mock,
+        _compute_page_signals_mock: unittest.mock.Mock,
+        _classify_page_mock: unittest.mock.Mock,
+        select_text_blocks_mock: unittest.mock.Mock,
+        _score_page_mock: unittest.mock.Mock,
+        _choose_background_mode_mock: unittest.mock.Mock,
+        render_page_image_mock: unittest.mock.Mock,
+        extract_image_elements_mock: unittest.mock.Mock,
+    ) -> None:
+        native_blocks = [
+            TextBlock(
+                id="n1",
+                source="native",
+                bbox=(10, 10, 100, 30),
+                text="Hello",
+                confidence=0.99,
+            )
+        ]
+        extract_native_text_blocks_mock.return_value = (native_blocks, [])
+        select_text_blocks_mock.return_value = native_blocks
+        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+        )
+
+        result = analyze_page(page, options, ocr_engine=unittest.mock.Mock())
+
+        self.assertEqual(result.background_mode, "elements")
+        render_page_image_mock.assert_not_called()
+        extract_image_elements_mock.assert_called_once()
 
 
 class CliTests(unittest.TestCase):

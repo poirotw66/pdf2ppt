@@ -151,15 +151,17 @@ def convert_pdf(
 
 
 def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEngine) -> PageResult:
-    page_image = render_page_image(page, dpi=resolve_render_dpi(options))
-    ocr_reference_image = page_image
     native_blocks, image_boxes = extract_native_text_blocks(page)
     signals = compute_page_signals(page, native_blocks, image_boxes)
     page_kind = classify_page(signals)
+    render_dpi = resolve_render_dpi(options)
 
     need_ocr = page_kind in {"scanned", "hybrid"} or not native_blocks
     ocr_blocks: list[TextBlock] = []
+    page_image: Any | None = None
+    ocr_reference_image: Any | None = None
     if need_ocr:
+        page_image = render_page_image(page, dpi=render_dpi)
         ocr_page_data = ocr_engine.extract_text_blocks(page_image, page.number + 1)
         ocr_reference_image = ocr_page_data.image
         ocr_blocks = enrich_ocr_blocks(ocr_page_data.blocks, ocr_reference_image)
@@ -185,10 +187,12 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
     background_inpaint_engine: str | None = None
     background_inpaint_note: str | None = None
     mask_image: Any | None = None
-    background_image = ocr_reference_image if need_ocr else page_image
     if background_mode == "elements":
         image_elements = extract_image_elements(page, image_boxes, options.render_dpi)
     else:
+        if page_image is None:
+            page_image = render_page_image(page, dpi=render_dpi)
+        background_image = ocr_reference_image if ocr_reference_image is not None else page_image
         if background_mode == "overlay" and text_blocks:
             mask_blocks = [block for block in text_blocks if block.source == "ocr"] or text_blocks
             background_result = render_overlay_background(
