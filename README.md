@@ -1,14 +1,31 @@
 # pdf2ppt
 
-`pdf2ppt` converts PDF files into editable PowerPoint (`.pptx`) decks.
+`pdf2ppt` is an open source tool that converts PDF slides into editable PowerPoint (`.pptx`) decks.
 
-The project is optimized for presentation-style documents and uses a hybrid pipeline:
+It is designed for presentation-style documents and aims to preserve visual fidelity while recovering editable text, layout, and reusable page elements.
+
+Core pipeline:
 
 - Native PDF extraction first when text and layout can be recovered directly.
 - PaddleOCR fallback for scanned or image-heavy pages.
 - Page classification (`digital`, `scanned`, `hybrid`) to choose the safest rendering path.
 - Conditional background reconstruction for OCR/overlay pages.
 - Style recovery for OCR text, including font size fitting, color estimation, and basic bold detection.
+
+## Project Status
+
+- Recommended default background engine: `opencv-fast`
+- `diffusion-local` is still under active development and should be treated as experimental
+- For most documents, start with `opencv-fast` first and only try `diffusion-local` for more complex backgrounds
+
+## Result Showcase
+
+<p align="center">
+  <img src="image/example_pdf.png" alt="Example source PDF slide" width="48%" />
+  <img src="image/example_ppt.png" alt="Example converted PPT slide" width="48%" />
+</p>
+
+<p align="center"><em>Source PDF on the left, converted editable PowerPoint on the right.</em></p>
 
 ## Features
 
@@ -17,8 +34,8 @@ The project is optimized for presentation-style documents and uses a hybrid pipe
 - Rebuild scanned-page text as editable PowerPoint text boxes.
 - Support multiple background reconstruction engines:
   - `white-box`
-  - `opencv-fast`
-  - `diffusion-local`
+  - `opencv-fast` (recommended)
+  - `diffusion-local` (experimental / in progress)
   - `auto` routing
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
@@ -64,7 +81,7 @@ Optional development dependency for running tests:
 python -m pip install pytest
 ```
 
-If you want to use local diffusion inpainting, install and verify your backend separately. For example, this project has been tested with an `iopaint`-based workflow.
+If you want to use local diffusion inpainting, install and verify your backend separately. For example, this project has been tested with an `iopaint`-based workflow. At this stage, `diffusion-local` is still experimental, so `opencv-fast` remains the recommended first choice.
 
 Quick environment check:
 
@@ -157,7 +174,7 @@ How it interacts with `auto` routing:
 - If mask coverage is too large, `auto` falls back to `white-box` for safety.
 - If the local background complexity is low, `auto` prefers `opencv-fast`.
 - Complexity is estimated from the area around the mask using grayscale variance and edge density.
-- If complexity is high and a diffusion backend is available, `auto` can switch to `diffusion-local`.
+- If complexity is high and a diffusion backend is available, `auto` can switch to `diffusion-local`, though that path is still experimental.
 
 Relevant knobs:
 
@@ -170,7 +187,7 @@ Practical guidance:
 
 - Start with `opencv-fast` for most presentation PDFs.
 - Increase `--inpaint-padding-px` slightly if text halos remain.
-- Switch to `diffusion-local` only when backgrounds are visually complex enough to justify the extra cost.
+- Switch to `diffusion-local` only when backgrounds are visually complex enough to justify the extra cost and experimental behavior is acceptable.
 
 Use a local diffusion backend:
 
@@ -246,7 +263,7 @@ Instead, it uses a conditional strategy:
 For overlay pages, `auto` routing can choose:
 
 - `opencv-fast` for simpler backgrounds
-- `diffusion-local` for more complex masked regions, when the backend is available
+- `diffusion-local` for more complex masked regions when the backend is available, though this path is still experimental
 - `white-box` as the safest fallback for large masks or unavailable backends
 
 ## Output Files
@@ -290,3 +307,7 @@ Project entry point:
 
 - English: `README.md`
 - Traditional Chinese: `README_tw.md`
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE`.

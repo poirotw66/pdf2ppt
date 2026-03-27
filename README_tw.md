@@ -1,14 +1,31 @@
 # pdf2ppt
 
-`pdf2ppt` 用來把 PDF 轉成可編輯的 PowerPoint (`.pptx`)。
+`pdf2ppt` 是一個開源工具，用來把 PDF 投影片轉成可編輯的 PowerPoint (`.pptx`)。
 
-這個專案主要針對簡報型文件，採用混合式轉換流程：
+它主要面向簡報型文件，目標是在保留原稿視覺風格的同時，盡可能還原可編輯文字、版面與可重用頁面元素。
+
+核心流程：
 
 - 能直接從 PDF 抽文字與版面的情況，優先使用原生解析。
 - 掃描頁或圖片型頁面，再交給 PaddleOCR。
 - 先判斷頁面類型（`digital`、`scanned`、`hybrid`），再決定最合適的輸出方式。
 - 只有在需要時才做背景重建，而不是一律整頁抹字。
 - OCR 文字會額外估算字級、字色與粗體。
+
+## 專案狀態
+
+- 目前建議優先使用的背景引擎：`opencv-fast`
+- `diffusion-local` 仍在持續開發中，現階段應視為實驗性功能
+- 大多數文件建議先從 `opencv-fast` 開始，再視背景複雜度決定是否嘗試 `diffusion-local`
+
+## 成果展示
+
+<p align="center">
+  <img src="image/example_pdf.png" alt="範例 PDF 投影片" width="48%" />
+  <img src="image/example_ppt.png" alt="轉換後的 PPT 投影片" width="48%" />
+</p>
+
+<p align="center"><em>左側是原始 PDF，右側是轉換後可編輯的 PowerPoint。</em></p>
 
 ## 主要功能
 
@@ -17,8 +34,8 @@
 - 將掃描頁文字重建為 PowerPoint 文字方塊。
 - 支援多種背景重建引擎：
   - `white-box`
-  - `opencv-fast`
-  - `diffusion-local`
+  - `opencv-fast`（建議優先使用）
+  - `diffusion-local`（實驗性 / 開發中）
   - `auto` 自動路由
 - 每次轉換都可輸出 JSON 報告。
 - 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
@@ -64,7 +81,7 @@ python -m pip install -e .
 python -m pip install pytest
 ```
 
-如果你要使用本地 diffusion inpainting，請另外安裝並確認後端可正常執行。本專案目前已驗證過 `iopaint` 流程。
+如果你要使用本地 diffusion inpainting，請另外安裝並確認後端可正常執行。本專案目前已驗證過 `iopaint` 流程。不過現階段 `diffusion-local` 仍屬實驗性功能，因此建議先以 `opencv-fast` 為主。
 
 快速確認環境是否正常：
 
@@ -157,7 +174,7 @@ pdf2ppt input.pdf output.pptx \
 - 如果遮罩覆蓋面積太大，`auto` 會為了安全改用 `white-box`
 - 如果背景複雜度較低，`auto` 會優先選 `opencv-fast`
 - 複雜度會依據遮罩周圍區域的灰階變異與邊緣密度估算
-- 如果複雜度高，且本地 diffusion 後端可用，`auto` 會改選 `diffusion-local`
+- 如果複雜度高，且本地 diffusion 後端可用，`auto` 會改選 `diffusion-local`，但這條路徑目前仍屬實驗性
 
 常用參數：
 
@@ -170,7 +187,7 @@ pdf2ppt input.pdf output.pptx \
 
 - 一般簡報 PDF 可以先從 `opencv-fast` 開始
 - 如果文字邊緣殘留白邊或光暈，可小幅提高 `--inpaint-padding-px`
-- 只有在背景真的夠複雜時，再切換到 `diffusion-local`
+- 只有在背景真的夠複雜，且可接受實驗性行為時，再切換到 `diffusion-local`
 
 使用本地 diffusion 後端：
 
@@ -246,7 +263,7 @@ pdf2ppt input.pdf output.pptx \
 在 `overlay` 模式下，`auto` 會依條件選擇：
 
 - `opencv-fast`：適合較簡單背景
-- `diffusion-local`：適合較複雜背景，且需後端可用
+- `diffusion-local`：適合較複雜背景且後端可用，但目前仍屬實驗性路徑
 - `white-box`：在遮罩過大或後端不可用時作為保底方案
 
 ## 輸出檔案
@@ -290,3 +307,7 @@ python -m pytest -q
 
 - English：`README.md`
 - 繁體中文：`README_tw.md`
+
+## 授權
+
+本專案採用 MIT License，詳見 `LICENSE`。
