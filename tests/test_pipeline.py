@@ -259,8 +259,8 @@ class BackgroundModeTests(unittest.TestCase):
         complexity = estimate_background_complexity(image, mask)
         self.assertGreater(complexity, 0.0)
 
-    @patch("pdf2ppt.inpainting.shutil.which", return_value="/usr/bin/iopaint")
-    @patch("pdf2ppt.inpainting.invoke_diffusion_backend")
+    @patch("pdf2ppt.inpainting_engines.shutil.which", return_value="/usr/bin/iopaint")
+    @patch("pdf2ppt.inpainting_engines.invoke_diffusion_backend")
     def test_render_overlay_background_uses_diffusion_when_explicit(
         self,
         invoke_backend: unittest.mock.Mock,
@@ -295,8 +295,8 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("brushnet", result.note or "")
         self.assertTrue(invoke_backend.called)
 
-    @patch("pdf2ppt.inpainting.shutil.which", return_value="/usr/bin/iopaint")
-    @patch("pdf2ppt.inpainting.invoke_diffusion_backend", side_effect=BackgroundInpaintingError("boom"))
+    @patch("pdf2ppt.inpainting_engines.shutil.which", return_value="/usr/bin/iopaint")
+    @patch("pdf2ppt.inpainting_engines.invoke_diffusion_backend", side_effect=BackgroundInpaintingError("boom"))
     def test_render_overlay_background_diffusion_failure_falls_back_to_opencv(
         self,
         _invoke_backend: unittest.mock.Mock,
@@ -325,7 +325,7 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertEqual(result.engine_name, "opencv-fast")
         self.assertIn("Fallback to opencv-fast", result.note or "")
 
-    @patch("pdf2ppt.inpainting.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="iopaint", timeout=2.5))
+    @patch("pdf2ppt.inpainting_engines.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="iopaint", timeout=2.5))
     def test_invoke_diffusion_backend_timeout_raises_background_error(
         self,
         _run: unittest.mock.Mock,
