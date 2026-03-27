@@ -195,7 +195,10 @@ pdf2ppt input.pdf output.pptx \
 - `--ocr-det-thresh`：PaddleOCR 文字偵測門檻，可選；省略時使用 PaddleOCR 官方預設
 - `--ocr-det-box-thresh`：PaddleOCR 偵測框門檻，可選；省略時使用 PaddleOCR 官方預設
 - `--ocr-drop-score`：PaddleOCR 辨識分數門檻，可選；省略時使用 PaddleOCR 官方預設
-- `--dpi`：OCR 與背景生成的渲染 DPI
+- `--dpi`：OCR 主要使用的頁面渲染 DPI
+- `--background-dpi`：嵌入到 PPTX 的整頁背景與 overlay 背景 DPI
+- `--background-format`：背景圖輸出格式，`jpeg` 或 `png`；`jpeg` 體積較小
+- `--background-jpeg-quality`：當 `--background-format=jpeg` 時使用的 JPEG 品質
 - `--debug-dir`：逐頁 debug 圖與分析檔輸出資料夾
 - `--enable-doc-unwarping`：啟用 PaddleOCR UVDoc 去扭曲
 
@@ -217,6 +220,12 @@ pdf2ppt input.pdf output.pptx \
 診斷相關：
 
 - `--log-level`：`DEBUG`、`INFO`、`WARNING`、`ERROR`
+
+輸出體積調整建議：
+
+- 現在預設會以 `JPEG`、品質 `82`、`110 DPI` 嵌入背景頁面，通常能有效降低 PPTX 大小。
+- 如果你更重視畫質，可以提高 `--background-dpi`，或切換成 `--background-format png`。
+- 如果檔案仍偏大，可以再降低 `--background-jpeg-quality`。
 
 ## 轉換模式
 

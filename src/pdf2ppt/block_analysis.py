@@ -25,6 +25,10 @@ def resolve_render_dpi(options: Any) -> int:
     return options.render_dpi
 
 
+def resolve_background_render_dpi(options: Any) -> int:
+    return max(72, int(options.background_dpi))
+
+
 def compute_page_signals(
     page: fitz.Page,
     native_blocks: list[TextBlock],
@@ -208,8 +212,21 @@ def map_blocks_to_page_coordinates(
                 italic=block.italic,
                 reading_order=block.reading_order,
                 block_role=block.block_role,
-                image_bbox=block.image_bbox,
-                image_polygon=block.image_polygon,
+                image_bbox=(
+                    (
+                        block.image_bbox[0] * scale_x,
+                        block.image_bbox[1] * scale_y,
+                        block.image_bbox[2] * scale_x,
+                        block.image_bbox[3] * scale_y,
+                    )
+                    if block.image_bbox is not None
+                    else None
+                ),
+                image_polygon=(
+                    tuple((point[0] * scale_x, point[1] * scale_y) for point in block.image_polygon)
+                    if block.image_polygon is not None
+                    else None
+                ),
             )
         )
     return sort_text_blocks(mapped)

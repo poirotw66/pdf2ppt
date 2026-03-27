@@ -81,7 +81,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--dpi",
         type=int,
         default=144,
-        help="Rendering DPI for preview/background generation.",
+        help="Rendering DPI for OCR-oriented page rasterization.",
+    )
+    parser.add_argument(
+        "--background-dpi",
+        type=int,
+        default=110,
+        help="Rendering DPI for full-page or overlay background images embedded into the PPTX.",
+    )
+    parser.add_argument(
+        "--background-format",
+        choices=("jpeg", "png"),
+        default="jpeg",
+        help="Image format used for embedded background pages. JPEG is smaller; PNG preserves lossless detail.",
+    )
+    parser.add_argument(
+        "--background-jpeg-quality",
+        type=int,
+        default=82,
+        help="JPEG quality for embedded background pages when --background-format=jpeg.",
     )
     parser.add_argument(
         "--debug-dir",
@@ -172,6 +190,9 @@ def main(argv: list[str] | None = None) -> int:
         ocr_det_box_thresh=args.ocr_det_box_thresh,
         ocr_drop_score=args.ocr_drop_score,
         render_dpi=args.dpi,
+        background_dpi=args.background_dpi,
+        background_image_format=args.background_format,
+        background_jpeg_quality=args.background_jpeg_quality,
         debug_dir=args.debug_dir or args.output_pptx.with_suffix("").with_name(f"{args.output_pptx.stem}_debug"),
         use_doc_unwarping=args.enable_doc_unwarping,
         inpaint_engine=args.inpaint_engine,

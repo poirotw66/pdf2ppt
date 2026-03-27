@@ -195,7 +195,10 @@ Main arguments:
 - `--ocr-det-thresh`: PaddleOCR text detection threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-det-box-thresh`: PaddleOCR detection box threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-drop-score`: PaddleOCR recognition score threshold, optional, uses the PaddleOCR default when omitted
-- `--dpi`: render DPI for OCR and background generation
+- `--dpi`: render DPI for OCR-oriented page rasterization
+- `--background-dpi`: render DPI for embedded full-page and overlay backgrounds
+- `--background-format`: `jpeg` or `png` for embedded backgrounds; `jpeg` is smaller
+- `--background-jpeg-quality`: JPEG quality used when `--background-format=jpeg`
 - `--debug-dir`: directory for per-page debug images and analysis files
 - `--enable-doc-unwarping`: enable PaddleOCR UVDoc unwarping
 
@@ -217,6 +220,12 @@ Local diffusion settings:
 Diagnostics:
 
 - `--log-level`: `DEBUG`, `INFO`, `WARNING`, or `ERROR`
+
+Output size tuning:
+
+- By default, embedded page backgrounds now use `JPEG` at quality `82` and `110 DPI` to reduce PPTX size.
+- Increase `--background-dpi` or switch to `--background-format png` when visual fidelity matters more than file size.
+- Lower `--background-jpeg-quality` further when the deck is still too large.
 
 ## Conversion Modes
 

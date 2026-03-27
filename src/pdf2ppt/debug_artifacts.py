@@ -80,7 +80,10 @@ def build_mask_shapes(
     for block in text_blocks:
         if block.image_polygon:
             polygon = [
-                (clip_to_image(x, image_width), clip_to_image(y, image_height))
+                (
+                    clip_to_image(x * scale_x, image_width),
+                    clip_to_image(y * scale_y, image_height),
+                )
                 for x, y in block.image_polygon
             ]
             if len(polygon) >= 3:
@@ -89,10 +92,10 @@ def build_mask_shapes(
 
         if block.image_bbox is not None:
             x0, y0, x1, y1 = block.image_bbox
-            left = max(0, int(np.floor(x0)))
-            top = max(0, int(np.floor(y0)))
-            right = min(image_width, int(np.ceil(x1)))
-            bottom = min(image_height, int(np.ceil(y1)))
+            left = max(0, int(np.floor(x0 * scale_x)))
+            top = max(0, int(np.floor(y0 * scale_y)))
+            right = min(image_width, int(np.ceil(x1 * scale_x)))
+            bottom = min(image_height, int(np.ceil(y1 * scale_y)))
         else:
             x0, y0, x1, y1 = block.bbox
             left = max(0, int(np.floor(x0 * scale_x)))

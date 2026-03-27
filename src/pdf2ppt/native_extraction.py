@@ -125,8 +125,26 @@ def promote_ocr_bold_blocks(blocks: list[TextBlock]) -> None:
 
 
 def pil_to_png_bytes(image: Image.Image) -> bytes:
+    return pil_to_image_bytes(image, image_format="png")
+
+
+def pil_to_image_bytes(
+    image: Image.Image,
+    *,
+    image_format: str,
+    jpeg_quality: int = 82,
+) -> bytes:
     buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
+    normalized_format = image_format.strip().lower()
+    if normalized_format == "jpeg":
+        image.convert("RGB").save(
+            buffer,
+            format="JPEG",
+            quality=max(1, min(95, int(jpeg_quality))),
+            optimize=True,
+        )
+    else:
+        image.save(buffer, format="PNG")
     return buffer.getvalue()
 
 

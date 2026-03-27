@@ -34,6 +34,7 @@ from .block_analysis import (
     filter_suspicious_ocr_blocks,
     intersection_ratio,
     map_blocks_to_page_coordinates,
+    resolve_background_render_dpi,
     resolve_render_dpi,
     safe_crop,
     score_page,
@@ -52,6 +53,7 @@ from .native_extraction import (
     extract_image_elements,
     extract_native_text_blocks,
     most_common_or_none,
+    pil_to_image_bytes,
     pil_to_png_bytes,
     promote_ocr_bold_blocks,
     sort_text_blocks,
@@ -157,6 +159,7 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
     signals = compute_page_signals(page, native_blocks, image_boxes)
     page_kind = classify_page(signals)
     render_dpi = resolve_render_dpi(options)
+    background_render_dpi = resolve_background_render_dpi(options)
 
     need_ocr = page_kind in {"scanned", "hybrid"} or not native_blocks
     ocr_blocks: list[TextBlock] = []
@@ -193,7 +196,7 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         background_mode,
     )
 
-    background_png: bytes | None = None
+    background_image_bytes: bytes | None = None
     image_elements: list[ImagePlacement] = []
     background_inpaint_engine: str | None = None
     background_inpaint_note: str | None = None
@@ -201,9 +204,12 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
     if background_mode == "elements":
         image_elements = extract_image_elements(page, image_boxes, options.render_dpi)
     else:
-        if page_image is None:
+        if page_image is None and background_render_dpi == render_dpi:
             page_image = render_page_image(page, dpi=render_dpi)
-        background_image = ocr_reference_image if ocr_reference_image is not None else page_image
+        if ocr_reference_image is not None and background_render_dpi == render_dpi:
+            background_image = ocr_reference_image
+        else:
+            background_image = render_page_image(page, dpi=background_render_dpi)
         if background_mode == "overlay" and text_blocks:
             mask_blocks = [block for block in text_blocks if block.source == "ocr"] or text_blocks
             background_result = render_overlay_background(
@@ -216,15 +222,23 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
             background_inpaint_engine = background_result.engine_name
             background_inpaint_note = background_result.note
             mask_image = background_result.mask_image
-        background_png = pil_to_png_bytes(background_image)
+        background_image_bytes = pil_to_image_bytes(
+            background_image,
+            image_format=options.background_image_format,
+            jpeg_quality=options.background_jpeg_quality,
+        )
 
     if options.debug_dir is not None and ocr_blocks:
         debug_blocks = [block for block in text_blocks if block.source == "ocr"] or ocr_blocks
+        debug_masked_image = background_image if background_mode == "overlay" else ocr_reference_image
+        if debug_masked_image is not None and ocr_reference_image is not None:
+            if debug_masked_image.size != ocr_reference_image.size:
+                debug_masked_image = ocr_reference_image
         write_debug_artifacts(
             debug_dir=options.debug_dir,
             page_number=page.number + 1,
             page_image=ocr_reference_image,
-            masked_image=background_image if background_mode == "overlay" else ocr_reference_image,
+            masked_image=debug_masked_image,
             mask_image=mask_image,
             text_blocks=debug_blocks,
             page_rect=page.rect,
@@ -248,7 +262,7 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         fallback_reason=fallback_reason,
         background_inpaint_engine=background_inpaint_engine,
         background_inpaint_note=background_inpaint_note,
-        background_png=background_png,
+        background_image_bytes=background_image_bytes,
         image_elements=image_elements,
     )
 
@@ -308,11 +322,13 @@ __all__ = [
     "most_common_or_none",
     "pil_to_png_bytes",
     "promote_ocr_bold_blocks",
+    "pil_to_image_bytes",
     "pt_to_emu",
     "render_overlay_background",
     "render_page_image",
     "render_page_to_slide",
     "resolve_background_inpainting_engine",
+    "resolve_background_render_dpi",
     "resolve_ocr_fit_max_size",
     "resolve_vertical_anchor",
     "resolve_render_dpi",

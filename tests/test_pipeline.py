@@ -29,7 +29,9 @@ from pdf2ppt.pipeline import (
     filter_suspicious_ocr_blocks,
     invoke_diffusion_backend,
     measure_text_dimensions,
+    pil_to_image_bytes,
     promote_ocr_bold_blocks,
+    resolve_background_render_dpi,
     resolve_ocr_fit_max_size,
     resolve_vertical_anchor,
     PageSignals,
@@ -217,6 +219,20 @@ class BackgroundModeTests(unittest.TestCase):
             )
         ]
         shapes = build_mask_shapes(blocks, (60, 60), fitz.Rect(0, 0, 60, 60))
+        self.assertEqual(shapes, [{"kind": "polygon", "points": [(10, 10), (40, 10), (40, 20), (10, 20)]}])
+
+    def test_build_mask_shapes_scales_page_space_polygon_to_target_image(self) -> None:
+        blocks = [
+            TextBlock(
+                id="ocr_3b",
+                source="ocr",
+                bbox=(0, 0, 60, 60),
+                text="demo",
+                confidence=0.9,
+                image_polygon=((20, 20), (80, 20), (80, 40), (20, 40)),
+            )
+        ]
+        shapes = build_mask_shapes(blocks, (50, 50), fitz.Rect(0, 0, 100, 100))
         self.assertEqual(shapes, [{"kind": "polygon", "points": [(10, 10), (40, 10), (40, 20), (10, 20)]}])
 
     def test_build_text_mask_image_applies_padding(self) -> None:
@@ -439,6 +455,68 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
         render_page_image_mock.assert_not_called()
         extract_image_elements_mock.assert_called_once()
 
+    @patch("pdf2ppt.pipeline.pil_to_image_bytes", return_value=b"jpeg-bytes")
+    @patch("pdf2ppt.pipeline.render_page_image")
+    @patch("pdf2ppt.pipeline.choose_background_mode", return_value=("full-page", "fallback"))
+    @patch(
+        "pdf2ppt.pipeline.score_page",
+        return_value=QualityScore(
+            text_confidence=0.8,
+            layout_overlap_score=0.7,
+            style_recovery_score=0.45,
+            editable_ratio=0.2,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.select_text_blocks", return_value=[])
+    @patch("pdf2ppt.pipeline.classify_page", return_value="scanned")
+    @patch(
+        "pdf2ppt.pipeline.compute_page_signals",
+        return_value=PageSignals(
+            native_char_count=0,
+            native_text_area_ratio=0.0,
+            image_area_ratio=1.0,
+            drawing_count=0,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], []))
+    def test_analyze_page_renders_background_with_background_dpi(
+        self,
+        _extract_native_text_blocks_mock: unittest.mock.Mock,
+        _compute_page_signals_mock: unittest.mock.Mock,
+        _classify_page_mock: unittest.mock.Mock,
+        _select_text_blocks_mock: unittest.mock.Mock,
+        _score_page_mock: unittest.mock.Mock,
+        _choose_background_mode_mock: unittest.mock.Mock,
+        render_page_image_mock: unittest.mock.Mock,
+        encode_background_mock: unittest.mock.Mock,
+    ) -> None:
+        ocr_image = Image.new("RGB", (200, 100), (10, 10, 10))
+        background_image = Image.new("RGB", (120, 60), (20, 20, 20))
+        render_page_image_mock.side_effect = [ocr_image, background_image]
+        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            render_dpi=144,
+            background_dpi=96,
+            background_image_format="jpeg",
+            background_jpeg_quality=70,
+        )
+        ocr_engine = unittest.mock.Mock()
+        ocr_engine.extract_text_blocks.return_value = SimpleNamespace(blocks=[], image=ocr_image)
+
+        result = analyze_page(page, options, ocr_engine=ocr_engine)
+
+        self.assertEqual(result.background_image_bytes, b"jpeg-bytes")
+        self.assertEqual(render_page_image_mock.call_args_list[0].kwargs["dpi"], 144)
+        self.assertEqual(render_page_image_mock.call_args_list[1].kwargs["dpi"], 96)
+        encode_background_mock.assert_called_once_with(
+            background_image,
+            image_format="jpeg",
+            jpeg_quality=70,
+        )
+
 
 class CliTests(unittest.TestCase):
     def test_doc_unwarping_disabled_by_default(self) -> None:
@@ -457,6 +535,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.diffusion_max_crop_edge, 1024)
         self.assertAlmostEqual(args.diffusion_complexity_threshold, 0.3)
         self.assertAlmostEqual(args.diffusion_timeout_sec, 120.0)
+        self.assertEqual(args.background_dpi, 110)
+        self.assertEqual(args.background_format, "jpeg")
+        self.assertEqual(args.background_jpeg_quality, 82)
         self.assertEqual(args.log_level, "INFO")
 
     def test_doc_unwarping_can_be_enabled(self) -> None:
@@ -494,6 +575,12 @@ class CliTests(unittest.TestCase):
                 "0.45",
                 "--diffusion-timeout-sec",
                 "15",
+                "--background-dpi",
+                "96",
+                "--background-format",
+                "png",
+                "--background-jpeg-quality",
+                "70",
                 "--log-level",
                 "DEBUG",
             ]
@@ -510,6 +597,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.diffusion_max_crop_edge, 768)
         self.assertAlmostEqual(args.diffusion_complexity_threshold, 0.45)
         self.assertAlmostEqual(args.diffusion_timeout_sec, 15.0)
+        self.assertEqual(args.background_dpi, 96)
+        self.assertEqual(args.background_format, "png")
+        self.assertEqual(args.background_jpeg_quality, 70)
         self.assertEqual(args.log_level, "DEBUG")
 
     def test_format_progress_line_reports_completion(self) -> None:
@@ -532,6 +622,20 @@ class CliTests(unittest.TestCase):
 
 
 class FontSizingTests(unittest.TestCase):
+    def test_pil_to_image_bytes_supports_jpeg(self) -> None:
+        image = Image.new("RGB", (24, 24), (120, 140, 160))
+        encoded = pil_to_image_bytes(image, image_format="jpeg", jpeg_quality=70)
+        self.assertTrue(encoded.startswith(b"\xff\xd8\xff"))
+
+    def test_resolve_background_render_dpi_uses_option(self) -> None:
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            background_dpi=96,
+        )
+        self.assertEqual(resolve_background_render_dpi(options), 96)
+
     def test_default_font_family_by_script(self) -> None:
         self.assertEqual(default_font_family("latin"), "DejaVu Sans")
         self.assertEqual(default_font_family("cjk"), "Noto Sans CJK TC")

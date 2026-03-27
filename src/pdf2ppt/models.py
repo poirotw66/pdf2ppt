@@ -59,7 +59,7 @@ class PageResult:
     fallback_reason: str | None
     background_inpaint_engine: str | None = None
     background_inpaint_note: str | None = None
-    background_png: bytes | None = field(default=None, repr=False)
+    background_image_bytes: bytes | None = field(default=None, repr=False)
     image_elements: list[ImagePlacement] = field(default_factory=list, repr=False)
 
     def to_report_dict(self) -> dict[str, object]:

@@ -35,9 +35,9 @@ def render_page_to_slide(
     scale_x = slide_width_pt / page_result.width_pt
     scale_y = slide_height_pt / page_result.height_pt
 
-    if page_result.background_png is not None:
+    if page_result.background_image_bytes is not None:
         slide.shapes.add_picture(
-            io.BytesIO(page_result.background_png),
+            io.BytesIO(page_result.background_image_bytes),
             0,
             0,
             width=presentation.slide_width,

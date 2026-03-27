@@ -17,6 +17,9 @@ class ConversionOptions:
     ocr_det_box_thresh: float | None = None
     ocr_drop_score: float | None = None
     render_dpi: int = 144
+    background_dpi: int = 110
+    background_image_format: str = "jpeg"
+    background_jpeg_quality: int = 82
     debug_dir: Path | None = None
     use_doc_unwarping: bool = False
     inpaint_engine: str = "auto"
