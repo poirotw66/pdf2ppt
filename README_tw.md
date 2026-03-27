@@ -212,6 +212,11 @@ pdf2ppt input.pdf output.pptx \
 - `--diffusion-device`：`cuda` 或 `cpu`
 - `--diffusion-max-crop-edge`：送進後端的最大裁切邊長
 - `--diffusion-complexity-threshold`：`auto` 模式下判斷複雜背景的門檻
+- `--diffusion-timeout-sec`：每次本地 diffusion 後端呼叫的逾時秒數
+
+診斷相關：
+
+- `--log-level`：`DEBUG`、`INFO`、`WARNING`、`ERROR`
 
 ## 轉換模式
 

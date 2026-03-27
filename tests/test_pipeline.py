@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -24,6 +25,7 @@ from pdf2ppt.pipeline import (
     estimate_text_bold,
     estimate_text_color,
     fit_text_frame,
+    invoke_diffusion_backend,
     measure_text_dimensions,
     promote_ocr_bold_blocks,
     resolve_ocr_fit_max_size,
@@ -257,8 +259,8 @@ class BackgroundModeTests(unittest.TestCase):
         complexity = estimate_background_complexity(image, mask)
         self.assertGreater(complexity, 0.0)
 
-    @patch("pdf2ppt.pipeline.shutil.which", return_value="/usr/bin/iopaint")
-    @patch("pdf2ppt.pipeline.invoke_diffusion_backend")
+    @patch("pdf2ppt.inpainting.shutil.which", return_value="/usr/bin/iopaint")
+    @patch("pdf2ppt.inpainting.invoke_diffusion_backend")
     def test_render_overlay_background_uses_diffusion_when_explicit(
         self,
         invoke_backend: unittest.mock.Mock,
@@ -293,8 +295,8 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("brushnet", result.note or "")
         self.assertTrue(invoke_backend.called)
 
-    @patch("pdf2ppt.pipeline.shutil.which", return_value="/usr/bin/iopaint")
-    @patch("pdf2ppt.pipeline.invoke_diffusion_backend", side_effect=BackgroundInpaintingError("boom"))
+    @patch("pdf2ppt.inpainting.shutil.which", return_value="/usr/bin/iopaint")
+    @patch("pdf2ppt.inpainting.invoke_diffusion_backend", side_effect=BackgroundInpaintingError("boom"))
     def test_render_overlay_background_diffusion_failure_falls_back_to_opencv(
         self,
         _invoke_backend: unittest.mock.Mock,
@@ -323,6 +325,23 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertEqual(result.engine_name, "opencv-fast")
         self.assertIn("Fallback to opencv-fast", result.note or "")
 
+    @patch("pdf2ppt.inpainting.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="iopaint", timeout=2.5))
+    def test_invoke_diffusion_backend_timeout_raises_background_error(
+        self,
+        _run: unittest.mock.Mock,
+    ) -> None:
+        with self.assertRaises(BackgroundInpaintingError) as context:
+            invoke_diffusion_backend(
+                Image.new("RGB", (20, 20), color=(0, 0, 0)),
+                Image.new("L", (20, 20), color=255),
+                command="iopaint",
+                model="brushnet",
+                device="cpu",
+                max_crop_edge=64,
+                timeout_sec=2.5,
+            )
+        self.assertIn("timed out", str(context.exception))
+
 
 class CliTests(unittest.TestCase):
     def test_doc_unwarping_disabled_by_default(self) -> None:
@@ -340,6 +359,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.diffusion_device, "cuda")
         self.assertEqual(args.diffusion_max_crop_edge, 1024)
         self.assertAlmostEqual(args.diffusion_complexity_threshold, 0.3)
+        self.assertAlmostEqual(args.diffusion_timeout_sec, 120.0)
+        self.assertEqual(args.log_level, "INFO")
 
     def test_doc_unwarping_can_be_enabled(self) -> None:
         parser = build_parser()
@@ -374,6 +395,10 @@ class CliTests(unittest.TestCase):
                 "768",
                 "--diffusion-complexity-threshold",
                 "0.45",
+                "--diffusion-timeout-sec",
+                "15",
+                "--log-level",
+                "DEBUG",
             ]
         )
         self.assertAlmostEqual(args.ocr_det_thresh, 0.55)
@@ -387,6 +412,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.diffusion_device, "cuda:0")
         self.assertEqual(args.diffusion_max_crop_edge, 768)
         self.assertAlmostEqual(args.diffusion_complexity_threshold, 0.45)
+        self.assertAlmostEqual(args.diffusion_timeout_sec, 15.0)
+        self.assertEqual(args.log_level, "DEBUG")
 
     def test_format_progress_line_reports_completion(self) -> None:
         line = format_progress_line(2, 4, width=8)

@@ -212,6 +212,11 @@ Local diffusion settings:
 - `--diffusion-device`: `cuda` or `cpu`
 - `--diffusion-max-crop-edge`: maximum crop size sent to the backend
 - `--diffusion-complexity-threshold`: auto-routing threshold for complex backgrounds
+- `--diffusion-timeout-sec`: timeout for each local diffusion backend call
+
+Diagnostics:
+
+- `--log-level`: `DEBUG`, `INFO`, `WARNING`, or `ERROR`
 
 ## Conversion Modes
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Callable, TextIO
@@ -137,12 +138,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.3,
         help="When using auto routing, backgrounds above this complexity score prefer diffusion-local if available.",
     )
+    parser.add_argument(
+        "--diffusion-timeout-sec",
+        type=float,
+        default=120.0,
+        help="Maximum time to wait for a local diffusion backend call before failing over.",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="Logging verbosity for conversion diagnostics.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(levelname)s %(name)s: %(message)s",
+    )
 
     report_path = args.report or args.output_pptx.with_suffix(".report.json")
     options = ConversionOptions(
@@ -165,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         diffusion_device=args.diffusion_device,
         diffusion_max_crop_edge=args.diffusion_max_crop_edge,
         diffusion_complexity_threshold=args.diffusion_complexity_threshold,
+        diffusion_timeout_sec=args.diffusion_timeout_sec,
     )
     report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
     print(
