@@ -5,6 +5,7 @@ import logging
 from typing import Any, Callable
 
 import fitz
+from PIL import Image
 from pptx import Presentation
 
 from .background import (
@@ -207,10 +208,22 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
     if background_mode == "elements":
         image_elements = extract_image_elements(page, image_boxes, options.render_dpi)
     else:
+        has_ocr_reference_image = ocr_reference_image is not None
+        should_downscale_background = background_render_dpi < render_dpi
+        uses_original_page_geometry = not options.ocr_use_doc_orientation and not options.use_doc_unwarping
+        can_reuse_ocr_raster_for_background = (
+            has_ocr_reference_image and should_downscale_background and uses_original_page_geometry
+        )
         if page_image is None and background_render_dpi == render_dpi:
             page_image = render_page_image(page, dpi=render_dpi)
         if ocr_reference_image is not None and background_render_dpi == render_dpi:
             background_image = ocr_reference_image
+        elif can_reuse_ocr_raster_for_background:
+            background_image = resize_rendered_page_image(
+                ocr_reference_image,
+                source_dpi=render_dpi,
+                target_dpi=background_render_dpi,
+            )
         else:
             background_image = render_page_image(page, dpi=background_render_dpi)
         if background_mode == "overlay" and text_blocks:
@@ -230,7 +243,6 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
             image_format=options.background_image_format,
             jpeg_quality=options.background_jpeg_quality,
         )
-
     if options.debug_dir is not None and ocr_blocks:
         debug_blocks = [block for block in text_blocks if block.source == "ocr"] or ocr_blocks
         debug_masked_image = background_image if background_mode == "overlay" else ocr_reference_image
@@ -269,6 +281,16 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         background_image_bytes=background_image_bytes,
         image_elements=image_elements,
     )
+
+
+def resize_rendered_page_image(image: Image.Image, *, source_dpi: int, target_dpi: int) -> Image.Image:
+    if target_dpi >= source_dpi:
+        return image
+
+    scale = target_dpi / max(source_dpi, 1)
+    target_width = max(1, int(round(image.width * scale)))
+    target_height = max(1, int(round(image.height * scale)))
+    return image.resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
 
 
 __all__ = [

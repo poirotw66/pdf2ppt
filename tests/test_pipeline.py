@@ -700,6 +700,69 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
         encode_background_mock: unittest.mock.Mock,
     ) -> None:
         ocr_image = Image.new("RGB", (200, 100), (10, 10, 10))
+        render_page_image_mock.return_value = ocr_image
+        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            render_dpi=144,
+            background_dpi=96,
+            background_image_format="jpeg",
+            background_jpeg_quality=70,
+        )
+        ocr_engine = unittest.mock.Mock()
+        ocr_engine.extract_text_blocks.return_value = SimpleNamespace(blocks=[], image=ocr_image)
+
+        result = analyze_page(page, options, ocr_engine=ocr_engine)
+
+        self.assertEqual(result.background_image_bytes, b"jpeg-bytes")
+        self.assertEqual(render_page_image_mock.call_args_list[0].kwargs["dpi"], 144)
+        self.assertEqual(render_page_image_mock.call_count, 1)
+        encode_background_mock.assert_called_once_with(
+            unittest.mock.ANY,
+            image_format="jpeg",
+            jpeg_quality=70,
+        )
+        resized_background = encode_background_mock.call_args.args[0]
+        self.assertEqual(resized_background.size, (133, 67))
+
+    @patch("pdf2ppt.pipeline.pil_to_image_bytes", return_value=b"jpeg-bytes")
+    @patch("pdf2ppt.pipeline.render_page_image")
+    @patch("pdf2ppt.pipeline.choose_background_mode", return_value=("full-page", "fallback"))
+    @patch(
+        "pdf2ppt.pipeline.score_page",
+        return_value=QualityScore(
+            text_confidence=0.8,
+            layout_overlap_score=0.7,
+            style_recovery_score=0.45,
+            editable_ratio=0.2,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.select_text_blocks", return_value=[])
+    @patch("pdf2ppt.pipeline.classify_page", return_value="scanned")
+    @patch(
+        "pdf2ppt.pipeline.compute_page_signals",
+        return_value=PageSignals(
+            native_char_count=0,
+            native_text_area_ratio=0.0,
+            image_area_ratio=1.0,
+            drawing_count=0,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], []))
+    def test_analyze_page_rerenders_background_when_doc_orientation_enabled(
+        self,
+        _extract_native_text_blocks_mock: unittest.mock.Mock,
+        _compute_page_signals_mock: unittest.mock.Mock,
+        _classify_page_mock: unittest.mock.Mock,
+        _select_text_blocks_mock: unittest.mock.Mock,
+        _score_page_mock: unittest.mock.Mock,
+        _choose_background_mode_mock: unittest.mock.Mock,
+        render_page_image_mock: unittest.mock.Mock,
+        encode_background_mock: unittest.mock.Mock,
+    ) -> None:
+        ocr_image = Image.new("RGB", (200, 100), (10, 10, 10))
         background_image = Image.new("RGB", (120, 60), (20, 20, 20))
         render_page_image_mock.side_effect = [ocr_image, background_image]
         page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
@@ -711,6 +774,7 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
             background_dpi=96,
             background_image_format="jpeg",
             background_jpeg_quality=70,
+            ocr_use_doc_orientation=True,
         )
         ocr_engine = unittest.mock.Mock()
         ocr_engine.extract_text_blocks.return_value = SimpleNamespace(blocks=[], image=ocr_image)
