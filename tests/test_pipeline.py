@@ -13,7 +13,7 @@ import fitz
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line
+from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line, main
 from pdf2ppt.inpainting_overlay import _apply_targeted_file_back_color_correction
 from pdf2ppt.models import QualityScore, TextBlock
 from pdf2ppt.ocr import build_local_ocr_model_kwargs, ensure_local_model_dir
@@ -801,6 +801,20 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(args.ocr_model_root, Path("local-models"))
         self.assertTrue(args.enable_textline_orientation)
+
+    @patch("pdf2ppt.cli.convert_pdf")
+    def test_main_does_not_enable_debug_dir_by_default(self, convert_pdf_mock: unittest.mock.Mock) -> None:
+        convert_pdf_mock.return_value = SimpleNamespace(
+            input_path="input.pdf",
+            output_path="output.pptx",
+            pages=[object()],
+        )
+
+        exit_code = main(["input.pdf", "output.pptx"])
+
+        self.assertEqual(exit_code, 0)
+        options = convert_pdf_mock.call_args.args[0]
+        self.assertIsNone(options.debug_dir)
 
     def test_inpaint_flags_can_be_configured(self) -> None:
         parser = build_parser()
