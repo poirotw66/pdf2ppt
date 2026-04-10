@@ -103,6 +103,8 @@ def convert_pdf(
     logger.info("Starting PDF conversion: %s -> %s", options.input_path, options.output_path)
     ocr_engine = OcrEngine(
         lang=options.lang,
+        model_root=options.ocr_model_root,
+        use_textline_orientation=options.ocr_use_textline_orientation,
         use_doc_unwarping=options.use_doc_unwarping,
         det_thresh=options.ocr_det_thresh,
         det_box_thresh=options.ocr_det_box_thresh,

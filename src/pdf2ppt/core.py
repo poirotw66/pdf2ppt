@@ -13,6 +13,8 @@ class ConversionOptions:
     report_path: Path
     mode: str = "editable"
     lang: str = "ch"
+    ocr_model_root: Path | None = Path("model")
+    ocr_use_textline_orientation: bool = False
     ocr_det_thresh: float | None = None
     ocr_det_box_thresh: float | None = None
     ocr_drop_score: float | None = None

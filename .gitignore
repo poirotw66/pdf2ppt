@@ -4,3 +4,4 @@ rag_opencv_debug/
 __pycache__/
 output/
 tests/
+model/

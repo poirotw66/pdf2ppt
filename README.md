@@ -93,6 +93,12 @@ PY
 python -m pdf2ppt input.pdf output.pptx
 ```
 
+OCR model storage:
+
+- By default, `pdf2ppt` now uses `./model` as the local PaddleOCR model root.
+- If the same model already exists in `~/.paddlex/official_models`, the tool reuses it from `./model` through a local link or copy.
+- Override the location with `--ocr-model-root /path/to/model` when needed.
+
 ## Quick Start
 
 Basic conversion:
@@ -209,6 +215,8 @@ Main arguments:
 - `--report`: path for the JSON conversion report
 - `--mode`: `editable`, `fidelity`, or `fast`
 - `--lang`: PaddleOCR language code, default `ch`
+- `--ocr-model-root`: local PaddleOCR model directory, default `./model`
+- `--enable-textline-orientation`: enable PaddleOCR textline orientation classification; disabled by default for faster startup and OCR
 - `--ocr-det-thresh`: PaddleOCR text detection threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-det-box-thresh`: PaddleOCR detection box threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-drop-score`: PaddleOCR recognition score threshold, optional, uses the PaddleOCR default when omitted

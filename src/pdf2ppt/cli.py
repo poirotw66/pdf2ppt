@@ -63,6 +63,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="PaddleOCR language code. Defaults to 'ch' for Traditional/Chinese-heavy documents.",
     )
     parser.add_argument(
+        "--ocr-model-root",
+        type=Path,
+        default=Path("model"),
+        help="Directory used for local PaddleOCR model storage. Defaults to ./model.",
+    )
+    parser.add_argument(
+        "--enable-textline-orientation",
+        action="store_true",
+        help="Enable PaddleOCR textline orientation classification. Disabled by default to reduce startup and OCR latency.",
+    )
+    parser.add_argument(
         "--ocr-det-thresh",
         type=float,
         help="PaddleOCR text detection threshold. Omit to use the PaddleOCR default.",
@@ -186,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
         report_path=report_path,
         mode=args.mode,
         lang=args.lang,
+        ocr_model_root=args.ocr_model_root,
+        ocr_use_textline_orientation=args.enable_textline_orientation,
         ocr_det_thresh=args.ocr_det_thresh,
         ocr_det_box_thresh=args.ocr_det_box_thresh,
         ocr_drop_score=args.ocr_drop_score,

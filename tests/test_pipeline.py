@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -15,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line
 from pdf2ppt.inpainting_overlay import _apply_targeted_file_back_color_correction
 from pdf2ppt.models import QualityScore, TextBlock
+from pdf2ppt.ocr import build_local_ocr_model_kwargs, ensure_local_model_dir
 from pdf2ppt.pipeline import (
     BackgroundInpaintingError,
     analyze_page,
@@ -725,11 +727,45 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
         )
 
 
+class OcrModelConfigTests(unittest.TestCase):
+    def test_build_local_ocr_model_kwargs_uses_repo_local_model_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model_root = Path(tmp_dir) / "model"
+            kwargs = build_local_ocr_model_kwargs(
+                model_root=model_root,
+                lang="ch",
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
+
+            self.assertEqual(kwargs["doc_orientation_classify_model_name"], "PP-LCNet_x1_0_doc_ori")
+            self.assertEqual(kwargs["text_detection_model_name"], "PP-OCRv5_server_det")
+            self.assertEqual(kwargs["text_recognition_model_name"], "PP-OCRv5_server_rec")
+            self.assertEqual(Path(kwargs["text_detection_model_dir"]).parent, model_root.resolve())
+            self.assertNotIn("textline_orientation_model_dir", kwargs)
+
+    def test_ensure_local_model_dir_reuses_existing_paddlex_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_root = Path(tmp_dir)
+            cache_root = temp_root / "cache"
+            cached_model_dir = cache_root / "PP-OCRv5_server_det"
+            cached_model_dir.mkdir(parents=True)
+            (cached_model_dir / "inference.json").write_text("{}", encoding="utf-8")
+
+            with patch("pdf2ppt.ocr.PADDLEX_OFFICIAL_MODEL_CACHE_DIR", cache_root):
+                local_model_dir = ensure_local_model_dir(temp_root / "model", "PP-OCRv5_server_det")
+
+            self.assertTrue(local_model_dir.exists())
+            self.assertTrue((local_model_dir / "inference.json").exists())
+
+
 class CliTests(unittest.TestCase):
     def test_doc_unwarping_disabled_by_default(self) -> None:
         parser = build_parser()
         args = parser.parse_args(["input.pdf", "output.pptx"])
         self.assertFalse(args.enable_doc_unwarping)
+        self.assertEqual(args.ocr_model_root, Path("model"))
+        self.assertFalse(args.enable_textline_orientation)
         self.assertEqual(args.inpaint_engine, "auto")
         self.assertIsNone(args.ocr_det_thresh)
         self.assertIsNone(args.ocr_det_box_thresh)
@@ -751,6 +787,20 @@ class CliTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["input.pdf", "output.pptx", "--enable-doc-unwarping"])
         self.assertTrue(args.enable_doc_unwarping)
+
+    def test_textline_orientation_and_model_root_can_be_enabled(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "input.pdf",
+                "output.pptx",
+                "--ocr-model-root",
+                "local-models",
+                "--enable-textline-orientation",
+            ]
+        )
+        self.assertEqual(args.ocr_model_root, Path("local-models"))
+        self.assertTrue(args.enable_textline_orientation)
 
     def test_inpaint_flags_can_be_configured(self) -> None:
         parser = build_parser()
