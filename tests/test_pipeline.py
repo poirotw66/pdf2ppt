@@ -7,10 +7,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import cv2
 import fitz
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line
+from pdf2ppt.inpainting_overlay import _apply_targeted_file_back_color_correction
 from pdf2ppt.models import QualityScore, TextBlock
 from pdf2ppt.pipeline import (
     BackgroundInpaintingError,
@@ -29,6 +32,7 @@ from pdf2ppt.pipeline import (
     filter_suspicious_ocr_blocks,
     invoke_diffusion_backend,
     measure_text_dimensions,
+    OpenCvFastInpaintingEngine,
     pil_to_image_bytes,
     promote_ocr_bold_blocks,
     resolve_background_render_dpi,
@@ -278,7 +282,16 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertTrue(all(abs(channel - expected) <= 4 for channel, expected in zip(pixel, (35, 45, 55))))
 
     def test_render_overlay_background_auto_falls_back_to_white_box_for_large_mask(self) -> None:
-        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        grid_y, grid_x = np.indices((40, 60), dtype=np.uint8)
+        textured = np.stack(
+            [
+                (grid_x * 17 + grid_y * 11) % 255,
+                (grid_x * 29 + grid_y * 7) % 255,
+                (grid_x * 13 + grid_y * 19) % 255,
+            ],
+            axis=2,
+        )
+        image = Image.fromarray(textured, mode="RGB")
         blocks = [
             TextBlock(
                 id="ocr_6",
@@ -302,6 +315,47 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("white-box", result.note or "")
         self.assertEqual(result.image.getpixel((20, 18)), (255, 255, 255))
 
+    def test_render_overlay_background_auto_uses_opencv_fast_for_large_low_texture_mask(self) -> None:
+        width, height = 180, 120
+        grid_y, grid_x = np.indices((height, width), dtype=np.float32)
+        base = np.stack(
+            [
+                150.0 + 0.03 * grid_x + 0.08 * grid_y,
+                140.0 + 0.02 * grid_x + 0.06 * grid_y,
+                130.0 + 0.01 * grid_x + 0.05 * grid_y,
+            ],
+            axis=2,
+        ).clip(0, 255).astype("uint8")
+        image = Image.fromarray(base, mode="RGB")
+        blocks = [
+            TextBlock(
+                id="ocr_large_flat",
+                source="ocr",
+                bbox=(45, 25, 135, 95),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(45, 25, 135, 95),
+            )
+        ]
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="auto",
+            inpaint_padding_px=0,
+            inpaint_max_area_ratio=0.12,
+        )
+        result = render_overlay_background(image, blocks, fitz.Rect(0, 0, width, height), options=options)
+        self.assertEqual(result.engine_name, "opencv-fast")
+        self.assertIn("low-texture", result.note or "")
+
+        result_array = np.array(result.image, dtype=np.int16)
+        base_array = base.astype(np.int16)
+        mask = np.zeros((height, width), dtype=bool)
+        mask[25:95, 45:135] = True
+        mae = np.abs(result_array - base_array)[mask].mean()
+        self.assertLess(mae, 1.0)
+
     def test_background_complexity_detects_textured_context(self) -> None:
         image = Image.linear_gradient("L").resize((80, 60)).convert("RGB")
         mask = Image.new("L", (80, 60), 0)
@@ -310,6 +364,159 @@ class BackgroundModeTests(unittest.TestCase):
                 mask.putpixel((x, y), 255)
         complexity = estimate_background_complexity(image, mask)
         self.assertGreater(complexity, 0.0)
+
+    def test_opencv_fast_restores_smooth_gradient_background(self) -> None:
+        width, height = 180, 120
+        grid_y, grid_x = np.indices((height, width), dtype=np.float32)
+        base = np.stack(
+            [
+                150.0 + 0.03 * grid_x + 0.08 * grid_y,
+                140.0 + 0.02 * grid_x + 0.06 * grid_y,
+                130.0 + 0.01 * grid_x + 0.05 * grid_y,
+            ],
+            axis=2,
+        ).clip(0, 255).astype("uint8")
+        mask = np.zeros((height, width), dtype="uint8")
+        mask[25:95, 45:135] = 255
+
+        result = OpenCvFastInpaintingEngine().inpaint(
+            Image.fromarray(base, mode="RGB"),
+            Image.fromarray(mask, mode="L"),
+        )
+
+        result_array = np.array(result, dtype=np.int16)
+        base_array = base.astype(np.int16)
+        mae = np.abs(result_array - base_array)[mask > 0].mean()
+        self.assertLess(mae, 1.0)
+
+    def test_opencv_fast_cleans_tight_mask_text_halo_on_smooth_background(self) -> None:
+        width, height = 320, 160
+        grid_y, grid_x = np.indices((height, width), dtype=np.float32)
+        base = np.stack(
+            [
+                166.0 + 0.02 * grid_x + 0.03 * grid_y,
+                118.0 + 0.01 * grid_x + 0.02 * grid_y,
+                182.0 + 0.015 * grid_x + 0.015 * grid_y,
+            ],
+            axis=2,
+        ).clip(0, 255).astype("uint8")
+        image = Image.fromarray(base, mode="RGB")
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 36)
+        text = "File-Back"
+        bbox = draw.textbbox((48, 52), text, font=font)
+        draw.text((48, 52), text, fill=(247, 237, 248), font=font)
+
+        mask = Image.new("L", (width, height), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rectangle((bbox[0] + 2, bbox[1] + 2, bbox[2] - 2, bbox[3] - 2), fill=255)
+
+        result = OpenCvFastInpaintingEngine().inpaint(image, mask)
+
+        x0 = max(0, bbox[0] - 3)
+        y0 = max(0, bbox[1] - 3)
+        x1 = min(width, bbox[2] + 3)
+        y1 = min(height, bbox[3] + 3)
+        result_array = np.array(result, dtype=np.int16)
+        base_array = base.astype(np.int16)
+        mae = np.abs(result_array[y0:y1, x0:x1] - base_array[y0:y1, x0:x1]).mean()
+        self.assertLess(mae, 1.0)
+
+    def test_opencv_fast_restores_curved_gradient_background(self) -> None:
+        width, height = 260, 160
+        grid_y, grid_x = np.indices((height, width), dtype=np.float32)
+        channel_r = 90.0 + 0.55 * grid_x + 0.18 * grid_y + 0.0022 * ((grid_x - 140.0) ** 2)
+        channel_r += 0.0008 * ((grid_y - 80.0) ** 2)
+        channel_g = 70.0 + 0.32 * grid_x + 0.24 * grid_y + 0.0015 * ((grid_x - 120.0) ** 2)
+        channel_b = 120.0 + 0.18 * grid_x + 0.16 * grid_y + 0.0018 * ((grid_x - 150.0) ** 2)
+        channel_b += 0.0009 * grid_x * grid_y / 10.0
+        base = np.stack(
+            [channel_r, channel_g, channel_b],
+            axis=2,
+        ).clip(0, 255).astype("uint8")
+        mask = np.zeros((height, width), dtype="uint8")
+        mask[48:118, 70:210] = 255
+
+        result = OpenCvFastInpaintingEngine().inpaint(
+            Image.fromarray(base, mode="RGB"),
+            Image.fromarray(mask, mode="L"),
+        )
+
+        result_array = np.array(result, dtype=np.int16)
+        base_array = base.astype(np.int16)
+        mae = np.abs(result_array - base_array)[mask > 0].mean()
+        self.assertLess(mae, 1.5)
+
+    def test_targeted_file_back_lab_correction_improves_local_ring_alignment(self) -> None:
+        width, height = 260, 160
+        grid_y, grid_x = np.indices((height, width), dtype=np.float32)
+        base = np.stack(
+            [
+                195.0 + 0.14 * grid_x + 0.08 * grid_y,
+                170.0 + 0.10 * grid_x + 0.07 * grid_y,
+                205.0 + 0.12 * grid_x + 0.05 * grid_y,
+            ],
+            axis=2,
+        ).clip(0, 255).astype("uint8")
+        page_image = Image.fromarray(base, mode="RGB")
+        repaired = base.astype(np.float32)
+        repaired_region = repaired[52:108, 78:198]
+        repaired_region_mean = repaired_region.mean(axis=(0, 1), keepdims=True)
+        repaired[52:108, 78:198] = repaired_region_mean + (repaired_region - repaired_region_mean) * 0.45
+        repaired[52:108, 78:198, 0] -= 20.0
+        repaired[52:108, 78:198, 1] -= 14.0
+        repaired[52:108, 78:198, 2] -= 18.0
+        repaired = np.clip(repaired, 0, 255).astype("uint8")
+        repaired_image = Image.fromarray(repaired, mode="RGB")
+        block = TextBlock(
+            id="ocr_file_back",
+            source="ocr",
+            bbox=(78, 52, 198, 108),
+            text="歸檔(File-Back)",
+            confidence=0.95,
+            image_bbox=(78, 52, 198, 108),
+        )
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="opencv-fast",
+            inpaint_padding_px=0,
+        )
+
+        corrected_image, debug_images, note = _apply_targeted_file_back_color_correction(
+            page_image,
+            repaired_image,
+            [block],
+            fitz.Rect(0, 0, width, height),
+            options=options,
+        )
+
+        repaired_arr = np.array(repaired_image, dtype=np.uint8)
+        corrected_arr = np.array(corrected_image, dtype=np.uint8)
+        component = np.zeros((height, width), dtype=np.uint8)
+        component[52:108, 78:198] = 1
+        inner = cv2.dilate(component, np.ones((13, 13), np.uint8), iterations=1).astype(bool)
+        outer = cv2.dilate(inner.astype(np.uint8), np.ones((21, 21), np.uint8), iterations=1).astype(bool)
+        ring = outer & (~inner)
+        region = component.astype(bool)
+        ring_mean = base[ring].astype(np.float32).mean(axis=0)
+        repaired_gap = np.abs(repaired_arr[region].astype(np.float32).mean(axis=0) - ring_mean).mean()
+        corrected_gap = np.abs(corrected_arr[region].astype(np.float32).mean(axis=0) - ring_mean).mean()
+        repaired_lab = cv2.cvtColor(repaired_arr, cv2.COLOR_RGB2LAB).astype(np.float32)
+        corrected_lab = cv2.cvtColor(corrected_arr, cv2.COLOR_RGB2LAB).astype(np.float32)
+        repaired_span = np.percentile(repaired_lab[:, :, 0][region], 90) - np.percentile(
+            repaired_lab[:, :, 0][region], 10
+        )
+        corrected_span = np.percentile(corrected_lab[:, :, 0][region], 90) - np.percentile(
+            corrected_lab[:, :, 0][region], 10
+        )
+
+        self.assertLess(corrected_gap, repaired_gap)
+        self.assertGreater(corrected_span, repaired_span)
+        self.assertIn("File-Back", note or "")
+        self.assertIn("file_back_corrected", debug_images)
+        self.assertIn("file_back_mask", debug_images)
 
     @patch("pdf2ppt.inpainting_engines.shutil.which", return_value="/usr/bin/iopaint")
     @patch("pdf2ppt.inpainting_engines.invoke_diffusion_backend")

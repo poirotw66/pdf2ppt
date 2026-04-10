@@ -21,6 +21,7 @@ def write_debug_artifacts(
     page_rect: fitz.Rect,
     engine_name: str | None,
     engine_note: str | None,
+    extra_images: dict[str, Image.Image] | None = None,
 ) -> None:
     debug_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"page_{page_number:03d}"
@@ -65,6 +66,9 @@ def write_debug_artifacts(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+    if extra_images:
+        for name, image in extra_images.items():
+            image.save(debug_dir / f"{prefix}_{name}.png")
 
 
 def build_mask_shapes(

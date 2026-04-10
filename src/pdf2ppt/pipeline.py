@@ -244,6 +244,7 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
             page_rect=page.rect,
             engine_name=background_inpaint_engine,
             engine_note=background_inpaint_note,
+            extra_images=background_result.debug_images if background_mode == "overlay" else None,
         )
         write_text_fit_debug_report(
             debug_dir=options.debug_dir,

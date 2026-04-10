@@ -9,6 +9,12 @@ from .debug_artifacts import build_mask_shapes
 from .models import TextBlock
 
 
+DEFAULT_LOW_TEXTURE_STD_THRESHOLD = 4.0
+DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD = 0.01
+DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX = 8
+DEFAULT_LOW_TEXTURE_MIN_CONTEXT_PIXELS = 64
+
+
 def build_text_mask_image(
     text_blocks: list[TextBlock],
     image_size: tuple[int, int],
@@ -70,6 +76,50 @@ def estimate_background_complexity(page_image: Image.Image, mask_image: Image.Im
     return round(variance_score * 0.65 + edge_score * 0.35, 4)
 
 
+def estimate_low_texture_mask_fraction(
+    page_image: Image.Image,
+    mask_image: Image.Image,
+    *,
+    std_threshold: float = DEFAULT_LOW_TEXTURE_STD_THRESHOLD,
+    edge_threshold: float = DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD,
+    context_dilate_px: int = DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX,
+    min_context_pixels: int = DEFAULT_LOW_TEXTURE_MIN_CONTEXT_PIXELS,
+) -> float:
+    mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
+    component_mask = (mask_array > 0).astype(np.uint8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    if component_count <= 1:
+        return 0.0
+
+    image_array = np.array(page_image.convert("RGB"), dtype=np.uint8)
+    gray = cv2.cvtColor(image_array, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 80, 160)
+    kernel = np.ones((context_dilate_px * 2 + 1, context_dilate_px * 2 + 1), dtype=np.uint8)
+
+    low_texture_area = 0
+    valid_area = 0
+    for component_index, stat in enumerate(stats[1:], start=1):
+        area = int(stat[cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+
+        component = (labels == component_index).astype(np.uint8)
+        ring_mask = cv2.dilate(component, kernel, iterations=1).astype(bool) & (~component.astype(bool))
+        ring_pixel_count = int(np.count_nonzero(ring_mask))
+        if ring_pixel_count < min_context_pixels:
+            continue
+
+        valid_area += area
+        luma_std = float(np.std(gray[ring_mask]))
+        edge_density = float(np.count_nonzero(edges[ring_mask])) / float(ring_pixel_count)
+        if luma_std <= std_threshold and edge_density <= edge_threshold:
+            low_texture_area += area
+
+    if valid_area <= 0:
+        return 0.0
+    return round(float(low_texture_area) / float(valid_area), 4)
+
+
 def compute_mask_crop_box(mask_image: Image.Image, *, padding_px: int) -> tuple[int, int, int, int] | None:
     mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
     points = cv2.findNonZero(mask_array)
@@ -89,7 +139,12 @@ def compute_mask_crop_box(mask_image: Image.Image, *, padding_px: int) -> tuple[
 __all__ = [
     "build_text_mask_image",
     "compute_mask_crop_box",
+    "DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX",
+    "DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD",
+    "DEFAULT_LOW_TEXTURE_MIN_CONTEXT_PIXELS",
+    "DEFAULT_LOW_TEXTURE_STD_THRESHOLD",
     "estimate_background_complexity",
+    "estimate_low_texture_mask_fraction",
     "mask_area_ratio",
     "mask_text_regions_with_white_boxes",
 ]

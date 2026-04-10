@@ -3,3 +3,4 @@ rag_diffusion_debug/
 rag_opencv_debug/
 __pycache__/
 output/
+tests/
