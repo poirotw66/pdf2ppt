@@ -49,7 +49,9 @@ from pdf2ppt.pipeline import (
     render_overlay_background,
     select_text_blocks,
     should_wrap_text_block,
+    enrich_ocr_blocks,
 )
+from pdf2ppt.text_style import estimate_text_style
 
 
 class ClassificationTests(unittest.TestCase):
@@ -317,6 +319,65 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertEqual(result.engine_name, "white-box")
         self.assertIn("white-box", result.note or "")
         self.assertEqual(result.image.getpixel((20, 18)), (255, 255, 255))
+
+
+class OcrStyleOptimizationTests(unittest.TestCase):
+    def test_estimate_text_style_matches_individual_estimators(self) -> None:
+        image = Image.new("RGB", (64, 24), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.text((6, 4), "Demo", fill=(24, 36, 48), font=ImageFont.load_default())
+        gray = image.convert("L")
+
+        combined_color, combined_bold = estimate_text_style("Demo", image, gray)
+
+        self.assertEqual(combined_color, estimate_text_color(image, gray))
+        self.assertEqual(combined_bold, estimate_text_bold("Demo", gray))
+
+    def test_enrich_ocr_blocks_uses_combined_style_estimator_once_per_block(self) -> None:
+        blocks = [
+            TextBlock(
+                id="ocr_1",
+                source="ocr",
+                bbox=(5, 6, 45, 20),
+                text="Hello",
+                confidence=0.95,
+            ),
+            TextBlock(
+                id="ocr_2",
+                source="ocr",
+                bbox=(10, 24, 52, 38),
+                text="World",
+                confidence=0.91,
+            ),
+        ]
+        image = Image.new("RGB", (80, 50), color=(255, 255, 255))
+
+        with (
+            patch("pdf2ppt.block_analysis.assign_block_roles") as assign_mock,
+            patch("pdf2ppt.block_analysis.promote_ocr_bold_blocks") as promote_mock,
+            patch("pdf2ppt.block_analysis.sort_text_blocks", side_effect=lambda items: items),
+            patch("pdf2ppt.block_analysis.classify_text_script", return_value="latin") as script_mock,
+            patch(
+                "pdf2ppt.block_analysis.estimate_text_style",
+                return_value=("#102030", True),
+            ) as style_mock,
+            patch("pdf2ppt.block_analysis.estimate_font_size", return_value=14.0) as font_mock,
+        ):
+            enriched = enrich_ocr_blocks(blocks, image)
+
+        self.assertEqual(len(enriched), 2)
+        self.assertEqual(script_mock.call_count, len(blocks))
+        self.assertEqual(style_mock.call_count, len(blocks))
+        self.assertEqual(font_mock.call_count, len(blocks))
+        self.assertEqual([block.font_color for block in enriched], ["#102030", "#102030"])
+        self.assertEqual([block.bold for block in enriched], [True, True])
+        self.assertEqual([block.font_size for block in enriched], [14.0, 14.0])
+        for call in style_mock.call_args_list:
+            self.assertEqual(call.kwargs["script"], "latin")
+        for call in font_mock.call_args_list:
+            self.assertEqual(call.kwargs["script"], "latin")
+        assign_mock.assert_called_once()
+        promote_mock.assert_called_once()
 
     def test_render_overlay_background_auto_uses_opencv_fast_for_large_low_texture_mask(self) -> None:
         width, height = 180, 120

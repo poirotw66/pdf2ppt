@@ -16,12 +16,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 DEFAULT_CJK_FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+DEFAULT_TEXT_COLOR = "#1F1F1F"
 
 
-def estimate_font_size(text: str, bbox: tuple[float, float, float, float]) -> float:
+def estimate_font_size(
+    text: str,
+    bbox: tuple[float, float, float, float],
+    *,
+    script: str | None = None,
+) -> float:
     height = max(1.0, bbox[3] - bbox[1])
     width = max(1.0, bbox[2] - bbox[0])
-    script = classify_text_script(text)
+    script = script or classify_text_script(text)
     script_height_ratio = {
         "cjk": 0.74,
         "latin": 0.78,
@@ -38,29 +44,63 @@ def estimate_font_size(text: str, bbox: tuple[float, float, float, float]) -> fl
     best_size = base_size
     best_score = float("inf")
     min_size = max(6, int(base_size * 0.65))
-    max_size = max(min_size + 2, int(base_size * 1.5) + 2)
+    max_size = min(max(min_size + 2, int(base_size * 1.5) + 2), 96)
     target_width = width * script_target_width_ratio(script, text)
     target_height = height * script_target_height_ratio(script)
 
-    for size in range(min_size, min(max_size, 96) + 1):
-        measured_width, measured_height = measure_text_dimensions(text, size, font_path)
-        if measured_width <= 0 or measured_height <= 0:
+    candidate_sizes = list(range(min_size, max_size + 1))
+    if len(candidate_sizes) <= 12:
+        search_sizes = candidate_sizes
+    else:
+        search_sizes = candidate_sizes[::2]
+        if search_sizes[-1] != candidate_sizes[-1]:
+            search_sizes.append(candidate_sizes[-1])
+
+    for size in search_sizes:
+        score = score_font_size_fit(text, size, font_path, width, height, target_width, target_height)
+        if score is None:
             continue
-        width_error = abs(measured_width - target_width) / max(target_width, 1.0)
-        height_error = abs(measured_height - target_height) / max(target_height, 1.0)
-        overflow_penalty = 0.0
-        if measured_width > width * 1.02:
-            overflow_penalty += (measured_width - width) / max(width, 1.0)
-        if measured_height > height * 1.02:
-            overflow_penalty += (measured_height - height) / max(height, 1.0)
-        score = width_error * 0.7 + height_error * 1.15 + overflow_penalty * 1.5
         if score < best_score:
             best_score = score
             best_size = float(size)
 
+    if len(search_sizes) != len(candidate_sizes):
+        refine_start = max(min_size, int(best_size) - 1)
+        refine_end = min(max_size, int(best_size) + 1)
+        for size in range(refine_start, refine_end + 1):
+            score = score_font_size_fit(text, size, font_path, width, height, target_width, target_height)
+            if score is None:
+                continue
+            if score < best_score:
+                best_score = score
+                best_size = float(size)
+
     return best_size
 
 
+def score_font_size_fit(
+    text: str,
+    size: int,
+    font_path: str,
+    width: float,
+    height: float,
+    target_width: float,
+    target_height: float,
+) -> float | None:
+    measured_width, measured_height = measure_text_dimensions(text, size, font_path)
+    if measured_width <= 0 or measured_height <= 0:
+        return None
+    width_error = abs(measured_width - target_width) / max(target_width, 1.0)
+    height_error = abs(measured_height - target_height) / max(target_height, 1.0)
+    overflow_penalty = 0.0
+    if measured_width > width * 1.02:
+        overflow_penalty += (measured_width - width) / max(width, 1.0)
+    if measured_height > height * 1.02:
+        overflow_penalty += (measured_height - height) / max(height, 1.0)
+    return width_error * 0.7 + height_error * 1.15 + overflow_penalty * 1.5
+
+
+@lru_cache(maxsize=2048)
 def classify_text_script(text: str) -> str:
     stripped = re.sub(r"\s+", "", text)
     if not stripped:
@@ -84,10 +124,12 @@ def classify_text_script(text: str) -> str:
 
 def is_cjk(char: str) -> bool:
     codepoint = ord(char)
-    return (
-        0x3400 <= codepoint <= 0x4DBF
-        or 0x4E00 <= codepoint <= 0x9FFF
-        or 0xF900 <= codepoint <= 0xFAFF
+    return any(
+        (
+            0x3400 <= codepoint <= 0x4DBF,
+            0x4E00 <= codepoint <= 0x9FFF,
+            0xF900 <= codepoint <= 0xFAFF,
+        )
     )
 
 
@@ -175,8 +217,14 @@ def load_measurement_font(font_path: str, font_size: int) -> ImageFont.FreeTypeF
     return ImageFont.truetype(font_path, font_size)
 
 
+def gray_image_to_array(gray_crop: Image.Image) -> np.ndarray:
+    if gray_crop.mode == "L":
+        return np.array(gray_crop, dtype=np.uint8)
+    return np.array(gray_crop.convert("L"), dtype=np.uint8)
+
+
 def extract_text_foreground_mask(gray_crop: Image.Image) -> np.ndarray | None:
-    gray = np.array(gray_crop.convert("L"), dtype=np.uint8)
+    gray = gray_image_to_array(gray_crop)
     if gray.size == 0:
         return None
     if float(np.std(gray)) < 6.0:
@@ -200,17 +248,38 @@ def extract_text_foreground_mask(gray_crop: Image.Image) -> np.ndarray | None:
     return label_map == foreground_index
 
 
-def estimate_text_color(color_crop: Image.Image, gray_crop: Image.Image) -> str:
+def format_hex_color(rgb: tuple[int, int, int]) -> str:
+    return "#{:02X}{:02X}{:02X}".format(*rgb)
+
+
+def estimate_text_style(
+    text: str,
+    color_crop: Image.Image,
+    gray_crop: Image.Image,
+    *,
+    script: str | None = None,
+) -> tuple[str, bool]:
     if color_crop.width == 0 or color_crop.height == 0:
-        return "#1F1F1F"
+        return DEFAULT_TEXT_COLOR, False
+
     color = np.array(color_crop.convert("RGB"), dtype=np.uint8)
     if color.size == 0:
-        return "#1F1F1F"
+        return DEFAULT_TEXT_COLOR, False
 
     foreground_mask = extract_text_foreground_mask(gray_crop)
+    return (
+        estimate_text_color_from_mask(color, foreground_mask),
+        estimate_text_bold_from_mask(text, foreground_mask, script=script),
+    )
+
+
+def estimate_text_color_from_mask(
+    color: np.ndarray,
+    foreground_mask: np.ndarray | None,
+) -> str:
     if foreground_mask is None:
         mean_rgb = tuple(int(round(channel)) for channel in np.mean(color.reshape(-1, 3), axis=0))
-        return "#{:02X}{:02X}{:02X}".format(*mean_rgb)
+        return format_hex_color(mean_rgb)
 
     foreground_pixels = color[foreground_mask]
     if foreground_pixels.size == 0:
@@ -218,11 +287,36 @@ def estimate_text_color(color_crop: Image.Image, gray_crop: Image.Image) -> str:
 
     dominant_rgb = np.median(foreground_pixels, axis=0)
     rgb = tuple(int(np.clip(round(channel), 0, 255)) for channel in dominant_rgb[:3])
-    return "#{:02X}{:02X}{:02X}".format(*rgb)
+    return format_hex_color(rgb)
 
 
-def estimate_text_bold(text: str, gray_crop: Image.Image) -> bool:
+def estimate_text_color(color_crop: Image.Image, gray_crop: Image.Image) -> str:
+    if color_crop.width == 0 or color_crop.height == 0:
+        return DEFAULT_TEXT_COLOR
+    color = np.array(color_crop.convert("RGB"), dtype=np.uint8)
+    if color.size == 0:
+        return DEFAULT_TEXT_COLOR
+
     foreground_mask = extract_text_foreground_mask(gray_crop)
+    return estimate_text_color_from_mask(color, foreground_mask)
+
+
+def estimate_text_bold(
+    text: str,
+    gray_crop: Image.Image,
+    *,
+    script: str | None = None,
+) -> bool:
+    foreground_mask = extract_text_foreground_mask(gray_crop)
+    return estimate_text_bold_from_mask(text, foreground_mask, script=script)
+
+
+def estimate_text_bold_from_mask(
+    text: str,
+    foreground_mask: np.ndarray | None,
+    *,
+    script: str | None = None,
+) -> bool:
     if foreground_mask is None:
         return False
 
@@ -245,7 +339,7 @@ def estimate_text_bold(text: str, gray_crop: Image.Image) -> bool:
     mean_stroke = float(distance[foreground_mask].mean()) if foreground_pixels else 0.0
     normalized_stroke = mean_stroke / max(1.0, bbox_height)
 
-    script = classify_text_script(text)
+    script = script or classify_text_script(text)
     fill_threshold = {
         "latin": 0.3,
         "numeric": 0.34,

@@ -9,7 +9,7 @@ from PIL import Image
 from .core import PageSignals
 from .models import PageKind, QualityScore, TextBlock
 from .native_extraction import assign_block_roles, promote_ocr_bold_blocks, sort_text_blocks
-from .text_style import estimate_font_size, estimate_text_bold, estimate_text_color
+from .text_style import classify_text_script, estimate_font_size, estimate_text_style
 
 
 def render_page_image(page: fitz.Page, dpi: int) -> Image.Image:
@@ -96,12 +96,17 @@ def filter_suspicious_ocr_blocks(
         block_height = max(0.0, block.bbox[3] - block.bbox[1])
         area_ratio = bbox_area(block.bbox) / page_area
         height_ratio = block_height / max(page_rect.height, 1.0)
-        is_suspicious = (
-            block.confidence < min_confidence
-            and len(normalized_text) <= max_short_text_length
-            and (
-                area_ratio >= min_large_block_area_ratio
-                or height_ratio >= min_large_block_height_ratio
+        is_large_block = any(
+            (
+                area_ratio >= min_large_block_area_ratio,
+                height_ratio >= min_large_block_height_ratio,
+            )
+        )
+        is_suspicious = all(
+            (
+                block.confidence < min_confidence,
+                len(normalized_text) <= max_short_text_length,
+                is_large_block,
             )
         )
         if not is_suspicious:
@@ -159,11 +164,12 @@ def enrich_ocr_blocks(blocks: list[TextBlock], image: Image.Image) -> list[TextB
     enriched: list[TextBlock] = []
     grayscale = image.convert("L")
     for index, block in enumerate(blocks, start=1):
-        crop = safe_crop(image, block.bbox)
-        gray_crop = safe_crop(grayscale, block.bbox)
-        color = estimate_text_color(crop, gray_crop)
-        bold = estimate_text_bold(block.text, gray_crop)
-        font_size = estimate_font_size(block.text, block.bbox)
+        crop_box = safe_crop_box(image.size, block.bbox)
+        crop = image.crop(crop_box)
+        gray_crop = grayscale.crop(crop_box)
+        script = classify_text_script(block.text)
+        color, bold = estimate_text_style(block.text, crop, gray_crop, script=script)
+        font_size = estimate_font_size(block.text, block.bbox, script=script)
         enriched.append(
             TextBlock(
                 id=block.id or f"ocr_{index}",
@@ -252,9 +258,16 @@ def intersection_ratio(
 
 
 def safe_crop(image: Image.Image, bbox: tuple[float, float, float, float]) -> Image.Image:
-    width, height = image.size
+    return image.crop(safe_crop_box(image.size, bbox))
+
+
+def safe_crop_box(
+    image_size: tuple[int, int],
+    bbox: tuple[float, float, float, float],
+) -> tuple[int, int, int, int]:
+    width, height = image_size
     left = max(0, min(width, int(bbox[0])))
     top = max(0, min(height, int(bbox[1])))
     right = max(left, min(width, int(bbox[2])))
     bottom = max(top, min(height, int(bbox[3])))
-    return image.crop((left, top, right, bottom))
+    return left, top, right, bottom
