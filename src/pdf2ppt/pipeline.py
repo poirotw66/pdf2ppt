@@ -99,6 +99,7 @@ def convert_pdf(
     *,
     progress_callback: ProgressCallback | None = None,
 ) -> ConversionReport:
+    conversion_started_at = perf_counter()
     options.output_path.parent.mkdir(parents=True, exist_ok=True)
     options.report_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -134,6 +135,7 @@ def convert_pdf(
                 logger.exception("Failed to process page %s", page.number + 1)
                 raise RuntimeError(f"Failed to process page {page.number + 1}: {error}") from error
             page_results.append(page_result)
+            slide_render_started_at = perf_counter()
             render_page_to_slide(
                 presentation,
                 blank_layout,
@@ -141,10 +143,15 @@ def convert_pdf(
                 slide_width_pt=first_page.rect.width,
                 slide_height_pt=first_page.rect.height,
             )
+            slide_render_seconds = perf_counter() - slide_render_started_at
+            logger.info("Page %s slide render: %.3fs", page.number + 1, slide_render_seconds)
             if progress_callback is not None:
                 progress_callback(page_index + 1, total_pages)
 
+        presentation_save_started_at = perf_counter()
         presentation.save(options.output_path)
+        presentation_save_seconds = perf_counter() - presentation_save_started_at
+        logger.info("Presentation save: %.3fs", presentation_save_seconds)
 
     report = ConversionReport(
         input_path=str(options.input_path),
@@ -155,20 +162,32 @@ def convert_pdf(
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    logger.info("Finished PDF conversion with %s page(s)", len(page_results))
+    logger.info(
+        "Finished PDF conversion with %s page(s) in %.3fs",
+        len(page_results),
+        perf_counter() - conversion_started_at,
+    )
     return report
 
 
 def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEngine) -> PageResult:
     page_started_at = perf_counter()
+    native_extract_seconds = 0.0
+    signal_seconds = 0.0
     ocr_render_seconds = 0.0
     ocr_seconds = 0.0
+    ocr_enrich_seconds = 0.0
+    page_mode_seconds = 0.0
     background_render_seconds = 0.0
     background_process_seconds = 0.0
     background_encode_seconds = 0.0
 
+    native_extract_started_at = perf_counter()
     native_blocks, image_boxes = extract_native_text_blocks(page)
+    native_extract_seconds = perf_counter() - native_extract_started_at
+    signal_started_at = perf_counter()
     signals = compute_page_signals(page, native_blocks, image_boxes)
+    signal_seconds = perf_counter() - signal_started_at
     page_kind = classify_page(signals)
     render_dpi = resolve_render_dpi(options)
     background_render_dpi = resolve_background_render_dpi(options)
@@ -185,6 +204,7 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         ocr_started_at = perf_counter()
         ocr_page_data = ocr_engine.extract_text_blocks(page_image, page.number + 1)
         ocr_seconds = perf_counter() - ocr_started_at
+        ocr_enrich_started_at = perf_counter()
         ocr_reference_image = ocr_page_data.image
         ocr_blocks = enrich_ocr_blocks(ocr_page_data.blocks, ocr_reference_image)
         ocr_blocks = map_blocks_to_page_coordinates(ocr_blocks, ocr_reference_image.size, page.rect)
@@ -197,7 +217,9 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
                 page.number + 1,
             )
         ocr_blocks = filtered_ocr_blocks
+        ocr_enrich_seconds = perf_counter() - ocr_enrich_started_at
 
+    page_mode_started_at = perf_counter()
     text_blocks = select_text_blocks(page_kind, native_blocks, ocr_blocks)
     quality = score_page(page_kind, text_blocks, native_blocks, ocr_blocks)
     background_mode, fallback_reason = choose_background_mode(
@@ -206,6 +228,7 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         has_text=bool(text_blocks),
         has_visuals=bool(image_boxes) or signals.drawing_count > 0,
     )
+    page_mode_seconds = perf_counter() - page_mode_started_at
     logger.debug(
         "Page %s classified as %s with background mode %s",
         page.number + 1,
@@ -292,10 +315,14 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
 
     page_total_seconds = perf_counter() - page_started_at
     logger.info(
-        "Page %s timings: ocr_render=%.3fs ocr=%.3fs background_render=%.3fs background_process=%.3fs background_encode=%.3fs total=%.3fs",
+        "Page %s timings: native_extract=%.3fs signals=%.3fs ocr_render=%.3fs ocr=%.3fs ocr_enrich=%.3fs page_mode=%.3fs background_render=%.3fs background_process=%.3fs background_encode=%.3fs total=%.3fs",
         page.number + 1,
+        native_extract_seconds,
+        signal_seconds,
         ocr_render_seconds,
         ocr_seconds,
+        ocr_enrich_seconds,
+        page_mode_seconds,
         background_render_seconds,
         background_process_seconds,
         background_encode_seconds,
