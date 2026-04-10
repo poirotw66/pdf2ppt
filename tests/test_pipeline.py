@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+import warnings
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line, main
 from pdf2ppt.inpainting_overlay import _apply_targeted_file_back_color_correction
 from pdf2ppt.models import QualityScore, TextBlock
-from pdf2ppt.ocr import build_local_ocr_model_kwargs, ensure_local_model_dir
+from pdf2ppt.ocr import build_local_ocr_model_kwargs, ensure_local_model_dir, suppress_known_paddle_runtime_warnings
 from pdf2ppt.pipeline import (
     BackgroundInpaintingError,
     analyze_page,
@@ -792,6 +793,19 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
 
 
 class OcrModelConfigTests(unittest.TestCase):
+    def test_suppress_known_paddle_runtime_warnings_filters_only_ccache_warning(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with suppress_known_paddle_runtime_warnings():
+                warnings.warn(
+                    "No ccache found. Please be aware that recompiling all source files may be required.",
+                    UserWarning,
+                )
+                warnings.warn("keep this warning", UserWarning)
+
+        self.assertEqual(len(caught), 1)
+        self.assertEqual(str(caught[0].message), "keep this warning")
+
     def test_build_local_ocr_model_kwargs_uses_repo_local_model_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             model_root = Path(tmp_dir) / "model"

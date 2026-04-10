@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import shutil
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +83,17 @@ DEFAULT_GROUPED_REC_MODEL_PREFIXES = {
 PADDLEX_OFFICIAL_MODEL_CACHE_DIR = Path.home() / ".paddlex" / "official_models"
 
 
+@contextmanager
+def suppress_known_paddle_runtime_warnings() -> Any:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"No ccache found\..*",
+            category=UserWarning,
+        )
+        yield
+
+
 class OcrEngine:
     def __init__(
         self,
@@ -108,7 +121,8 @@ class OcrEngine:
         if self._engine is None:
             os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
             try:
-                from paddleocr import PaddleOCR
+                with suppress_known_paddle_runtime_warnings():
+                    from paddleocr import PaddleOCR
             except ImportError as error:
                 raise OcrInitializationError(
                     "Failed to import PaddleOCR. Check that the OCR environment is installed and compatible."
@@ -123,7 +137,8 @@ class OcrEngine:
                 self.use_textline_orientation,
             )
             try:
-                self._engine = PaddleOCR(**engine_kwargs)
+                with suppress_known_paddle_runtime_warnings():
+                    self._engine = PaddleOCR(**engine_kwargs)
             except Exception as error:
                 raise OcrInitializationError(
                     "Failed to initialize PaddleOCR. Verify model downloads and environment dependencies."

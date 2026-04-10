@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from time import perf_counter
 from typing import Any, Callable
 
 import fitz
@@ -159,6 +160,13 @@ def convert_pdf(
 
 
 def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEngine) -> PageResult:
+    page_started_at = perf_counter()
+    ocr_render_seconds = 0.0
+    ocr_seconds = 0.0
+    background_render_seconds = 0.0
+    background_process_seconds = 0.0
+    background_encode_seconds = 0.0
+
     native_blocks, image_boxes = extract_native_text_blocks(page)
     signals = compute_page_signals(page, native_blocks, image_boxes)
     page_kind = classify_page(signals)
@@ -170,8 +178,13 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
     page_image: Any | None = None
     ocr_reference_image: Any | None = None
     if need_ocr:
+        ocr_render_started_at = perf_counter()
         page_image = render_page_image(page, dpi=render_dpi)
+        ocr_render_seconds = perf_counter() - ocr_render_started_at
+
+        ocr_started_at = perf_counter()
         ocr_page_data = ocr_engine.extract_text_blocks(page_image, page.number + 1)
+        ocr_seconds = perf_counter() - ocr_started_at
         ocr_reference_image = ocr_page_data.image
         ocr_blocks = enrich_ocr_blocks(ocr_page_data.blocks, ocr_reference_image)
         ocr_blocks = map_blocks_to_page_coordinates(ocr_blocks, ocr_reference_image.size, page.rect)
@@ -215,34 +228,44 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
             has_ocr_reference_image and should_downscale_background and uses_original_page_geometry
         )
         if page_image is None and background_render_dpi == render_dpi:
+            background_render_started_at = perf_counter()
             page_image = render_page_image(page, dpi=render_dpi)
+            background_render_seconds += perf_counter() - background_render_started_at
         if ocr_reference_image is not None and background_render_dpi == render_dpi:
             background_image = ocr_reference_image
         elif can_reuse_ocr_raster_for_background:
+            background_render_started_at = perf_counter()
             background_image = resize_rendered_page_image(
                 ocr_reference_image,
                 source_dpi=render_dpi,
                 target_dpi=background_render_dpi,
             )
+            background_render_seconds += perf_counter() - background_render_started_at
         else:
+            background_render_started_at = perf_counter()
             background_image = render_page_image(page, dpi=background_render_dpi)
+            background_render_seconds += perf_counter() - background_render_started_at
         if background_mode == "overlay" and text_blocks:
             mask_blocks = [block for block in text_blocks if block.source == "ocr"] or text_blocks
+            background_process_started_at = perf_counter()
             background_result = render_overlay_background(
                 background_image,
                 mask_blocks,
                 page.rect,
                 options=options,
             )
+            background_process_seconds = perf_counter() - background_process_started_at
             background_image = background_result.image
             background_inpaint_engine = background_result.engine_name
             background_inpaint_note = background_result.note
             mask_image = background_result.mask_image
+        background_encode_started_at = perf_counter()
         background_image_bytes = pil_to_image_bytes(
             background_image,
             image_format=options.background_image_format,
             jpeg_quality=options.background_jpeg_quality,
         )
+        background_encode_seconds = perf_counter() - background_encode_started_at
     if options.debug_dir is not None and ocr_blocks:
         debug_blocks = [block for block in text_blocks if block.source == "ocr"] or ocr_blocks
         debug_masked_image = background_image if background_mode == "overlay" else ocr_reference_image
@@ -266,6 +289,18 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
             page_number=page.number + 1,
             text_blocks=debug_blocks,
         )
+
+    page_total_seconds = perf_counter() - page_started_at
+    logger.info(
+        "Page %s timings: ocr_render=%.3fs ocr=%.3fs background_render=%.3fs background_process=%.3fs background_encode=%.3fs total=%.3fs",
+        page.number + 1,
+        ocr_render_seconds,
+        ocr_seconds,
+        background_render_seconds,
+        background_process_seconds,
+        background_encode_seconds,
+        page_total_seconds,
+    )
 
     return PageResult(
         page_number=page.number + 1,
