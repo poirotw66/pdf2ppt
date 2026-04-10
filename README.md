@@ -216,6 +216,7 @@ Main arguments:
 - `--mode`: `editable`, `fidelity`, or `fast`
 - `--lang`: PaddleOCR language code, default `ch`
 - `--ocr-model-root`: local PaddleOCR model directory, default `./model`
+- `--enable-doc-orientation`: enable PaddleOCR document orientation classification; disabled by default for faster startup and OCR
 - `--enable-textline-orientation`: enable PaddleOCR textline orientation classification; disabled by default for faster startup and OCR
 - `--ocr-det-thresh`: PaddleOCR text detection threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-det-box-thresh`: PaddleOCR detection box threshold, optional, uses the PaddleOCR default when omitted

@@ -734,15 +734,30 @@ class OcrModelConfigTests(unittest.TestCase):
             kwargs = build_local_ocr_model_kwargs(
                 model_root=model_root,
                 lang="ch",
+                use_doc_orientation=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
+
+            self.assertEqual(kwargs["text_detection_model_name"], "PP-OCRv5_server_det")
+            self.assertEqual(kwargs["text_recognition_model_name"], "PP-OCRv5_server_rec")
+            self.assertEqual(Path(kwargs["text_detection_model_dir"]).parent, model_root.resolve())
+            self.assertNotIn("doc_orientation_classify_model_dir", kwargs)
+            self.assertNotIn("textline_orientation_model_dir", kwargs)
+
+    def test_build_local_ocr_model_kwargs_can_enable_doc_orientation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model_root = Path(tmp_dir) / "model"
+            kwargs = build_local_ocr_model_kwargs(
+                model_root=model_root,
+                lang="ch",
+                use_doc_orientation=True,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,
             )
 
             self.assertEqual(kwargs["doc_orientation_classify_model_name"], "PP-LCNet_x1_0_doc_ori")
-            self.assertEqual(kwargs["text_detection_model_name"], "PP-OCRv5_server_det")
-            self.assertEqual(kwargs["text_recognition_model_name"], "PP-OCRv5_server_rec")
-            self.assertEqual(Path(kwargs["text_detection_model_dir"]).parent, model_root.resolve())
-            self.assertNotIn("textline_orientation_model_dir", kwargs)
+            self.assertEqual(Path(kwargs["doc_orientation_classify_model_dir"]).parent, model_root.resolve())
 
     def test_ensure_local_model_dir_reuses_existing_paddlex_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -764,6 +779,7 @@ class CliTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["input.pdf", "output.pptx"])
         self.assertFalse(args.enable_doc_unwarping)
+        self.assertFalse(args.enable_doc_orientation)
         self.assertEqual(args.ocr_model_root, Path("model"))
         self.assertFalse(args.enable_textline_orientation)
         self.assertEqual(args.inpaint_engine, "auto")
@@ -788,7 +804,7 @@ class CliTests(unittest.TestCase):
         args = parser.parse_args(["input.pdf", "output.pptx", "--enable-doc-unwarping"])
         self.assertTrue(args.enable_doc_unwarping)
 
-    def test_textline_orientation_and_model_root_can_be_enabled(self) -> None:
+    def test_orientation_flags_and_model_root_can_be_enabled(self) -> None:
         parser = build_parser()
         args = parser.parse_args(
             [
@@ -796,10 +812,12 @@ class CliTests(unittest.TestCase):
                 "output.pptx",
                 "--ocr-model-root",
                 "local-models",
+                "--enable-doc-orientation",
                 "--enable-textline-orientation",
             ]
         )
         self.assertEqual(args.ocr_model_root, Path("local-models"))
+        self.assertTrue(args.enable_doc_orientation)
         self.assertTrue(args.enable_textline_orientation)
 
     @patch("pdf2ppt.cli.convert_pdf")

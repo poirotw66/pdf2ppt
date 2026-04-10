@@ -69,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory used for local PaddleOCR model storage. Defaults to ./model.",
     )
     parser.add_argument(
+        "--enable-doc-orientation",
+        action="store_true",
+        help="Enable PaddleOCR document orientation classification. Disabled by default to reduce startup and OCR latency.",
+    )
+    parser.add_argument(
         "--enable-textline-orientation",
         action="store_true",
         help="Enable PaddleOCR textline orientation classification. Disabled by default to reduce startup and OCR latency.",
@@ -198,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         mode=args.mode,
         lang=args.lang,
         ocr_model_root=args.ocr_model_root,
+        ocr_use_doc_orientation=args.enable_doc_orientation,
         ocr_use_textline_orientation=args.enable_textline_orientation,
         ocr_det_thresh=args.ocr_det_thresh,
         ocr_det_box_thresh=args.ocr_det_box_thresh,

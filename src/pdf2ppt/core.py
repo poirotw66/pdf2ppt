@@ -14,6 +14,7 @@ class ConversionOptions:
     mode: str = "editable"
     lang: str = "ch"
     ocr_model_root: Path | None = Path("model")
+    ocr_use_doc_orientation: bool = False
     ocr_use_textline_orientation: bool = False
     ocr_det_thresh: float | None = None
     ocr_det_box_thresh: float | None = None

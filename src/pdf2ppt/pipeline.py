@@ -104,6 +104,7 @@ def convert_pdf(
     ocr_engine = OcrEngine(
         lang=options.lang,
         model_root=options.ocr_model_root,
+        use_doc_orientation=options.ocr_use_doc_orientation,
         use_textline_orientation=options.ocr_use_textline_orientation,
         use_doc_unwarping=options.use_doc_unwarping,
         det_thresh=options.ocr_det_thresh,

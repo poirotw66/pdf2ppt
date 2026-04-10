@@ -87,6 +87,7 @@ class OcrEngine:
         lang: str,
         *,
         model_root: Path | None,
+        use_doc_orientation: bool,
         use_textline_orientation: bool,
         use_doc_unwarping: bool,
         det_thresh: float | None,
@@ -95,6 +96,7 @@ class OcrEngine:
     ) -> None:
         self.lang = lang
         self.model_root = model_root
+        self.use_doc_orientation = use_doc_orientation
         self.use_textline_orientation = use_textline_orientation
         self.use_doc_unwarping = use_doc_unwarping
         self.det_thresh = det_thresh
@@ -114,9 +116,10 @@ class OcrEngine:
 
             engine_kwargs = self._build_engine_kwargs()
             logger.info(
-                "Initializing PaddleOCR engine for lang=%s with model_root=%s textline_orientation=%s",
+                "Initializing PaddleOCR engine for lang=%s with model_root=%s doc_orientation=%s textline_orientation=%s",
                 self.lang,
                 self.model_root,
+                self.use_doc_orientation,
                 self.use_textline_orientation,
             )
             try:
@@ -131,11 +134,12 @@ class OcrEngine:
         local_model_kwargs = build_local_ocr_model_kwargs(
             model_root=self.model_root,
             lang=self.lang,
+            use_doc_orientation=self.use_doc_orientation,
             use_doc_unwarping=self.use_doc_unwarping,
             use_textline_orientation=self.use_textline_orientation,
         )
         engine_kwargs: dict[str, Any] = {
-            "use_doc_orientation_classify": True,
+            "use_doc_orientation_classify": self.use_doc_orientation,
             "use_doc_unwarping": self.use_doc_unwarping,
             "use_textline_orientation": self.use_textline_orientation,
         }
@@ -297,6 +301,7 @@ def build_local_ocr_model_kwargs(
     *,
     model_root: Path | None,
     lang: str,
+    use_doc_orientation: bool,
     use_doc_unwarping: bool,
     use_textline_orientation: bool,
 ) -> dict[str, str]:
@@ -314,14 +319,15 @@ def build_local_ocr_model_kwargs(
     resolved_root = model_root.resolve()
     resolved_root.mkdir(parents=True, exist_ok=True)
     model_kwargs: dict[str, str] = {}
-    model_kwargs.update(
-        _build_model_location(
-            model_root=resolved_root,
-            name_key="doc_orientation_classify_model_name",
-            dir_key="doc_orientation_classify_model_dir",
-            model_name=DEFAULT_DOC_ORIENTATION_MODEL_NAME,
+    if use_doc_orientation:
+        model_kwargs.update(
+            _build_model_location(
+                model_root=resolved_root,
+                name_key="doc_orientation_classify_model_name",
+                dir_key="doc_orientation_classify_model_dir",
+                model_name=DEFAULT_DOC_ORIENTATION_MODEL_NAME,
+            )
         )
-    )
     model_kwargs.update(
         _build_model_location(
             model_root=resolved_root,
