@@ -955,7 +955,7 @@ class CliTests(unittest.TestCase):
         self.assertFalse(args.enable_doc_orientation)
         self.assertEqual(args.ocr_model_root, Path("model"))
         self.assertFalse(args.enable_textline_orientation)
-        self.assertEqual(args.inpaint_engine, "auto")
+        self.assertEqual(args.inpaint_engine, "opencv-fast")
         self.assertIsNone(args.ocr_det_thresh)
         self.assertIsNone(args.ocr_det_box_thresh)
         self.assertIsNone(args.ocr_drop_score)
@@ -1039,6 +1039,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.background_format, "png")
         self.assertEqual(args.background_jpeg_quality, 70)
         self.assertEqual(args.log_level, "DEBUG")
+
+    def test_inpaint_engine_defaults_to_opencv_fast(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["input.pdf", "output.pptx"])
+        self.assertEqual(args.inpaint_engine, "opencv-fast")
 
     def test_format_progress_line_reports_completion(self) -> None:
         line = format_progress_line(2, 4, width=8)

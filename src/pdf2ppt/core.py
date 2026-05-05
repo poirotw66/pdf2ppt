@@ -26,7 +26,7 @@ class ConversionOptions:
     background_jpeg_quality: int = 82
     debug_dir: Path | None = None
     use_doc_unwarping: bool = False
-    inpaint_engine: str = "auto"
+    inpaint_engine: str = "opencv-fast"
     inpaint_padding_px: int = 6
     inpaint_max_area_ratio: float = 0.12
     approved_ocr_blocks_by_page: dict[int, list[Any]] = field(default_factory=dict)

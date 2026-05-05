@@ -73,11 +73,14 @@ export default function App() {
   const [convertResult, setConvertResult] = useState<ConvertResponse | null>(null);
   const [dragState, setDragState] = useState<DragState>(null);
   const [zoom, setZoom] = useState(1);
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   const [boxFilter, setBoxFilter] = useState<BoxFilter>("all");
   const [boxSort, setBoxSort] = useState<BoxSort>("reading-order");
   const [boxGroup, setBoxGroup] = useState<BoxGroup>("none");
   const [lowConfidenceThreshold, setLowConfidenceThreshold] = useState(lowConfidenceDefault);
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const editorViewportRef = useRef<HTMLDivElement | null>(null);
+  const [editorViewportSize, setEditorViewportSize] = useState({ width: 0, height: 0 });
 
   const selectedPage = pages[selectedPageIndex] ?? null;
   const selectedBox = useMemo(
@@ -100,6 +103,15 @@ export default function App() {
   }, [boxFilter, lowConfidenceThreshold, selectedPage]);
   const orderedBoxes = useMemo(() => sortBoxes(filteredBoxes, boxSort), [boxSort, filteredBoxes]);
   const groupedBoxes = useMemo(() => groupBoxes(orderedBoxes, boxGroup), [boxGroup, orderedBoxes]);
+  const fitScale = useMemo(() => {
+    if (!selectedPage || editorViewportSize.width <= 0 || editorViewportSize.height <= 0) {
+      return 1;
+    }
+    const widthScale = editorViewportSize.width / selectedPage.width;
+    const heightScale = editorViewportSize.height / selectedPage.height;
+    return Math.min(widthScale, heightScale);
+  }, [editorViewportSize.height, editorViewportSize.width, selectedPage]);
+  const previewScale = selectedPage ? fitScale * zoom : 1;
 
   useEffect(() => {
     function onWindowKeyDown(event: KeyboardEvent) {
@@ -156,12 +168,35 @@ export default function App() {
     return () => window.removeEventListener("keydown", onWindowKeyDown);
   }, [dragState, orderedBoxes, selectedBoxId, selectedPage]);
 
+  useEffect(() => {
+    if (!editorViewportRef.current) {
+      return;
+    }
+    const element = editorViewportRef.current;
+    const updateSize = () => {
+      setEditorViewportSize({
+        width: Math.max(element.clientWidth - 36, 1),
+        height: Math.max(element.clientHeight - 36, 1),
+      });
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    setDragState(null);
+  }, [selectedPageIndex]);
+
   async function createJob() {
     if (!file) {
       setStatusText("Select a PDF before creating a job.");
       return;
     }
     setIsBusy(true);
+    setBusyAction("Creating job...");
+    setStatusText(`Uploading ${file.name} and creating job...`);
     setConvertResult(null);
     try {
       const formData = new FormData();
@@ -183,6 +218,7 @@ export default function App() {
       setStatusText(`Create job failed: ${stringifyError(error)}`);
     } finally {
       setIsBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -192,6 +228,8 @@ export default function App() {
       return;
     }
     setIsBusy(true);
+    setBusyAction("Running OCR detect...");
+    setStatusText(`Running OCR detect for job ${job.job_id}...`);
     try {
       const response = await fetch(`${apiBase}/jobs/${job.job_id}/detect`, {
         method: "POST",
@@ -210,6 +248,7 @@ export default function App() {
       setStatusText(`Detect failed: ${stringifyError(error)}`);
     } finally {
       setIsBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -219,6 +258,8 @@ export default function App() {
       return false;
     }
     setIsBusy(true);
+    setBusyAction("Saving boxes...");
+    setStatusText("Saving approved boxes...");
     try {
       const response = await fetch(`${apiBase}/jobs/${job.job_id}/boxes`, {
         method: "PUT",
@@ -246,6 +287,7 @@ export default function App() {
       return false;
     } finally {
       setIsBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -259,6 +301,8 @@ export default function App() {
       return;
     }
     setIsBusy(true);
+    setBusyAction("Converting PPTX...");
+    setStatusText(`Converting job ${job.job_id} into PPTX...`);
     try {
       const response = await fetch(`${apiBase}/jobs/${job.job_id}/convert`, {
         method: "POST",
@@ -279,6 +323,7 @@ export default function App() {
       setStatusText(`Convert failed: ${stringifyError(error)}`);
     } finally {
       setIsBusy(false);
+      setBusyAction(null);
     }
   }
 
@@ -317,7 +362,7 @@ export default function App() {
     if (target.closest(".ocr-box") || target.closest(".resize-handle")) {
       return;
     }
-    const point = getLocalPoint(event, editorRef.current);
+    const point = getLocalPoint(event, editorRef.current, previewScale);
     setSelectedBoxId(null);
     setDragState({ kind: "create", startX: point.x, startY: point.y, currentX: point.x, currentY: point.y });
   }
@@ -326,7 +371,7 @@ export default function App() {
     if (!dragState || !editorRef.current) {
       return;
     }
-    const point = getLocalPoint(event, editorRef.current);
+    const point = getLocalPoint(event, editorRef.current, previewScale);
     if (dragState.kind === "create") {
       setDragState({ ...dragState, currentX: point.x, currentY: point.y });
       return;
@@ -407,7 +452,7 @@ export default function App() {
     if (!editorRef.current) {
       return;
     }
-    const point = getLocalPoint(event, editorRef.current);
+    const point = getLocalPoint(event, editorRef.current, previewScale);
     setSelectedBoxId(box.id);
     setDragState({ kind: "move", boxId: box.id, startX: point.x, startY: point.y, origin: box.bbox });
   }
@@ -417,7 +462,7 @@ export default function App() {
     if (!editorRef.current) {
       return;
     }
-    const point = getLocalPoint(event, editorRef.current);
+    const point = getLocalPoint(event, editorRef.current, previewScale);
     setSelectedBoxId(box.id);
     setDragState({ kind: "resize", boxId: box.id, handle, startX: point.x, startY: point.y, origin: box.bbox });
   }
@@ -553,13 +598,14 @@ export default function App() {
             accept="application/pdf"
             onChange={(event) => setFile(event.target.files?.[0] ?? null)}
           />
-          <button onClick={createJob} disabled={isBusy || !file}>Create Job</button>
-          <button onClick={runDetect} disabled={isBusy || !job}>Run OCR Detect</button>
+          <button onClick={createJob} disabled={isBusy || !file}>{busyAction === "Creating job..." ? "Creating Job..." : "Create Job"}</button>
+          <button onClick={runDetect} disabled={isBusy || !job}>{busyAction === "Running OCR detect..." ? "Running OCR Detect..." : "Run OCR Detect"}</button>
           <button onClick={saveBoxes} disabled={isBusy || !job || pages.length === 0}>Save Boxes</button>
           <button onClick={convertJob} disabled={isBusy || !job || pages.length === 0}>Convert PPTX</button>
           <div className="status-card">
             <strong>Status</strong>
             <span>{statusText}</span>
+            {busyAction ? <span className="busy-indicator">{busyAction}</span> : null}
             {job ? <span className="muted">Job: {job.job_id}</span> : null}
           </div>
           {convertResult && job ? (
@@ -584,6 +630,7 @@ export default function App() {
                 onClick={() => {
                   setSelectedPageIndex(index);
                   setSelectedBoxId(page.boxes[0]?.id ?? null);
+                  setStatusText(`Viewing page ${page.page}.`);
                 }}
               >
                 <span>Page {page.page}</span>
@@ -608,18 +655,18 @@ export default function App() {
             </div>
           </div>
           {selectedPage ? (
-            <div className="editor-scroll">
+            <div ref={editorViewportRef} className="editor-scroll">
               <div
                 ref={editorRef}
                 className="editor-canvas"
-                style={{ width: selectedPage.width * zoom, height: selectedPage.height * zoom }}
+                style={{ width: selectedPage.width * previewScale, height: selectedPage.height * previewScale }}
                 onMouseDown={onEditorMouseDown}
                 onMouseMove={onEditorMouseMove}
                 onMouseUp={onEditorMouseUp}
                 onMouseLeave={onEditorMouseUp}
               >
-                <div className="editor-stage" style={{ width: selectedPage.width, height: selectedPage.height, transform: `scale(${zoom})` }}>
-                  <img src={`${apiBase}${selectedPage.image_url}`} alt={`Page ${selectedPage.page}`} draggable={false} />
+                <div key={selectedPage.page} className="editor-stage" style={{ width: selectedPage.width, height: selectedPage.height, transform: `scale(${previewScale})` }}>
+                  <img key={selectedPage.image_url} src={`${apiBase}${selectedPage.image_url}`} alt={`Page ${selectedPage.page}`} draggable={false} />
                 {selectedPage.boxes.map((box) => {
                   const [x0, y0, x1, y1] = box.bbox;
                   return (
@@ -893,11 +940,11 @@ function rectToStyle([x0, y0, x1, y1]: [number, number, number, number]) {
   };
 }
 
-function getLocalPoint(event: React.MouseEvent<HTMLElement>, element: HTMLDivElement) {
+function getLocalPoint(event: React.MouseEvent<HTMLElement>, element: HTMLDivElement, scale: number) {
   const rect = element.getBoundingClientRect();
   return {
-    x: (event.clientX - rect.left) / (rect.width / element.offsetWidth),
-    y: (event.clientY - rect.top) / (rect.height / element.offsetHeight),
+    x: ((event.clientX - rect.left) / (rect.width / element.offsetWidth)) / scale,
+    y: ((event.clientY - rect.top) / (rect.height / element.offsetHeight)) / scale,
   };
 }
 

@@ -92,7 +92,7 @@ class ConvertRequest(BaseModel):
     background_dpi: int = Field(default=110, ge=72, le=300)
     background_format: str = "jpeg"
     background_jpeg_quality: int = Field(default=82, ge=1, le=95)
-    inpaint_engine: str = "auto"
+    inpaint_engine: str = "opencv-fast"
     inpaint_padding_px: int = Field(default=6, ge=0, le=128)
     inpaint_max_area_ratio: float = Field(default=0.12, ge=0.0, le=1.0)
     write_debug_artifacts: bool = False

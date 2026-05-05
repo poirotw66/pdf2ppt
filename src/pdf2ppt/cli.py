@@ -130,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--inpaint-engine",
         choices=("auto", "white-box", "opencv-fast"),
-        default="auto",
+        default="opencv-fast",
         help="Background reconstruction engine for overlay pages.",
     )
     parser.add_argument(
