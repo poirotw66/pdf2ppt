@@ -7,6 +7,7 @@ from typing import Any
 import fitz
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
 
@@ -28,6 +29,13 @@ from .ocr import OcrEngine
 from .pipeline import convert_pdf
 
 app = FastAPI(title="pdf2ppt API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 job_store = JobStore()
 
 
@@ -178,6 +186,28 @@ def get_job_page_preview(job_id: str, page_number: int) -> FileResponse:
     if not preview_path.exists():
         raise HTTPException(status_code=404, detail="Preview image not found.")
     return FileResponse(preview_path, media_type="image/png")
+
+
+@app.get("/jobs/{job_id}/output.pptx")
+def download_output_pptx(job_id: str) -> FileResponse:
+    record = _load_job_or_404(job_id)
+    if record.output_pptx_path is None:
+        raise HTTPException(status_code=404, detail="Converted PPTX not found.")
+    output_path = Path(record.output_pptx_path)
+    if not output_path.exists():
+        raise HTTPException(status_code=404, detail="Converted PPTX file is missing.")
+    return FileResponse(output_path, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+
+
+@app.get("/jobs/{job_id}/report.json")
+def download_report_json(job_id: str) -> FileResponse:
+    record = _load_job_or_404(job_id)
+    if record.report_path is None:
+        raise HTTPException(status_code=404, detail="Conversion report not found.")
+    report_path = Path(record.report_path)
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="Conversion report file is missing.")
+    return FileResponse(report_path, media_type="application/json")
 
 
 def run() -> None:

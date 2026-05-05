@@ -288,6 +288,93 @@ Run tests:
 python -m pytest -q
 ```
 
+## How to Enable the Review UI
+
+If you have not installed the project into the current Conda environment yet, do this first:
+
+```bash
+cd /home/justin/pdf2ppt
+source /home/justin/miniconda3/etc/profile.d/conda.sh
+conda activate ppocr
+python -m pip install -e .
+```
+
+Start the backend in one terminal:
+
+```bash
+cd /home/justin/pdf2ppt
+source /home/justin/miniconda3/etc/profile.d/conda.sh
+conda activate ppocr
+python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8000
+```
+
+Start the frontend in a second terminal:
+
+```bash
+cd /home/justin/pdf2ppt/frontend
+npm install
+npm run dev
+```
+
+Then open `http://127.0.0.1:5173` in the browser.
+
+Notes:
+
+- `npm install` is only required the first time or after frontend dependency changes.
+- The `npm install` command must be run inside `frontend/`, not the home directory.
+- The frontend proxies `/jobs/*` to the FastAPI backend on port `8000`.
+- If the same Conda environment also contains `iopaint` or older `gradio` / `fastapi` stacks, dependency conflicts can break the API startup. In that case, reinstall `pydantic`, `pydantic-core`, `fastapi`, and `starlette`, or use a dedicated environment for `pdf2ppt`.
+- If you only want CLI conversion, you do not need to run the review UI.
+
+Run the review backend:
+
+```bash
+conda activate ppocr
+python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8000
+```
+
+Run the review frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173` in the browser. The Vite dev server proxies `/jobs/*` to the FastAPI backend on port `8000`.
+
+## Review Workflow
+
+The project now includes a lightweight review UI for OCR-heavy decks. It is intended for the cases where raw detection boxes need a human pass before inpainting and PPT generation.
+
+End-to-end flow:
+
+1. Upload a PDF in the web UI to create a job.
+2. Run OCR detect to generate page previews and candidate text boxes.
+3. Review each page and adjust the approved boxes before conversion.
+4. Save the approved boxes back to the backend.
+5. Run conversion so the pipeline uses approved boxes first, fills missing text with per-box recognition when needed, then generates the PPTX and report.
+
+Editor capabilities in the current UI:
+
+- Create a new box by dragging on empty canvas.
+- Move an existing box by dragging it.
+- Resize a selected box from its four corner handles.
+- Use zoom, numeric bbox fields, and nudge buttons for fine correction.
+- Edit box text, source, and confidence in the inspector.
+- Duplicate or delete the selected box.
+- Leave text empty for manually added boxes when you want convert-time OCR recognition to populate it.
+
+Relevant backend endpoints:
+
+- `POST /jobs`
+- `POST /jobs/{job_id}/detect`
+- `PUT /jobs/{job_id}/boxes`
+- `POST /jobs/{job_id}/convert`
+- `GET /jobs/{job_id}/pages/{page_number}.png`
+- `GET /jobs/{job_id}/output.pptx`
+- `GET /jobs/{job_id}/report.json`
+
 Project entry point:
 
 - CLI: `src/pdf2ppt/cli.py`

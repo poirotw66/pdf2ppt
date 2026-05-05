@@ -1,6 +1,11 @@
 PyMuPDF>=1.27.0
 python-pptx>=1.0.0
 paddleocr>=3.4.0
+chardet<6
 opencv-python-headless>=4.10.0
 Pillow>=10.0.0
-numpy>=1.26.0
+numpy<2.0,>=1.26.0
+fastapi>=0.115.0
+pydantic<2.14,>=2.13.2
+uvicorn>=0.32.0
+python-multipart>=0.0.12

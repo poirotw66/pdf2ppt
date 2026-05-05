@@ -279,6 +279,93 @@ JSON report 會包含：
 python -m pytest -q
 ```
 
+## 如何啟用 Review UI
+
+如果目前這個 Conda 環境還沒有安裝專案，先執行一次：
+
+```bash
+cd /home/justin/pdf2ppt
+source /home/justin/miniconda3/etc/profile.d/conda.sh
+conda activate ppocr
+python -m pip install -e .
+```
+
+先在第一個 terminal 啟動後端：
+
+```bash
+cd /home/justin/pdf2ppt
+source /home/justin/miniconda3/etc/profile.d/conda.sh
+conda activate ppocr
+python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8000
+```
+
+再在第二個 terminal 啟動前端：
+
+```bash
+cd /home/justin/pdf2ppt/frontend
+npm install
+npm run dev
+```
+
+之後用瀏覽器開啟 `http://127.0.0.1:5173`。
+
+補充說明：
+
+- `npm install` 只有第一次安裝或前端依賴變動後才需要重新執行。
+- `npm install` 必須在 `frontend/` 目錄下執行，不能在家目錄執行。
+- 前端會把 `/jobs/*` 代理到 `8000` port 的 FastAPI 後端。
+- 如果同一個 Conda 環境裡還裝了 `iopaint`，或其他較舊的 `gradio` / `fastapi` 套件組合，可能會把 API 相依套件弄壞。遇到這種情況，請重新安裝 `pydantic`、`pydantic-core`、`fastapi`、`starlette`，或直接為 `pdf2ppt` 分出獨立環境。
+- 如果你只想跑 CLI 轉檔，不需要啟動這個 review UI。
+
+啟動 review 後端：
+
+```bash
+conda activate ppocr
+python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8000
+```
+
+啟動 review 前端：
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+之後用瀏覽器開啟 `http://127.0.0.1:5173`。Vite dev server 會把 `/jobs/*` 代理到 `8000` port 的 FastAPI 後端。
+
+## Review Workflow
+
+目前專案已包含一個輕量的 OCR 審框前端，適合用在原始 OCR detection 還需要人工複查後，才進入 inpaint 與 PPT 生成的情境。
+
+完整流程如下：
+
+1. 在網頁上傳 PDF，建立 job。
+2. 執行 OCR detect，取得逐頁預覽與候選文字框。
+3. 逐頁檢查並修改要核准的 boxes。
+4. 把 approved boxes 存回後端。
+5. 執行 convert，讓 pipeline 優先使用 approved boxes；若手動新增框沒有文字，則在 convert 階段做逐框 recognition，最後輸出 PPTX 與 report。
+
+目前前端已支援：
+
+- 在空白區拖曳建立新框。
+- 直接拖曳既有框做平移。
+- 用四角 resize handles 視覺化調整框大小。
+- 透過 zoom、數值 bbox 欄位與 nudge 按鈕做精細修正。
+- 在 inspector 內編輯文字、source、confidence。
+- 複製或刪除目前選取的框。
+- 若希望手動新增框在 convert 時再做 OCR，可把文字留空。
+
+相關後端 API：
+
+- `POST /jobs`
+- `POST /jobs/{job_id}/detect`
+- `PUT /jobs/{job_id}/boxes`
+- `POST /jobs/{job_id}/convert`
+- `GET /jobs/{job_id}/pages/{page_number}.png`
+- `GET /jobs/{job_id}/output.pptx`
+- `GET /jobs/{job_id}/report.json`
+
 主要檔案：
 
 - CLI：`src/pdf2ppt/cli.py`
