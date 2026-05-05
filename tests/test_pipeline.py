@@ -640,6 +640,126 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
         render_page_image_mock.assert_not_called()
         extract_image_elements_mock.assert_called_once()
 
+    @patch("pdf2ppt.pipeline.render_overlay_background")
+    @patch("pdf2ppt.pipeline.pil_to_image_bytes", return_value=b"jpeg-bytes")
+    @patch("pdf2ppt.pipeline.choose_background_mode", return_value=("overlay", None))
+    @patch("pdf2ppt.pipeline.classify_page", return_value="scanned")
+    @patch(
+        "pdf2ppt.pipeline.compute_page_signals",
+        return_value=PageSignals(
+            native_char_count=0,
+            native_text_area_ratio=0.0,
+            image_area_ratio=1.0,
+            drawing_count=0,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], []))
+    def test_analyze_page_prefers_approved_boxes_over_raw_ocr(
+        self,
+        _extract_native_text_blocks_mock: unittest.mock.Mock,
+        _compute_page_signals_mock: unittest.mock.Mock,
+        _classify_page_mock: unittest.mock.Mock,
+        _choose_background_mode_mock: unittest.mock.Mock,
+        _encode_background_mock: unittest.mock.Mock,
+        render_overlay_background_mock: unittest.mock.Mock,
+    ) -> None:
+        preview_image = Image.new("RGB", (200, 100), (10, 10, 10))
+        render_overlay_background_mock.return_value = SimpleNamespace(
+            image=preview_image,
+            engine_name="opencv-fast",
+            note="ok",
+            mask_image=None,
+            debug_images={},
+        )
+        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            approved_ocr_blocks_by_page={
+                1: [
+                    TextBlock(
+                        id="approved_1",
+                        source="ocr",
+                        bbox=(10, 20, 50, 60),
+                        text="Approved",
+                        confidence=1.0,
+                        image_bbox=(10, 20, 50, 60),
+                        image_polygon=((10, 20), (50, 20), (50, 60), (10, 60)),
+                    )
+                ]
+            },
+            approved_ocr_image_size_by_page={1: (200, 100)},
+        )
+        ocr_engine = unittest.mock.Mock()
+
+        with patch("pdf2ppt.pipeline.render_page_image", return_value=preview_image):
+            result = analyze_page(page, options, ocr_engine=ocr_engine)
+
+        ocr_engine.extract_text_blocks.assert_not_called()
+        self.assertEqual([block.text for block in result.text_blocks], ["Approved"])
+        self.assertEqual(result.background_inpaint_engine, "opencv-fast")
+
+    @patch("pdf2ppt.pipeline.render_overlay_background")
+    @patch("pdf2ppt.pipeline.pil_to_image_bytes", return_value=b"jpeg-bytes")
+    @patch("pdf2ppt.pipeline.choose_background_mode", return_value=("overlay", None))
+    @patch("pdf2ppt.pipeline.classify_page", return_value="scanned")
+    @patch(
+        "pdf2ppt.pipeline.compute_page_signals",
+        return_value=PageSignals(
+            native_char_count=0,
+            native_text_area_ratio=0.0,
+            image_area_ratio=1.0,
+            drawing_count=0,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], []))
+    def test_analyze_page_recognizes_text_for_blank_approved_box(
+        self,
+        _extract_native_text_blocks_mock: unittest.mock.Mock,
+        _compute_page_signals_mock: unittest.mock.Mock,
+        _classify_page_mock: unittest.mock.Mock,
+        _choose_background_mode_mock: unittest.mock.Mock,
+        _encode_background_mock: unittest.mock.Mock,
+        render_overlay_background_mock: unittest.mock.Mock,
+    ) -> None:
+        preview_image = Image.new("RGB", (200, 100), (10, 10, 10))
+        render_overlay_background_mock.return_value = SimpleNamespace(
+            image=preview_image,
+            engine_name="opencv-fast",
+            note="ok",
+            mask_image=None,
+            debug_images={},
+        )
+        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            approved_ocr_blocks_by_page={
+                1: [
+                    TextBlock(
+                        id="approved_blank_1",
+                        source="ocr",
+                        bbox=(10, 20, 50, 60),
+                        text="",
+                        confidence=1.0,
+                        image_bbox=(10, 20, 50, 60),
+                    )
+                ]
+            },
+            approved_ocr_image_size_by_page={1: (200, 100)},
+        )
+        ocr_engine = unittest.mock.Mock()
+        ocr_engine.recognize_text_in_box.return_value = ("Manual OCR", 0.88)
+
+        with patch("pdf2ppt.pipeline.render_page_image", return_value=preview_image):
+            result = analyze_page(page, options, ocr_engine=ocr_engine)
+
+        ocr_engine.extract_text_blocks.assert_not_called()
+        ocr_engine.recognize_text_in_box.assert_called_once()
+        self.assertEqual([block.text for block in result.text_blocks], ["Manual OCR"])
+
     @patch("pdf2ppt.pipeline.pil_to_image_bytes", return_value=b"jpeg-bytes")
     @patch("pdf2ppt.pipeline.render_page_image")
     @patch("pdf2ppt.pipeline.choose_background_mode", return_value=("full-page", "fallback"))

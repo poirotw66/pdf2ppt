@@ -16,10 +16,14 @@ dependencies = [
   "opencv-python-headless>=4.10.0",
   "Pillow>=10.0.0",
   "numpy>=1.26.0,<2.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.32.0",
+  "python-multipart>=0.0.12",
 ]
 
 [project.scripts]
 pdf2ppt = "pdf2ppt.cli:main"
+pdf2ppt-api = "pdf2ppt.api:run"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

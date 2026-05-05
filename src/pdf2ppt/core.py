@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -28,6 +29,8 @@ class ConversionOptions:
     inpaint_engine: str = "auto"
     inpaint_padding_px: int = 6
     inpaint_max_area_ratio: float = 0.12
+    approved_ocr_blocks_by_page: dict[int, list[Any]] = field(default_factory=dict)
+    approved_ocr_image_size_by_page: dict[int, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

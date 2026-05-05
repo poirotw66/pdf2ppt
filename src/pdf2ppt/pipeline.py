@@ -190,11 +190,27 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
     render_dpi = resolve_render_dpi(options)
     background_render_dpi = resolve_background_render_dpi(options)
 
+    page_number = page.number + 1
+    has_approved_ocr_blocks = page_number in options.approved_ocr_blocks_by_page
     need_ocr = page_kind in {"scanned", "hybrid"} or not native_blocks
     ocr_blocks: list[TextBlock] = []
     page_image: Any | None = None
     ocr_reference_image: Any | None = None
-    if need_ocr:
+    if has_approved_ocr_blocks:
+        ocr_render_started_at = perf_counter()
+        page_image = render_page_image(page, dpi=render_dpi)
+        ocr_render_seconds = perf_counter() - ocr_render_started_at
+        ocr_reference_image = page_image
+        ocr_enrich_started_at = perf_counter()
+        ocr_blocks = resolve_approved_ocr_blocks(
+            page_number=page_number,
+            options=options,
+            page_rect=page.rect,
+            page_image=page_image,
+            ocr_engine=ocr_engine,
+        )
+        ocr_enrich_seconds = perf_counter() - ocr_enrich_started_at
+    elif need_ocr:
         ocr_render_started_at = perf_counter()
         page_image = render_page_image(page, dpi=render_dpi)
         ocr_render_seconds = perf_counter() - ocr_render_started_at
@@ -295,7 +311,7 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
                 debug_masked_image = ocr_reference_image
         write_debug_artifacts(
             debug_dir=options.debug_dir,
-            page_number=page.number + 1,
+            page_number=page_number,
             page_image=ocr_reference_image,
             masked_image=debug_masked_image,
             mask_image=mask_image,
@@ -307,14 +323,14 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         )
         write_text_fit_debug_report(
             debug_dir=options.debug_dir,
-            page_number=page.number + 1,
+            page_number=page_number,
             text_blocks=debug_blocks,
         )
 
     page_total_seconds = perf_counter() - page_started_at
     logger.info(
         "Page %s timings: native_extract=%.3fs signals=%.3fs ocr_render=%.3fs ocr=%.3fs ocr_enrich=%.3fs page_mode=%.3fs background_render=%.3fs background_process=%.3fs background_encode=%.3fs total=%.3fs",
-        page.number + 1,
+        page_number,
         native_extract_seconds,
         signal_seconds,
         ocr_render_seconds,
@@ -328,7 +344,7 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
     )
 
     return PageResult(
-        page_number=page.number + 1,
+        page_number=page_number,
         page_kind=page_kind,
         background_mode=background_mode,
         width_pt=page.rect.width,
@@ -341,6 +357,117 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         background_image_bytes=background_image_bytes,
         image_elements=image_elements,
     )
+
+
+def resolve_approved_ocr_blocks(
+    *,
+    page_number: int,
+    options: ConversionOptions,
+    page_rect: fitz.Rect,
+    page_image: Image.Image,
+    ocr_engine: OcrEngine,
+) -> list[TextBlock]:
+    approved_blocks = options.approved_ocr_blocks_by_page.get(page_number, [])
+    if not approved_blocks:
+        return []
+
+    source_image_size = options.approved_ocr_image_size_by_page.get(page_number, page_image.size)
+    scaled_blocks = scale_blocks_to_image_size(approved_blocks, source_image_size, page_image.size)
+    resolved_blocks = recognize_missing_approved_block_texts(scaled_blocks, page_image=page_image, ocr_engine=ocr_engine, page_number=page_number)
+    resolved_blocks = [block for block in resolved_blocks if block.text.strip()]
+    if not resolved_blocks:
+        return []
+    enriched_blocks = enrich_ocr_blocks(resolved_blocks, page_image)
+    return map_blocks_to_page_coordinates(enriched_blocks, page_image.size, page_rect)
+
+
+def recognize_missing_approved_block_texts(
+    blocks: list[TextBlock],
+    *,
+    page_image: Image.Image,
+    ocr_engine: OcrEngine,
+    page_number: int,
+) -> list[TextBlock]:
+    resolved_blocks: list[TextBlock] = []
+    for index, block in enumerate(blocks, start=1):
+        if block.text.strip():
+            resolved_blocks.append(block)
+            continue
+        recognized_text, recognized_confidence = ocr_engine.recognize_text_in_box(
+            page_image,
+            block.image_bbox or block.bbox,
+            page_number=page_number * 1000 + index,
+        )
+        resolved_blocks.append(
+            TextBlock(
+                id=block.id,
+                source=block.source,
+                bbox=block.bbox,
+                text=recognized_text,
+                confidence=recognized_confidence if recognized_text else block.confidence,
+                font_family=block.font_family,
+                font_size=block.font_size,
+                font_color=block.font_color,
+                bold=block.bold,
+                italic=block.italic,
+                reading_order=block.reading_order,
+                block_role=block.block_role,
+                image_bbox=block.image_bbox,
+                image_polygon=block.image_polygon,
+            )
+        )
+    return resolved_blocks
+
+
+def scale_blocks_to_image_size(
+    blocks: list[TextBlock],
+    source_size: tuple[int, int],
+    target_size: tuple[int, int],
+) -> list[TextBlock]:
+    source_width, source_height = source_size
+    target_width, target_height = target_size
+    if source_width <= 0 or source_height <= 0:
+        return blocks
+    scale_x = target_width / source_width
+    scale_y = target_height / source_height
+    if abs(scale_x - 1.0) < 1e-6 and abs(scale_y - 1.0) < 1e-6:
+        return blocks
+
+    scaled_blocks: list[TextBlock] = []
+    for block in blocks:
+        x0, y0, x1, y1 = block.bbox
+        scaled_blocks.append(
+            TextBlock(
+                id=block.id,
+                source=block.source,
+                bbox=(x0 * scale_x, y0 * scale_y, x1 * scale_x, y1 * scale_y),
+                text=block.text,
+                confidence=block.confidence,
+                font_family=block.font_family,
+                font_size=block.font_size * scale_y if block.font_size else None,
+                font_color=block.font_color,
+                bold=block.bold,
+                italic=block.italic,
+                reading_order=block.reading_order,
+                block_role=block.block_role,
+                image_bbox=(
+                    (
+                        block.image_bbox[0] * scale_x,
+                        block.image_bbox[1] * scale_y,
+                        block.image_bbox[2] * scale_x,
+                        block.image_bbox[3] * scale_y,
+                    )
+                    if block.image_bbox is not None
+                    else None
+                ),
+                image_polygon=(
+                    tuple((point[0] * scale_x, point[1] * scale_y) for point in block.image_polygon)
+                    if block.image_polygon is not None
+                    else None
+                ),
+            )
+        )
+    return scaled_blocks
 
 
 def resize_rendered_page_image(image: Image.Image, *, source_dpi: int, target_dpi: int) -> Image.Image:

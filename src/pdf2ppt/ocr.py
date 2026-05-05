@@ -194,6 +194,25 @@ class OcrEngine:
         logger.info("OCR extracted %s block(s) from page %s", len(blocks), page_number)
         return OcrPageData(blocks=blocks, image=reference_image)
 
+    def recognize_text_in_box(
+        self,
+        image: Image.Image,
+        bbox: tuple[float, float, float, float],
+        *,
+        page_number: int,
+    ) -> tuple[str, float]:
+        crop_box = clamp_bbox_to_image(image.size, bbox)
+        if crop_box is None:
+            return "", 0.0
+        crop = image.convert("RGB").crop(crop_box)
+        page_data = self.extract_text_blocks(crop, page_number)
+        texts = [block.text.strip() for block in page_data.blocks if block.text.strip()]
+        if not texts:
+            return "", 0.0
+        confidences = [block.confidence for block in page_data.blocks if block.text.strip()]
+        confidence = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
+        return "\n".join(texts), confidence
+
 
 def _coerce_ocr_payload(result: Any) -> Any:
     if isinstance(result, (dict, list)):
@@ -310,6 +329,20 @@ def polygon_to_bbox(polygon: Any) -> tuple[float, float, float, float]:
     xs = [float(point[0]) for point in points]
     ys = [float(point[1]) for point in points]
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def clamp_bbox_to_image(
+    image_size: tuple[int, int],
+    bbox: tuple[float, float, float, float],
+) -> tuple[int, int, int, int] | None:
+    width, height = image_size
+    left = max(0, min(width, int(bbox[0])))
+    top = max(0, min(height, int(bbox[1])))
+    right = max(left, min(width, int(bbox[2])))
+    bottom = max(top, min(height, int(bbox[3])))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
 
 
 def build_local_ocr_model_kwargs(
