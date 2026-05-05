@@ -194,6 +194,41 @@ class OcrEngine:
         logger.info("OCR extracted %s block(s) from page %s", len(blocks), page_number)
         return OcrPageData(blocks=blocks, image=reference_image)
 
+    def extract_text_blocks_batch(self, images: list[Image.Image], page_numbers: list[int]) -> list[OcrPageData]:
+        if len(images) != len(page_numbers):
+            raise ValueError("images and page_numbers must have the same length")
+        if not images:
+            return []
+
+        rgb_images = [image.convert("RGB") for image in images]
+        image_arrays = [np.array(image) for image in rgb_images]
+        try:
+            results = list(self._get_engine().predict(image_arrays))
+        except OcrInitializationError:
+            raise
+        except Exception as error:
+            raise OcrProcessingError(
+                f"OCR batch prediction failed for pages {page_numbers[0]}-{page_numbers[-1]}: {error}"
+            ) from error
+
+        if len(results) != len(images):
+            return [self.extract_text_blocks(image, page_number) for image, page_number in zip(images, page_numbers)]
+
+        page_data_list: list[OcrPageData] = []
+        for rgb_image, page_number, result in zip(rgb_images, page_numbers, results):
+            blocks: list[TextBlock] = []
+            reference_image = rgb_image
+            order = 1
+            payload = _coerce_ocr_payload(result)
+            candidate_image = _extract_ocr_reference_image(payload)
+            if candidate_image is not None:
+                reference_image = candidate_image
+            extracted = _extract_ocr_blocks(payload, page_number=page_number, order_start=order)
+            blocks.extend(extracted)
+            logger.info("OCR batch extracted %s block(s) from page %s", len(blocks), page_number)
+            page_data_list.append(OcrPageData(blocks=blocks, image=reference_image))
+        return page_data_list
+
     def recognize_text_in_box(
         self,
         image: Image.Image,

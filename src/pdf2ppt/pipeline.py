@@ -42,6 +42,7 @@ from .block_analysis import (
 )
 from .core import (
     ConversionOptions,
+    DEFAULT_OCR_BATCH_SIZE,
     OcrInitializationError,
     OcrPageData,
     OcrProcessingError,
@@ -121,6 +122,7 @@ def convert_pdf(
         presentation.slide_height = pt_to_emu(first_page.rect.height)
         blank_layout = presentation.slide_layouts[6]
         total_pages = document.page_count
+        batched_ocr_page_data = prepare_batched_ocr_page_data(document, options, ocr_engine)
         if progress_callback is not None:
             progress_callback(0, total_pages)
 
@@ -128,7 +130,12 @@ def convert_pdf(
             page = document[page_index]
             logger.info("Processing page %s/%s", page_index + 1, total_pages)
             try:
-                page_result = analyze_page(page, options, ocr_engine)
+                page_result = analyze_page(
+                    page,
+                    options,
+                    ocr_engine,
+                    precomputed_ocr_page_data=batched_ocr_page_data.get(page.number + 1),
+                )
             except Exception as error:
                 logger.exception("Failed to process page %s", page.number + 1)
                 raise RuntimeError(f"Failed to process page {page.number + 1}: {error}") from error
@@ -168,7 +175,13 @@ def convert_pdf(
     return report
 
 
-def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEngine) -> PageResult:
+def analyze_page(
+    page: fitz.Page,
+    options: ConversionOptions,
+    ocr_engine: OcrEngine,
+    *,
+    precomputed_ocr_page_data: tuple[Image.Image, OcrPageData] | None = None,
+) -> PageResult:
     page_started_at = perf_counter()
     native_extract_seconds = 0.0
     signal_seconds = 0.0
@@ -211,13 +224,16 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         )
         ocr_enrich_seconds = perf_counter() - ocr_enrich_started_at
     elif need_ocr:
-        ocr_render_started_at = perf_counter()
-        page_image = render_page_image(page, dpi=render_dpi)
-        ocr_render_seconds = perf_counter() - ocr_render_started_at
+        if precomputed_ocr_page_data is not None:
+            page_image, ocr_page_data = precomputed_ocr_page_data
+        else:
+            ocr_render_started_at = perf_counter()
+            page_image = render_page_image(page, dpi=render_dpi)
+            ocr_render_seconds = perf_counter() - ocr_render_started_at
 
-        ocr_started_at = perf_counter()
-        ocr_page_data = ocr_engine.extract_text_blocks(page_image, page.number + 1)
-        ocr_seconds = perf_counter() - ocr_started_at
+            ocr_started_at = perf_counter()
+            ocr_page_data = ocr_engine.extract_text_blocks(page_image, page.number + 1)
+            ocr_seconds = perf_counter() - ocr_started_at
         ocr_enrich_started_at = perf_counter()
         ocr_reference_image = ocr_page_data.image
         ocr_blocks = enrich_ocr_blocks(ocr_page_data.blocks, ocr_reference_image)
@@ -357,6 +373,36 @@ def analyze_page(page: fitz.Page, options: ConversionOptions, ocr_engine: OcrEng
         background_image_bytes=background_image_bytes,
         image_elements=image_elements,
     )
+
+
+def prepare_batched_ocr_page_data(
+    document: fitz.Document,
+    options: ConversionOptions,
+    ocr_engine: OcrEngine,
+) -> dict[int, tuple[Image.Image, OcrPageData]]:
+    batched_results: dict[int, tuple[Image.Image, OcrPageData]] = {}
+    pages_to_ocr: list[tuple[fitz.Page, int]] = []
+    for page_index in range(document.page_count):
+        page = document[page_index]
+        native_blocks, image_boxes = extract_native_text_blocks(page)
+        signals = compute_page_signals(page, native_blocks, image_boxes)
+        page_kind = classify_page(signals)
+        page_number = page.number + 1
+        has_approved_ocr_blocks = page_number in options.approved_ocr_blocks_by_page
+        need_ocr = page_kind in {"scanned", "hybrid"} or not native_blocks
+        if need_ocr and not has_approved_ocr_blocks:
+            pages_to_ocr.append((page, page_number))
+
+    render_dpi = resolve_render_dpi(options)
+    batch_size = max(1, options.ocr_batch_size or DEFAULT_OCR_BATCH_SIZE)
+    for batch_start in range(0, len(pages_to_ocr), batch_size):
+        batch = pages_to_ocr[batch_start : batch_start + batch_size]
+        batch_images = [render_page_image(page, dpi=render_dpi) for page, _page_number in batch]
+        batch_numbers = [page_number for _page, page_number in batch]
+        batch_ocr_results = ocr_engine.extract_text_blocks_batch(batch_images, batch_numbers)
+        for (page, page_number), page_image, ocr_page_data in zip(batch, batch_images, batch_ocr_results):
+            batched_results[page_number] = (page_image, ocr_page_data)
+    return batched_results
 
 
 def resolve_approved_ocr_blocks(

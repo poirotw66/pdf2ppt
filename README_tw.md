@@ -359,9 +359,9 @@ npm run dev
 相關後端 API：
 
 - `POST /jobs`
-- `POST /jobs/{job_id}/detect`
+- `POST /jobs/{job_id}/detect`，可選 `ocr_batch_size`
 - `PUT /jobs/{job_id}/boxes`
-- `POST /jobs/{job_id}/convert`
+- `POST /jobs/{job_id}/convert`，可選 `ocr_batch_size`
 - `GET /jobs/{job_id}/pages/{page_number}.png`
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`

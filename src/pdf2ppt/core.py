@@ -7,6 +7,9 @@ from typing import Any
 from PIL import Image
 
 
+DEFAULT_OCR_BATCH_SIZE = 3
+
+
 @dataclass(slots=True)
 class ConversionOptions:
     input_path: Path
@@ -20,6 +23,7 @@ class ConversionOptions:
     ocr_det_thresh: float | None = None
     ocr_det_box_thresh: float | None = None
     ocr_drop_score: float | None = None
+    ocr_batch_size: int = DEFAULT_OCR_BATCH_SIZE
     render_dpi: int = 144
     background_dpi: int = 110
     background_image_format: str = "jpeg"

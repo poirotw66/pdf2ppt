@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from .core import DEFAULT_OCR_BATCH_SIZE
+
 
 class JobResponse(BaseModel):
     job_id: str
@@ -26,6 +28,7 @@ class DetectRequest(BaseModel):
     det_thresh: float | None = None
     det_box_thresh: float | None = None
     drop_score: float | None = None
+    ocr_batch_size: int = Field(default=DEFAULT_OCR_BATCH_SIZE, ge=1, le=32)
 
 
 class OcrBoxResponse(BaseModel):
@@ -88,6 +91,7 @@ class ConvertRequest(BaseModel):
     det_thresh: float | None = None
     det_box_thresh: float | None = None
     drop_score: float | None = None
+    ocr_batch_size: int = Field(default=DEFAULT_OCR_BATCH_SIZE, ge=1, le=32)
     dpi: int = Field(default=144, ge=72, le=300)
     background_dpi: int = Field(default=110, ge=72, le=300)
     background_format: str = "jpeg"

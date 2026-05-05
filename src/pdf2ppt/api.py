@@ -22,7 +22,7 @@ from .api_models import (
     JobResponse,
     OcrBoxResponse,
 )
-from .core import ConversionOptions
+from .core import ConversionOptions, DEFAULT_OCR_BATCH_SIZE
 from .job_store import JobRecord, JobStore
 from .models import TextBlock
 from .ocr import OcrEngine
@@ -82,23 +82,31 @@ def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
     pages: list[DetectPageResponse] = []
     try:
         with fitz.open(record.input_pdf_path) as document:
-            for page_index in range(document.page_count):
-                page = document[page_index]
-                preview_image = _render_page_preview(page, dpi=request.dpi)
-                preview_path = job_store.preview_image_path(job_id, page_index + 1)
-                preview_image.save(preview_path, format="PNG")
+            for batch_start in range(0, document.page_count, request.ocr_batch_size):
+                batch_pages = []
+                batch_images = []
+                batch_numbers = []
+                for page_index in range(batch_start, min(batch_start + request.ocr_batch_size, document.page_count)):
+                    page = document[page_index]
+                    preview_image = _render_page_preview(page, dpi=request.dpi)
+                    preview_path = job_store.preview_image_path(job_id, page_index + 1)
+                    preview_image.save(preview_path, format="PNG")
+                    batch_pages.append(page_index)
+                    batch_images.append(preview_image)
+                    batch_numbers.append(page_index + 1)
 
-                ocr_page_data = ocr_engine.extract_text_blocks(preview_image, page_index + 1)
-                boxes = [_text_block_to_box_response(block) for block in ocr_page_data.blocks]
-                pages.append(
-                    DetectPageResponse(
-                        page=page_index + 1,
-                        image_url=f"/jobs/{job_id}/pages/{page_index + 1}.png",
-                        width=preview_image.width,
-                        height=preview_image.height,
-                        boxes=boxes,
+                batch_ocr_results = ocr_engine.extract_text_blocks_batch(batch_images, batch_numbers)
+                for page_index, preview_image, ocr_page_data in zip(batch_pages, batch_images, batch_ocr_results):
+                    boxes = [_text_block_to_box_response(block) for block in ocr_page_data.blocks]
+                    pages.append(
+                        DetectPageResponse(
+                            page=page_index + 1,
+                            image_url=f"/jobs/{job_id}/pages/{page_index + 1}.png",
+                            width=preview_image.width,
+                            height=preview_image.height,
+                            boxes=boxes,
+                        )
                     )
-                )
     except Exception as error:
         job_store.update_job(job_id, status="detect-failed")
         raise HTTPException(status_code=500, detail=f"OCR detection failed: {error}") from error
@@ -144,6 +152,7 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         ocr_det_thresh=request.det_thresh,
         ocr_det_box_thresh=request.det_box_thresh,
         ocr_drop_score=request.drop_score,
+        ocr_batch_size=request.ocr_batch_size,
         render_dpi=request.dpi,
         background_dpi=request.background_dpi,
         background_image_format=request.background_format,

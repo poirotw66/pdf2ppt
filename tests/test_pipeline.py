@@ -959,6 +959,7 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.ocr_det_thresh)
         self.assertIsNone(args.ocr_det_box_thresh)
         self.assertIsNone(args.ocr_drop_score)
+        self.assertEqual(args.ocr_batch_size, 3)
         self.assertEqual(args.inpaint_padding_px, 6)
         self.assertAlmostEqual(args.inpaint_max_area_ratio, 0.12)
         self.assertEqual(args.background_dpi, 110)
@@ -1013,6 +1014,8 @@ class CliTests(unittest.TestCase):
                 "0.6",
                 "--ocr-drop-score",
                 "0.65",
+                "--ocr-batch-size",
+                "6",
                 "--inpaint-engine",
                 "opencv-fast",
                 "--inpaint-padding-px",
@@ -1032,6 +1035,7 @@ class CliTests(unittest.TestCase):
         self.assertAlmostEqual(args.ocr_det_thresh, 0.55)
         self.assertAlmostEqual(args.ocr_det_box_thresh, 0.6)
         self.assertAlmostEqual(args.ocr_drop_score, 0.65)
+        self.assertEqual(args.ocr_batch_size, 6)
         self.assertEqual(args.inpaint_engine, "opencv-fast")
         self.assertEqual(args.inpaint_padding_px, 10)
         self.assertAlmostEqual(args.inpaint_max_area_ratio, 0.2)
@@ -1044,6 +1048,20 @@ class CliTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["input.pdf", "output.pptx"])
         self.assertEqual(args.inpaint_engine, "opencv-fast")
+
+    @patch("pdf2ppt.cli.convert_pdf")
+    def test_main_passes_custom_ocr_batch_size(self, convert_pdf_mock: unittest.mock.Mock) -> None:
+        convert_pdf_mock.return_value = SimpleNamespace(
+            input_path="input.pdf",
+            output_path="output.pptx",
+            pages=[object()],
+        )
+
+        exit_code = main(["input.pdf", "output.pptx", "--ocr-batch-size", "4"])
+
+        self.assertEqual(exit_code, 0)
+        options = convert_pdf_mock.call_args.args[0]
+        self.assertEqual(options.ocr_batch_size, 4)
 
     def test_format_progress_line_reports_completion(self) -> None:
         line = format_progress_line(2, 4, width=8)

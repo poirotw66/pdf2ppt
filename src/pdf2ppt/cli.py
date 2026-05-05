@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Callable, TextIO
 
+from .core import DEFAULT_OCR_BATCH_SIZE
 from .pipeline import ConversionOptions, convert_pdf
 
 
@@ -40,6 +41,13 @@ def build_progress_callback(
         last_line = line
 
     return callback
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be >= 1")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--ocr-drop-score",
         type=float,
         help="PaddleOCR recognition score threshold. Omit to use the PaddleOCR default.",
+    )
+    parser.add_argument(
+        "--ocr-batch-size",
+        type=positive_int,
+        default=DEFAULT_OCR_BATCH_SIZE,
+        help="Number of pages processed together for full-page OCR. Defaults to 3.",
     )
     parser.add_argument(
         "--dpi",
@@ -175,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         ocr_det_thresh=args.ocr_det_thresh,
         ocr_det_box_thresh=args.ocr_det_box_thresh,
         ocr_drop_score=args.ocr_drop_score,
+        ocr_batch_size=args.ocr_batch_size,
         render_dpi=args.dpi,
         background_dpi=args.background_dpi,
         background_image_format=args.background_format,

@@ -206,6 +206,7 @@ Main arguments:
 - `--ocr-det-thresh`: PaddleOCR text detection threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-det-box-thresh`: PaddleOCR detection box threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-drop-score`: PaddleOCR recognition score threshold, optional, uses the PaddleOCR default when omitted
+- `--ocr-batch-size`: number of pages processed together for full-page OCR, default `3`
 - `--dpi`: render DPI for OCR-oriented page rasterization
 - `--background-dpi`: render DPI for embedded full-page and overlay backgrounds
 - `--background-format`: `jpeg` or `png` for embedded backgrounds; `jpeg` is smaller
@@ -368,9 +369,9 @@ Editor capabilities in the current UI:
 Relevant backend endpoints:
 
 - `POST /jobs`
-- `POST /jobs/{job_id}/detect`
+- `POST /jobs/{job_id}/detect` with optional `ocr_batch_size`
 - `PUT /jobs/{job_id}/boxes`
-- `POST /jobs/{job_id}/convert`
+- `POST /jobs/{job_id}/convert` with optional `ocr_batch_size`
 - `GET /jobs/{job_id}/pages/{page_number}.png`
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`
