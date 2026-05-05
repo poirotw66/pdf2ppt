@@ -15,8 +15,8 @@ Core pipeline:
 ## Project Status
 
 - Recommended default background engine: `opencv-fast`
-- `diffusion-local` is still under active development and should be treated as experimental
-- For most documents, start with `opencv-fast` first and only try `diffusion-local` for more complex backgrounds
+- `diffusion-local` has been removed because local diffusion inpainting was too slow and inconsistent
+- For most documents, start with `opencv-fast` first and let the pipeline fall back to `white-box` when masking is too large
 
 ## Result Showcase
 
@@ -35,7 +35,6 @@ Core pipeline:
 - Support multiple background reconstruction engines:
   - `white-box`
   - `opencv-fast` (recommended)
-  - `diffusion-local` (experimental / in progress)
   - `auto` routing
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
@@ -49,9 +48,6 @@ Core pipeline:
 - For the OCR stack, use a dedicated Conda environment with `numpy<2`
 - For OCR:
   - PaddleOCR runtime and model downloads
-- Optional for faster local inpainting:
-  - NVIDIA GPU
-  - `iopaint` or another compatible local diffusion backend
 
 ## Installation
 
@@ -80,8 +76,6 @@ Optional development dependency for running tests:
 ```bash
 python -m pip install pytest
 ```
-
-If you want to use local diffusion inpainting, install and verify your backend separately. For example, this project has been tested with an `iopaint`-based workflow. At this stage, `diffusion-local` is still experimental, so `opencv-fast` remains the recommended first choice.
 
 Quick environment check:
 
@@ -177,10 +171,12 @@ When it works less well:
 
 How it interacts with `auto` routing:
 
-- If mask coverage is too large, `auto` falls back to `white-box` for safety.
-- If the local background complexity is low, `auto` prefers `opencv-fast`.
-- Complexity is estimated from the area around the mask using grayscale variance and edge density.
-- If complexity is high and a diffusion backend is available, `auto` can switch to `diffusion-local`, though that path is still experimental.
+- `auto` first looks at text-mask area ratio, not just visual complexity.
+- If the mask area ratio stays within `--inpaint-max-area-ratio`, `auto` keeps using `opencv-fast`.
+- If the mask is larger than that threshold, `auto` usually falls back to `white-box`.
+- There is one exception: a moderately oversized mask can still use `opencv-fast` when most masked pixels sit on low-texture background.
+- The low-texture exception is capped internally, so very large masks still go to `white-box`.
+- Background complexity is still measured and written into debug notes, but it is no longer the primary branch point.
 
 Relevant knobs:
 
@@ -193,18 +189,7 @@ Practical guidance:
 
 - Start with `opencv-fast` for most presentation PDFs.
 - Increase `--inpaint-padding-px` slightly if text halos remain.
-- Switch to `diffusion-local` only when backgrounds are visually complex enough to justify the extra cost and experimental behavior is acceptable.
-
-Use a local diffusion backend:
-
-```bash
-pdf2ppt input.pdf output.pptx \
-  --inpaint-engine diffusion-local \
-  --diffusion-command iopaint \
-  --diffusion-model runwayml/stable-diffusion-inpainting \
-  --diffusion-device cuda \
-  --report output.report.json
-```
+- If `opencv-fast` cannot safely repair a large mask, prefer `white-box` over a slower generative fallback.
 
 ## CLI Options
 
@@ -230,18 +215,9 @@ Main arguments:
 
 Background reconstruction:
 
-- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, or `diffusion-local`
+- `--inpaint-engine`: `auto`, `white-box`, or `opencv-fast`
 - `--inpaint-padding-px`: expand text masks before inpainting
 - `--inpaint-max-area-ratio`: force white-box fallback when the masked area is too large
-
-Local diffusion settings:
-
-- `--diffusion-command`: CLI command for the backend, default `iopaint`
-- `--diffusion-model`: model name passed to the backend
-- `--diffusion-device`: `cuda` or `cpu`
-- `--diffusion-max-crop-edge`: maximum crop size sent to the backend
-- `--diffusion-complexity-threshold`: auto-routing threshold for complex backgrounds
-- `--diffusion-timeout-sec`: timeout for each local diffusion backend call
 
 Diagnostics:
 
@@ -271,9 +247,16 @@ Instead, it uses a conditional strategy:
 
 For overlay pages, `auto` routing can choose:
 
-- `opencv-fast` for simpler backgrounds
-- `diffusion-local` for more complex masked regions when the backend is available, though this path is still experimental
-- `white-box` as the safest fallback for large masks or unavailable backends
+- `opencv-fast` when the mask stays within the configured area threshold
+- `opencv-fast` for some moderately oversized masks when the masked region is mostly low-texture
+- `white-box` when the mask is too large or too structurally risky for local repair
+
+In practical terms, the `auto` decision order is:
+
+1. Measure the text-mask area ratio.
+2. If it is at or below `--inpaint-max-area-ratio`, use `opencv-fast`.
+3. If it is above that threshold, estimate how much of the masked region is low-texture.
+4. Keep `opencv-fast` only when that large-mask exception still looks safe; otherwise use `white-box`.
 
 ## Output Files
 
@@ -296,7 +279,6 @@ The JSON report includes:
 - OCR-heavy pages are still estimations, not perfect semantic reconstruction.
 - Complex charts and vector graphics are currently preserved more for appearance than semantic editability.
 - Bold and color restoration for OCR text are heuristic-based.
-- Local diffusion quality depends heavily on backend availability, GPU memory, and model choice.
 
 ## Development
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import tempfile
 import unittest
 import warnings
@@ -33,7 +32,6 @@ from pdf2ppt.pipeline import (
     estimate_text_color,
     fit_text_frame,
     filter_suspicious_ocr_blocks,
-    invoke_diffusion_backend,
     measure_text_dimensions,
     OpenCvFastInpaintingEngine,
     pil_to_image_bytes,
@@ -582,90 +580,6 @@ class OcrStyleOptimizationTests(unittest.TestCase):
         self.assertIn("file_back_corrected", debug_images)
         self.assertIn("file_back_mask", debug_images)
 
-    @patch("pdf2ppt.inpainting_engines.shutil.which", return_value="/usr/bin/iopaint")
-    @patch("pdf2ppt.inpainting_engines.invoke_diffusion_backend")
-    def test_render_overlay_background_uses_diffusion_when_explicit(
-        self,
-        invoke_backend: unittest.mock.Mock,
-        _which: unittest.mock.Mock,
-    ) -> None:
-        image = Image.linear_gradient("L").resize((120, 90)).convert("RGB")
-        invoke_backend.side_effect = (
-            lambda crop_image, crop_mask, **kwargs: Image.new("RGB", crop_image.size, (90, 100, 110))
-        )
-        blocks = [
-            TextBlock(
-                id="ocr_7",
-                source="ocr",
-                bbox=(30, 20, 70, 40),
-                text="demo",
-                confidence=0.9,
-                image_bbox=(30, 20, 70, 40),
-            )
-        ]
-        options = ConversionOptions(
-            input_path=Path("input.pdf"),
-            output_path=Path("output.pptx"),
-            report_path=Path("output.report.json"),
-            inpaint_engine="diffusion-local",
-            inpaint_padding_px=4,
-            diffusion_model="brushnet",
-            diffusion_device="cuda",
-            diffusion_max_crop_edge=256,
-        )
-        result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 120, 90), options=options)
-        self.assertEqual(result.engine_name, "diffusion-local")
-        self.assertIn("brushnet", result.note or "")
-        self.assertTrue(invoke_backend.called)
-
-    @patch("pdf2ppt.inpainting_engines.shutil.which", return_value="/usr/bin/iopaint")
-    @patch("pdf2ppt.inpainting_engines.invoke_diffusion_backend", side_effect=BackgroundInpaintingError("boom"))
-    def test_render_overlay_background_diffusion_failure_falls_back_to_opencv(
-        self,
-        _invoke_backend: unittest.mock.Mock,
-        _which: unittest.mock.Mock,
-    ) -> None:
-        image = Image.new("RGB", (80, 50), color=(20, 30, 40))
-        blocks = [
-            TextBlock(
-                id="ocr_8",
-                source="ocr",
-                bbox=(25, 15, 40, 28),
-                text="demo",
-                confidence=0.9,
-                image_bbox=(25, 15, 40, 28),
-            )
-        ]
-        options = ConversionOptions(
-            input_path=Path("input.pdf"),
-            output_path=Path("output.pptx"),
-            report_path=Path("output.report.json"),
-            inpaint_engine="diffusion-local",
-            inpaint_padding_px=0,
-            inpaint_max_area_ratio=0.5,
-        )
-        result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 80, 50), options=options)
-        self.assertEqual(result.engine_name, "opencv-fast")
-        self.assertIn("Fallback to opencv-fast", result.note or "")
-
-    @patch("pdf2ppt.inpainting_engines.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="iopaint", timeout=2.5))
-    def test_invoke_diffusion_backend_timeout_raises_background_error(
-        self,
-        _run: unittest.mock.Mock,
-    ) -> None:
-        with self.assertRaises(BackgroundInpaintingError) as context:
-            invoke_diffusion_backend(
-                Image.new("RGB", (20, 20), color=(0, 0, 0)),
-                Image.new("L", (20, 20), color=255),
-                command="iopaint",
-                model="brushnet",
-                device="cpu",
-                max_crop_edge=64,
-                timeout_sec=2.5,
-            )
-        self.assertIn("timed out", str(context.exception))
-
-
 class AnalyzePagePerformanceTests(unittest.TestCase):
     @patch("pdf2ppt.pipeline.extract_image_elements", return_value=[])
     @patch("pdf2ppt.pipeline.render_page_image")
@@ -927,12 +841,6 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.ocr_drop_score)
         self.assertEqual(args.inpaint_padding_px, 6)
         self.assertAlmostEqual(args.inpaint_max_area_ratio, 0.12)
-        self.assertEqual(args.diffusion_command, "iopaint")
-        self.assertEqual(args.diffusion_model, "brushnet")
-        self.assertEqual(args.diffusion_device, "cuda")
-        self.assertEqual(args.diffusion_max_crop_edge, 1024)
-        self.assertAlmostEqual(args.diffusion_complexity_threshold, 0.3)
-        self.assertAlmostEqual(args.diffusion_timeout_sec, 120.0)
         self.assertEqual(args.background_dpi, 110)
         self.assertEqual(args.background_format, "jpeg")
         self.assertEqual(args.background_jpeg_quality, 82)
@@ -986,23 +894,11 @@ class CliTests(unittest.TestCase):
                 "--ocr-drop-score",
                 "0.65",
                 "--inpaint-engine",
-                "diffusion-local",
+                "opencv-fast",
                 "--inpaint-padding-px",
                 "10",
                 "--inpaint-max-area-ratio",
                 "0.2",
-                "--diffusion-command",
-                "custom-iopaint",
-                "--diffusion-model",
-                "powerpaint-v2",
-                "--diffusion-device",
-                "cuda:0",
-                "--diffusion-max-crop-edge",
-                "768",
-                "--diffusion-complexity-threshold",
-                "0.45",
-                "--diffusion-timeout-sec",
-                "15",
                 "--background-dpi",
                 "96",
                 "--background-format",
@@ -1016,15 +912,9 @@ class CliTests(unittest.TestCase):
         self.assertAlmostEqual(args.ocr_det_thresh, 0.55)
         self.assertAlmostEqual(args.ocr_det_box_thresh, 0.6)
         self.assertAlmostEqual(args.ocr_drop_score, 0.65)
-        self.assertEqual(args.inpaint_engine, "diffusion-local")
+        self.assertEqual(args.inpaint_engine, "opencv-fast")
         self.assertEqual(args.inpaint_padding_px, 10)
         self.assertAlmostEqual(args.inpaint_max_area_ratio, 0.2)
-        self.assertEqual(args.diffusion_command, "custom-iopaint")
-        self.assertEqual(args.diffusion_model, "powerpaint-v2")
-        self.assertEqual(args.diffusion_device, "cuda:0")
-        self.assertEqual(args.diffusion_max_crop_edge, 768)
-        self.assertAlmostEqual(args.diffusion_complexity_threshold, 0.45)
-        self.assertAlmostEqual(args.diffusion_timeout_sec, 15.0)
         self.assertEqual(args.background_dpi, 96)
         self.assertEqual(args.background_format, "png")
         self.assertEqual(args.background_jpeg_quality, 70)

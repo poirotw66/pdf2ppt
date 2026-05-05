@@ -15,8 +15,8 @@
 ## 專案狀態
 
 - 目前建議優先使用的背景引擎：`opencv-fast`
-- `diffusion-local` 仍在持續開發中，現階段應視為實驗性功能
-- 大多數文件建議先從 `opencv-fast` 開始，再視背景複雜度決定是否嘗試 `diffusion-local`
+- `diffusion-local` 已移除，因為地端 diffusion inpainting 速度慢且效果不穩定
+- 大多數文件建議先從 `opencv-fast` 開始，遮罩過大時再回退到 `white-box`
 
 ## 成果展示
 
@@ -35,7 +35,6 @@
 - 支援多種背景重建引擎：
   - `white-box`
   - `opencv-fast`（建議優先使用）
-  - `diffusion-local`（實驗性 / 開發中）
   - `auto` 自動路由
 - 每次轉換都可輸出 JSON 報告。
 - 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
@@ -49,9 +48,6 @@
 - 若要使用 OCR，建議使用獨立的 Conda 環境並固定 `numpy<2`
 - OCR 需要：
   - PaddleOCR 執行環境與模型下載
-- 若要使用本地 diffusion inpainting，建議：
-  - NVIDIA GPU
-  - `iopaint` 或其他相容的本地後端
 
 ## 安裝方式
 
@@ -80,8 +76,6 @@ python -m pip install -e .
 ```bash
 python -m pip install pytest
 ```
-
-如果你要使用本地 diffusion inpainting，請另外安裝並確認後端可正常執行。本專案目前已驗證過 `iopaint` 流程。不過現階段 `diffusion-local` 仍屬實驗性功能，因此建議先以 `opencv-fast` 為主。
 
 快速確認環境是否正常：
 
@@ -171,10 +165,12 @@ pdf2ppt input.pdf output.pptx \
 
 它與 `auto` 路由的關係：
 
-- 如果遮罩覆蓋面積太大，`auto` 會為了安全改用 `white-box`
-- 如果背景複雜度較低，`auto` 會優先選 `opencv-fast`
-- 複雜度會依據遮罩周圍區域的灰階變異與邊緣密度估算
-- 如果複雜度高，且本地 diffusion 後端可用，`auto` 會改選 `diffusion-local`，但這條路徑目前仍屬實驗性
+- `auto` 先看的是文字遮罩面積比例，不是單純看背景複雜度。
+- 如果遮罩面積比例不超過 `--inpaint-max-area-ratio`，就直接使用 `opencv-fast`。
+- 如果遮罩超過這個門檻，`auto` 通常會為了安全改用 `white-box`。
+- 只有一種例外：遮罩雖然稍大，但大部分遮罩區域都落在低紋理背景時，仍可能保留 `opencv-fast`。
+- 這個大遮罩例外還有內部上限，因此非常大的遮罩仍會回退到 `white-box`。
+- 背景複雜度仍會被估算並寫進 debug note，但它不再是主要分支條件。
 
 常用參數：
 
@@ -187,18 +183,7 @@ pdf2ppt input.pdf output.pptx \
 
 - 一般簡報 PDF 可以先從 `opencv-fast` 開始
 - 如果文字邊緣殘留白邊或光暈，可小幅提高 `--inpaint-padding-px`
-- 只有在背景真的夠複雜，且可接受實驗性行為時，再切換到 `diffusion-local`
-
-使用本地 diffusion 後端：
-
-```bash
-pdf2ppt input.pdf output.pptx \
-  --inpaint-engine diffusion-local \
-  --diffusion-command iopaint \
-  --diffusion-model runwayml/stable-diffusion-inpainting \
-  --diffusion-device cuda \
-  --report output.report.json
-```
+- 如果 `opencv-fast` 不適合目前的遮罩範圍，改用 `white-box` 會比生成式回填更穩定。
 
 ## CLI 參數
 
@@ -221,18 +206,9 @@ pdf2ppt input.pdf output.pptx \
 
 背景重建相關：
 
-- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`diffusion-local`
+- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`
 - `--inpaint-padding-px`：在 inpainting 前擴張文字遮罩
 - `--inpaint-max-area-ratio`：當遮罩面積太大時，強制改用 white-box
-
-本地 diffusion 參數：
-
-- `--diffusion-command`：呼叫後端的 CLI 指令，預設 `iopaint`
-- `--diffusion-model`：傳給後端的模型名稱
-- `--diffusion-device`：`cuda` 或 `cpu`
-- `--diffusion-max-crop-edge`：送進後端的最大裁切邊長
-- `--diffusion-complexity-threshold`：`auto` 模式下判斷複雜背景的門檻
-- `--diffusion-timeout-sec`：每次本地 diffusion 後端呼叫的逾時秒數
 
 診斷相關：
 
@@ -262,9 +238,16 @@ pdf2ppt input.pdf output.pptx \
 
 在 `overlay` 模式下，`auto` 會依條件選擇：
 
-- `opencv-fast`：適合較簡單背景
-- `diffusion-local`：適合較複雜背景且後端可用，但目前仍屬實驗性路徑
-- `white-box`：在遮罩過大或後端不可用時作為保底方案
+- `opencv-fast`：當遮罩面積仍在設定門檻內時優先使用
+- `opencv-fast`：少數遮罩稍大但大多落在低紋理區域的情況下仍會保留
+- `white-box`：當遮罩過大，或局部修補風險過高時作為保底方案
+
+實際判斷順序可以簡化成：
+
+1. 先量測文字遮罩的面積比例。
+2. 若不超過 `--inpaint-max-area-ratio`，使用 `opencv-fast`。
+3. 若超過門檻，再估算遮罩區域有多少比例屬於低紋理背景。
+4. 只有大遮罩例外仍然安全時才保留 `opencv-fast`，否則改用 `white-box`。
 
 ## 輸出檔案
 
@@ -287,7 +270,6 @@ JSON report 會包含：
 - OCR 頁面的重建本質上仍是估算，不是完整語意還原。
 - 複雜圖表與向量圖目前較偏向保留外觀，而非完整還原成可編輯圖表物件。
 - OCR 的粗體與顏色恢復屬 heuristic 判斷。
-- 本地 diffusion 品質高度依賴後端可用性、GPU 記憶體與模型選擇。
 
 ## 開發
 

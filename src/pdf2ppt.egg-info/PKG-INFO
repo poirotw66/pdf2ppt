@@ -31,7 +31,6 @@ The project is optimized for presentation-style documents and uses a hybrid pipe
 - Support multiple background reconstruction engines:
   - `white-box`
   - `opencv-fast`
-  - `diffusion-local`
   - `auto` routing
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
@@ -44,9 +43,6 @@ The project is optimized for presentation-style documents and uses a hybrid pipe
 - Dependencies listed in `pyproject.toml`
 - For OCR:
   - PaddleOCR runtime and model downloads
-- Optional for faster local inpainting:
-  - NVIDIA GPU
-  - `iopaint` or another compatible local diffusion backend
 
 ## Installation
 
@@ -55,8 +51,6 @@ Create and activate your Python environment, then install the project in editabl
 ```bash
 python -m pip install -e .
 ```
-
-If you want to use local diffusion inpainting, install and verify your backend separately. For example, this project has been tested with an `iopaint`-based workflow.
 
 ## Quick Start
 
@@ -139,7 +133,7 @@ How it interacts with `auto` routing:
 - If mask coverage is too large, `auto` falls back to `white-box` for safety.
 - If the local background complexity is low, `auto` prefers `opencv-fast`.
 - Complexity is estimated from the area around the mask using grayscale variance and edge density.
-- If complexity is high and a diffusion backend is available, `auto` can switch to `diffusion-local`.
+- `auto` no longer routes to a diffusion backend; it stays on classical local repair and safety fallbacks.
 
 Relevant knobs:
 
@@ -152,18 +146,7 @@ Practical guidance:
 
 - Start with `opencv-fast` for most presentation PDFs.
 - Increase `--inpaint-padding-px` slightly if text halos remain.
-- Switch to `diffusion-local` only when backgrounds are visually complex enough to justify the extra cost.
-
-Use a local diffusion backend:
-
-```bash
-pdf2ppt input.pdf output.pptx \
-  --inpaint-engine diffusion-local \
-  --diffusion-command iopaint \
-  --diffusion-model runwayml/stable-diffusion-inpainting \
-  --diffusion-device cuda \
-  --report output.report.json
-```
+- If `opencv-fast` cannot safely repair a large mask, prefer `white-box` over a slower generative fallback.
 
 ## CLI Options
 
@@ -183,17 +166,9 @@ Main arguments:
 
 Background reconstruction:
 
-- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, or `diffusion-local`
+- `--inpaint-engine`: `auto`, `white-box`, or `opencv-fast`
 - `--inpaint-padding-px`: expand text masks before inpainting
 - `--inpaint-max-area-ratio`: force white-box fallback when the masked area is too large
-
-Local diffusion settings:
-
-- `--diffusion-command`: CLI command for the backend, default `iopaint`
-- `--diffusion-model`: model name passed to the backend
-- `--diffusion-device`: `cuda` or `cpu`
-- `--diffusion-max-crop-edge`: maximum crop size sent to the backend
-- `--diffusion-complexity-threshold`: auto-routing threshold for complex backgrounds
 
 ## Conversion Modes
 
@@ -214,7 +189,6 @@ Instead, it uses a conditional strategy:
 For overlay pages, `auto` routing can choose:
 
 - `opencv-fast` for simpler backgrounds
-- `diffusion-local` for more complex masked regions, when the backend is available
 - `white-box` as the safest fallback for large masks or unavailable backends
 
 ## Output Files

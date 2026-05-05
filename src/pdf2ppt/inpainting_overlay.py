@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import cv2
 import logging
-import shutil
 
 import fitz
 import numpy as np
@@ -13,7 +12,6 @@ from .inpainting_engines import (
     BackgroundInpaintingEngine,
     BackgroundInpaintingError,
     BackgroundRenderResult,
-    DiffusionLocalInpaintingEngine,
     OpenCvFastInpaintingEngine,
     WhiteBoxInpaintingEngine,
 )
@@ -324,27 +322,19 @@ def resolve_background_inpainting_engine(
     mask_image: Image.Image,
     options: ConversionOptions,
 ) -> tuple[BackgroundInpaintingEngine, str]:
+    # Auto routing is intentionally conservative:
+    # 1. Small/normal masks stay on opencv-fast.
+    # 2. Large masks usually fall back to white-box.
+    # 3. A large mask may still stay on opencv-fast when most masked pixels sit on
+    #    low-texture background and the mask is not too far beyond the configured cap.
     requested_engine = options.inpaint_engine
     mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
     mask_ratio = mask_area_ratio(mask_array)
-    diffusion_engine = DiffusionLocalInpaintingEngine(
-        command=options.diffusion_command,
-        model=options.diffusion_model,
-        device=options.diffusion_device,
-        max_crop_edge=options.diffusion_max_crop_edge,
-        crop_padding_px=max(24, options.inpaint_padding_px * 3),
-        timeout_sec=options.diffusion_timeout_sec,
-    )
     if requested_engine == "white-box":
         return WhiteBoxInpaintingEngine(), f"Selected white-box engine explicitly (mask area ratio {mask_ratio:.4f})."
     if requested_engine == "opencv-fast":
         return OpenCvFastInpaintingEngine(), (
             f"Selected opencv-fast engine explicitly (mask area ratio {mask_ratio:.4f})."
-        )
-    if requested_engine == "diffusion-local":
-        return diffusion_engine, (
-            f"Selected diffusion-local engine explicitly (mask area ratio {mask_ratio:.4f}, "
-            f"model {options.diffusion_model}, device {options.diffusion_device})."
         )
 
     if mask_ratio > options.inpaint_max_area_ratio:
@@ -369,21 +359,10 @@ def resolve_background_inpainting_engine(
             f"{AUTO_OPENCV_LOW_TEXTURE_FRACTION_THRESHOLD:.4f})."
         )
     complexity = estimate_background_complexity(page_image, mask_image)
-    backend_available = shutil.which(options.diffusion_command) is not None
-    if backend_available and complexity >= options.diffusion_complexity_threshold:
-        return diffusion_engine, (
-            f"Auto route selected diffusion-local because complexity score {complexity:.4f} "
-            f"met threshold {options.diffusion_complexity_threshold:.4f}."
-        )
-    if not backend_available and complexity >= options.diffusion_complexity_threshold:
-        return OpenCvFastInpaintingEngine(), (
-            f"Auto route fell back to opencv-fast because complexity score {complexity:.4f} "
-            f"met threshold {options.diffusion_complexity_threshold:.4f} but diffusion command "
-            f"'{options.diffusion_command}' was unavailable."
-        )
     return OpenCvFastInpaintingEngine(), (
-        f"Auto route selected opencv-fast because complexity score {complexity:.4f} "
-        f"was below threshold {options.diffusion_complexity_threshold:.4f}."
+        f"Auto route selected opencv-fast because mask area ratio {mask_ratio:.4f} "
+        f"stayed within threshold {options.inpaint_max_area_ratio:.4f} "
+        f"(complexity score {complexity:.4f})."
     )
 
 

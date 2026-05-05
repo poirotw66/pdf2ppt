@@ -28,12 +28,6 @@ class ConversionOptions:
     inpaint_engine: str = "auto"
     inpaint_padding_px: int = 6
     inpaint_max_area_ratio: float = 0.12
-    diffusion_command: str = "iopaint"
-    diffusion_model: str = "brushnet"
-    diffusion_device: str = "cuda"
-    diffusion_max_crop_edge: int = 1024
-    diffusion_complexity_threshold: float = 0.3
-    diffusion_timeout_sec: float = 120.0
 
 
 @dataclass(slots=True)
