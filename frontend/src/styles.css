@@ -62,6 +62,27 @@ button {
   justify-content: flex-end;
 }
 
+.tool-toggle {
+  display: flex;
+  gap: 8px;
+}
+
+.tool-chip {
+  width: auto;
+  margin-top: 0;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(19, 33, 47, 0.16);
+  background: #fff;
+  color: #13212f;
+}
+
+.tool-chip.active {
+  background: #183a56;
+  color: #fff;
+  border-color: #183a56;
+}
+
 .zoom-control {
   display: flex;
   align-items: center;
@@ -234,6 +255,11 @@ button {
   pointer-events: none;
 }
 
+.select-draft {
+  border-color: #0d6770;
+  background: rgba(13, 103, 112, 0.14);
+}
+
 .ocr-box-label {
   position: absolute;
   top: -22px;
@@ -310,6 +336,15 @@ button {
   padding: 10px 12px;
   background: #183a56;
   color: #fff;
+}
+
+.multi-select-banner {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(13, 103, 112, 0.12);
+  color: #0d6770;
+  font-weight: 600;
 }
 
 .box-list-panel {

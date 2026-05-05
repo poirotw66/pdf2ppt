@@ -52,12 +52,14 @@ type DragState =
       origin: [number, number, number, number];
     }
   | { kind: "create"; startX: number; startY: number; currentX: number; currentY: number }
+  | { kind: "select"; startX: number; startY: number; currentX: number; currentY: number }
   | null;
 
 type ResizeHandle = "nw" | "ne" | "se" | "sw";
 type BoxFilter = "all" | "empty-text" | "low-confidence";
 type BoxSort = "reading-order" | "confidence-asc" | "confidence-desc" | "source";
 type BoxGroup = "none" | "source";
+type EditorTool = "select" | "create";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 const lowConfidenceDefault = 0.85;
@@ -68,6 +70,7 @@ export default function App() {
   const [pages, setPages] = useState<PagePayload[]>([]);
   const [selectedPageIndex, setSelectedPageIndex] = useState(0);
   const [selectedBoxId, setSelectedBoxId] = useState<string | null>(null);
+  const [selectedBoxIds, setSelectedBoxIds] = useState<string[]>([]);
   const [statusText, setStatusText] = useState("Upload a PDF to start.");
   const [isBusy, setIsBusy] = useState(false);
   const [convertResult, setConvertResult] = useState<ConvertResponse | null>(null);
@@ -77,6 +80,7 @@ export default function App() {
   const [boxFilter, setBoxFilter] = useState<BoxFilter>("all");
   const [boxSort, setBoxSort] = useState<BoxSort>("reading-order");
   const [boxGroup, setBoxGroup] = useState<BoxGroup>("none");
+  const [editorTool, setEditorTool] = useState<EditorTool>("select");
   const [lowConfidenceThreshold, setLowConfidenceThreshold] = useState(lowConfidenceDefault);
   const editorRef = useRef<HTMLDivElement | null>(null);
   const editorViewportRef = useRef<HTMLDivElement | null>(null);
@@ -213,6 +217,7 @@ export default function App() {
       setPages([]);
       setSelectedPageIndex(0);
       setSelectedBoxId(null);
+      setSelectedBoxIds([]);
       setStatusText(`Job ${payload.job_id} created. Run OCR detect next.`);
     } catch (error) {
       setStatusText(`Create job failed: ${stringifyError(error)}`);
@@ -243,6 +248,7 @@ export default function App() {
       setPages(payload.pages);
       setSelectedPageIndex(0);
       setSelectedBoxId(payload.pages[0]?.boxes[0]?.id ?? null);
+      setSelectedBoxIds(payload.pages[0]?.boxes[0]?.id ? [payload.pages[0].boxes[0].id] : []);
       setStatusText(`Detected ${payload.pages.reduce((count, page) => count + page.boxes.length, 0)} boxes.`);
     } catch (error) {
       setStatusText(`Detect failed: ${stringifyError(error)}`);
@@ -344,14 +350,16 @@ export default function App() {
   }
 
   function deleteSelectedBox() {
-    if (!selectedPage || !selectedBoxId) {
+    if (!selectedPage || (selectedBoxIds.length === 0 && !selectedBoxId)) {
       return;
     }
+    const idsToDelete = new Set(selectedBoxIds.length > 0 ? selectedBoxIds : selectedBoxId ? [selectedBoxId] : []);
     updateCurrentPage((page) => ({
       ...page,
-      boxes: page.boxes.filter((box) => box.id !== selectedBoxId),
+      boxes: page.boxes.filter((box) => !idsToDelete.has(box.id)),
     }));
     setSelectedBoxId(null);
+    setSelectedBoxIds([]);
   }
 
   function onEditorMouseDown(event: React.MouseEvent<HTMLDivElement>) {
@@ -364,7 +372,12 @@ export default function App() {
     }
     const point = getLocalPoint(event, editorRef.current, previewScale);
     setSelectedBoxId(null);
-    setDragState({ kind: "create", startX: point.x, startY: point.y, currentX: point.x, currentY: point.y });
+    setSelectedBoxIds([]);
+    setDragState(
+      editorTool === "create"
+        ? { kind: "create", startX: point.x, startY: point.y, currentX: point.x, currentY: point.y }
+        : { kind: "select", startX: point.x, startY: point.y, currentX: point.x, currentY: point.y },
+    );
   }
 
   function onEditorMouseMove(event: React.MouseEvent<HTMLDivElement>) {
@@ -372,7 +385,7 @@ export default function App() {
       return;
     }
     const point = getLocalPoint(event, editorRef.current, previewScale);
-    if (dragState.kind === "create") {
+    if (dragState.kind === "create" || dragState.kind === "select") {
       setDragState({ ...dragState, currentX: point.x, currentY: point.y });
       return;
     }
@@ -442,7 +455,15 @@ export default function App() {
           ],
         }));
         setSelectedBoxId(newId);
+        setSelectedBoxIds([newId]);
       }
+    }
+    if (dragState.kind === "select") {
+      const selectionRect = normalizeRect(dragState.startX, dragState.startY, dragState.currentX, dragState.currentY);
+      const matchedIds = selectedPage.boxes.filter((box) => rectanglesIntersect(selectionRect, box.bbox)).map((box) => box.id);
+      setSelectedBoxIds(matchedIds);
+      setSelectedBoxId(matchedIds[0] ?? null);
+      setStatusText(matchedIds.length > 0 ? `Selected ${matchedIds.length} box(es).` : "No boxes selected.");
     }
     setDragState(null);
   }
@@ -454,6 +475,7 @@ export default function App() {
     }
     const point = getLocalPoint(event, editorRef.current, previewScale);
     setSelectedBoxId(box.id);
+    setSelectedBoxIds([box.id]);
     setDragState({ kind: "move", boxId: box.id, startX: point.x, startY: point.y, origin: box.bbox });
   }
 
@@ -464,6 +486,7 @@ export default function App() {
     }
     const point = getLocalPoint(event, editorRef.current, previewScale);
     setSelectedBoxId(box.id);
+    setSelectedBoxIds([box.id]);
     setDragState({ kind: "resize", boxId: box.id, handle, startX: point.x, startY: point.y, origin: box.bbox });
   }
 
@@ -547,6 +570,7 @@ export default function App() {
       boxes: [...page.boxes, duplicated],
     }));
     setSelectedBoxId(newId);
+    setSelectedBoxIds([newId]);
   }
 
   function onZoomChange(event: ChangeEvent<HTMLInputElement>) {
@@ -584,7 +608,9 @@ export default function App() {
     const nextIndex = currentIndex === -1
       ? direction > 0 ? 0 : orderedBoxes.length - 1
       : clamp(currentIndex + direction, 0, orderedBoxes.length - 1);
-    setSelectedBoxId(orderedBoxes[nextIndex]?.id ?? null);
+    const nextId = orderedBoxes[nextIndex]?.id ?? null;
+    setSelectedBoxId(nextId);
+    setSelectedBoxIds(nextId ? [nextId] : []);
   }
 
   return (
@@ -630,6 +656,7 @@ export default function App() {
                 onClick={() => {
                   setSelectedPageIndex(index);
                   setSelectedBoxId(page.boxes[0]?.id ?? null);
+                  setSelectedBoxIds(page.boxes[0]?.id ? [page.boxes[0].id] : []);
                   setStatusText(`Viewing page ${page.page}.`);
                 }}
               >
@@ -647,6 +674,22 @@ export default function App() {
             <h2>Preview</h2>
             <div className="preview-toolbar">
               <span>{selectedPage ? `${selectedPage.width} x ${selectedPage.height}` : "No page"}</span>
+              <div className="tool-toggle" role="group" aria-label="Preview tool">
+                <button
+                  type="button"
+                  className={editorTool === "select" ? "tool-chip active" : "tool-chip"}
+                  onClick={() => setEditorTool("select")}
+                >
+                  Select Boxes
+                </button>
+                <button
+                  type="button"
+                  className={editorTool === "create" ? "tool-chip active" : "tool-chip"}
+                  onClick={() => setEditorTool("create")}
+                >
+                  Create Box
+                </button>
+              </div>
               <label className="zoom-control">
                 <span>Zoom</span>
                 <input type="range" min="50" max="200" step="10" value={zoom * 100} onChange={onZoomChange} />
@@ -669,15 +712,17 @@ export default function App() {
                   <img key={selectedPage.image_url} src={`${apiBase}${selectedPage.image_url}`} alt={`Page ${selectedPage.page}`} draggable={false} />
                 {selectedPage.boxes.map((box) => {
                   const [x0, y0, x1, y1] = box.bbox;
+                  const isSelected = selectedBoxIds.includes(box.id);
                   return (
                     <div
                       key={box.id}
-                      className={box.id === selectedBoxId ? "ocr-box selected" : "ocr-box"}
+                      className={isSelected ? "ocr-box selected" : "ocr-box"}
                       style={{ left: x0, top: y0, width: x1 - x0, height: y1 - y0 }}
                       onMouseDown={(event) => startMoveBox(event, box)}
                       onClick={(event) => {
                         event.stopPropagation();
                         setSelectedBoxId(box.id);
+                        setSelectedBoxIds([box.id]);
                       }}
                     >
                       <span className="ocr-box-label">{box.text?.trim() || box.id}</span>
@@ -693,9 +738,9 @@ export default function App() {
                     </div>
                   );
                 })}
-                {dragState?.kind === "create" ? (
+                {dragState?.kind === "create" || dragState?.kind === "select" ? (
                   <div
-                    className="ocr-box draft"
+                    className={dragState.kind === "select" ? "ocr-box draft select-draft" : "ocr-box draft"}
                     style={rectToStyle(normalizeRect(dragState.startX, dragState.startY, dragState.currentX, dragState.currentY))}
                   />
                 ) : null}
@@ -712,9 +757,10 @@ export default function App() {
             <h2>Selected Box</h2>
             <div className="inspector-actions">
               <button onClick={duplicateSelectedBox} disabled={!selectedBox}>Duplicate</button>
-              <button onClick={deleteSelectedBox} disabled={!selectedBox}>Delete</button>
+              <button onClick={deleteSelectedBox} disabled={selectedBoxIds.length === 0 && !selectedBox}>Delete</button>
             </div>
           </div>
+          {selectedBoxIds.length > 1 ? <div className="multi-select-banner">{selectedBoxIds.length} boxes selected. Delete removes all selected boxes.</div> : null}
           {selectedBox ? (
             <div className="inspector-fields">
               <label>
@@ -857,7 +903,10 @@ export default function App() {
                           key={box.id}
                           type="button"
                           className={isSelected ? "box-row active" : "box-row"}
-                          onClick={() => setSelectedBoxId(box.id)}
+                          onClick={() => {
+                            setSelectedBoxId(box.id);
+                            setSelectedBoxIds([box.id]);
+                          }}
                           onKeyDown={(event) => onBoxListKeyDown(event, box.id)}
                         >
                           <div className="box-row-head">
@@ -938,6 +987,13 @@ function rectToStyle([x0, y0, x1, y1]: [number, number, number, number]) {
     width: x1 - x0,
     height: y1 - y0,
   };
+}
+
+function rectanglesIntersect(
+  [leftX0, leftY0, leftX1, leftY1]: [number, number, number, number],
+  [rightX0, rightY0, rightX1, rightY1]: [number, number, number, number],
+): boolean {
+  return leftX0 <= rightX1 && leftX1 >= rightX0 && leftY0 <= rightY1 && leftY1 >= rightY0;
 }
 
 function getLocalPoint(event: React.MouseEvent<HTMLElement>, element: HTMLDivElement, scale: number) {
