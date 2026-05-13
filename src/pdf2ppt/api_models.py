@@ -5,6 +5,9 @@ from pydantic import BaseModel, Field
 from .core import DEFAULT_OCR_BATCH_SIZE
 
 
+DEFAULT_DETECT_CONFIDENCE_THRESHOLD = 0.75
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str
@@ -31,6 +34,7 @@ class JobResponse(BaseModel):
 class DetectRequest(BaseModel):
     lang: str = "ch"
     dpi: int = Field(default=144, ge=72, le=300)
+    confidence_threshold: float = Field(default=DEFAULT_DETECT_CONFIDENCE_THRESHOLD, ge=0.0, le=1.0)
     ocr_model_root: str | None = "model"
     use_doc_orientation: bool = False
     use_textline_orientation: bool = False

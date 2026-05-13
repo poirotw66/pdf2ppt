@@ -369,12 +369,17 @@ Editor capabilities in the current UI:
 Relevant backend endpoints:
 
 - `POST /jobs`
-- `POST /jobs/{job_id}/detect` with optional `ocr_batch_size`
+- `POST /jobs/{job_id}/detect` with optional `ocr_batch_size` and `confidence_threshold`
 - `PUT /jobs/{job_id}/boxes`
 - `POST /jobs/{job_id}/convert` with optional `ocr_batch_size`
 - `GET /jobs/{job_id}/pages/{page_number}.png`
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`
+
+Detect request options:
+
+- `confidence_threshold` filters out OCR boxes below the given confidence before the response is returned.
+- Default: `0.75`
 
 Error response model:
 

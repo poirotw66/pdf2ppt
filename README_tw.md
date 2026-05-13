@@ -359,12 +359,17 @@ npm run dev
 相關後端 API：
 
 - `POST /jobs`
-- `POST /jobs/{job_id}/detect`，可選 `ocr_batch_size`
+- `POST /jobs/{job_id}/detect`，可選 `ocr_batch_size` 與 `confidence_threshold`
 - `PUT /jobs/{job_id}/boxes`
 - `POST /jobs/{job_id}/convert`，可選 `ocr_batch_size`
 - `GET /jobs/{job_id}/pages/{page_number}.png`
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`
+
+detect 請求參數補充：
+
+- `confidence_threshold` 會在回應前先過濾掉低於指定信心分數的 OCR 框。
+- 預設值：`0.75`
 
 主要檔案：
 

@@ -1,5 +1,6 @@
 import { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 
+import { detectConfidenceThreshold } from "../config";
 import type {
   Box,
   BoxFilter,
@@ -23,8 +24,6 @@ import {
   sortBoxes,
 } from "../utils/geometry";
 
-const lowConfidenceDefault = 0.75;
-
 type UseBoxEditorStateOptions = {
   setStatusText: (value: string) => void;
 };
@@ -40,7 +39,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
   const [boxSort, setBoxSort] = useState<BoxSort>("reading-order");
   const [boxGroup, setBoxGroup] = useState<BoxGroup>("none");
   const [editorTool, setEditorTool] = useState<EditorTool>("select");
-  const [lowConfidenceThreshold, setLowConfidenceThreshold] = useState(lowConfidenceDefault);
+  const [lowConfidenceThreshold, setLowConfidenceThreshold] = useState(detectConfidenceThreshold);
   const editorRef = useRef<HTMLDivElement>(null);
   const editorViewportRef = useRef<HTMLDivElement>(null);
   const [editorViewportSize, setEditorViewportSize] = useState({ width: 0, height: 0 });
@@ -162,7 +161,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
   function loadDetectedPages(nextPages: PagePayload[]) {
     const filteredPages = nextPages.map((page) => ({
       ...page,
-      boxes: page.boxes.filter((box) => box.confidence >= lowConfidenceDefault),
+      boxes: page.boxes.filter((box) => box.confidence >= detectConfidenceThreshold),
     }));
     const removedCount = nextPages.reduce(
       (count, page, index) => count + (page.boxes.length - filteredPages[index].boxes.length),
@@ -175,7 +174,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     setSelectedBoxIds(filteredPages[0]?.boxes[0]?.id ? [filteredPages[0].boxes[0].id] : []);
     setZoom(1);
     if (removedCount > 0) {
-      setStatusText(`Filtered out ${removedCount} OCR box(es) below confidence ${lowConfidenceDefault.toFixed(2)}.`);
+      setStatusText(`Filtered out ${removedCount} OCR box(es) below confidence ${detectConfidenceThreshold.toFixed(2)}.`);
     }
   }
 

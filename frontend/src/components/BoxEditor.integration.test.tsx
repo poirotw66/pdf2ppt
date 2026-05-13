@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { detectConfidenceThreshold } from "../config";
 import { PreviewEditor } from "./PreviewEditor";
 import { useBoxEditorState } from "../hooks/useBoxEditorState";
 import type { PagePayload } from "../types";
@@ -107,7 +108,9 @@ describe("box editor interactions", () => {
 
     expect(screen.getByTestId("box-count")).toHaveTextContent("1");
     expect(screen.getByTestId("selected-box")).toHaveTextContent("box_keep");
-    expect(screen.getByTestId("status-text")).toHaveTextContent("Filtered out 1 OCR box(es) below confidence 0.75.");
+    expect(screen.getByTestId("status-text")).toHaveTextContent(
+      `Filtered out 1 OCR box(es) below confidence ${detectConfidenceThreshold.toFixed(2)}.`,
+    );
     expect(screen.queryByText("drop")).not.toBeInTheDocument();
   });
 });

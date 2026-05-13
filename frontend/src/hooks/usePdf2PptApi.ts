@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { detectConfidenceThreshold } from "../config";
 import type { ConvertResponse, DetectResponse, JobResponse, PagePayload } from "../types";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -47,7 +48,7 @@ export function usePdf2PptApi() {
       const response = await fetch(`${apiBase}/jobs/${jobId}/detect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dpi: 144 }),
+        body: JSON.stringify({ dpi: 144, confidence_threshold: detectConfidenceThreshold }),
       });
       if (!response.ok) {
         throw new Error(await readError(response));

@@ -53,13 +53,13 @@ COMMON_ERROR_RESPONSES = {
 @app.post("/jobs", response_model=JobResponse, responses={400: COMMON_ERROR_RESPONSES[400]})
 async def create_job(file: UploadFile = File(...)) -> JobResponse:
     if not file.filename:
-        raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
+        raise _http_exception(400, "input-error", "Uploaded file must have a filename.")
     if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF uploads are supported.")
+        raise _http_exception(400, "input-error", "Only PDF uploads are supported.")
 
     pdf_bytes = await file.read()
     if not pdf_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
+        raise _http_exception(400, "input-error", "Uploaded PDF is empty.")
 
     try:
         record = job_store.create_job(filename=file.filename, pdf_bytes=pdf_bytes)
@@ -116,7 +116,11 @@ def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
 
                 batch_ocr_results = ocr_engine.extract_text_blocks_batch(batch_images, batch_numbers)
                 for page_index, preview_image, ocr_page_data in zip(batch_pages, batch_images, batch_ocr_results):
-                    boxes = [_text_block_to_box_response(block) for block in ocr_page_data.blocks]
+                    boxes = [
+                        _text_block_to_box_response(block)
+                        for block in ocr_page_data.blocks
+                        if float(block.confidence) >= request.confidence_threshold
+                    ]
                     pages.append(
                         DetectPageResponse(
                             page=page_index + 1,
@@ -230,7 +234,7 @@ def get_job_page_preview(job_id: str, page_number: int) -> FileResponse:
     _load_job_or_404(job_id)
     preview_path = job_store.preview_image_path(job_id, page_number)
     if not preview_path.exists():
-        raise HTTPException(status_code=404, detail="Preview image not found.")
+        raise _http_exception(404, "not-found", "Preview image not found.")
     return FileResponse(preview_path, media_type="image/png")
 
 
@@ -238,10 +242,10 @@ def get_job_page_preview(job_id: str, page_number: int) -> FileResponse:
 def download_output_pptx(job_id: str) -> FileResponse:
     record = _load_job_or_404(job_id)
     if record.output_pptx_path is None:
-        raise HTTPException(status_code=404, detail="Converted PPTX not found.")
+        raise _http_exception(404, "not-found", "Converted PPTX not found.")
     output_path = Path(record.output_pptx_path)
     if not output_path.exists():
-        raise HTTPException(status_code=404, detail="Converted PPTX file is missing.")
+        raise _http_exception(404, "not-found", "Converted PPTX file is missing.")
     download_filename = f"{Path(record.original_filename).stem}.pptx"
     return FileResponse(
         output_path,
@@ -254,22 +258,22 @@ def download_output_pptx(job_id: str) -> FileResponse:
 def download_report_json(job_id: str) -> FileResponse:
     record = _load_job_or_404(job_id)
     if record.report_path is None:
-        raise HTTPException(status_code=404, detail="Conversion report not found.")
+        raise _http_exception(404, "not-found", "Conversion report not found.")
     report_path = Path(record.report_path)
     if not report_path.exists():
-        raise HTTPException(status_code=404, detail="Conversion report file is missing.")
+        raise _http_exception(404, "not-found", "Conversion report file is missing.")
     return FileResponse(report_path, media_type="application/json")
 
 
 def run() -> None:
-    uvicorn.run("pdf2ppt.api:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("pdf2ppt.api:app", host="0.0.0.0", port=8008, reload=False)
 
 
 def _load_job_or_404(job_id: str) -> JobRecord:
     try:
         return job_store.get_job(job_id)
     except FileNotFoundError as error:
-        raise HTTPException(status_code=404, detail={"code": "not-found", "message": "Job not found."}) from error
+        raise _http_exception(404, "not-found", "Job not found.") from error
 
 
 def _job_to_response(record: JobRecord) -> JobResponse:
@@ -356,4 +360,11 @@ def _to_http_exception(error: Exception) -> HTTPException:
         return HTTPException(status_code=500, detail=error.to_detail())
     if isinstance(error, Pdf2PptError):
         return HTTPException(status_code=500, detail=error.to_detail())
-    return HTTPException(status_code=500, detail={"code": "internal-error", "message": str(error)})
+    return _http_exception(500, "internal-error", str(error))
+
+
+def _http_exception(status_code: int, code: str, message: str, page: int | None = None) -> HTTPException:
+    detail: dict[str, object] = {"code": code, "message": message}
+    if page is not None:
+        detail["page"] = page
+    return HTTPException(status_code=status_code, detail=detail)

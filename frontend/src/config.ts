@@ -1,0 +1,1 @@
+export const detectConfidenceThreshold = 0.75;

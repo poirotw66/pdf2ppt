@@ -133,6 +133,16 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"]["code"], "input-error")
 
+    def test_create_job_rejects_non_pdf_upload_with_structured_error(self) -> None:
+        response = self.client.post(
+            "/jobs",
+            files={"file": ("broken.txt", b"plain-text", "text/plain")},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"]["code"], "input-error")
+        self.assertEqual(response.json()["detail"]["message"], "Only PDF uploads are supported.")
+
     @patch("pdf2ppt.api.convert_pdf")
     def test_convert_uses_approved_boxes_and_updates_job(
         self,
@@ -234,6 +244,94 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"]["code"], "ocr-initialization-error")
+
+    @patch("pdf2ppt.api.OcrEngine.extract_text_blocks_batch")
+    def test_detect_filters_boxes_below_confidence_threshold(
+        self,
+        extract_text_blocks_batch_mock: unittest.mock.Mock,
+    ) -> None:
+        extract_text_blocks_batch_mock.return_value = [
+            SimpleNamespace(
+                blocks=[
+                    SimpleNamespace(
+                        id="ocr_1_keep",
+                        bbox=(10.0, 20.0, 50.0, 60.0),
+                        image_polygon=((10.0, 20.0), (50.0, 20.0), (50.0, 60.0), (10.0, 60.0)),
+                        text="keep",
+                        confidence=0.92,
+                    ),
+                    SimpleNamespace(
+                        id="ocr_1_drop",
+                        bbox=(60.0, 70.0, 110.0, 120.0),
+                        image_polygon=((60.0, 70.0), (110.0, 70.0), (110.0, 120.0), (60.0, 120.0)),
+                        text="drop",
+                        confidence=0.62,
+                    ),
+                ]
+            )
+        ]
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+
+        response = self.client.post(f"/jobs/{job_id}/detect", json={"dpi": 110})
+
+        self.assertEqual(response.status_code, 200)
+        boxes = response.json()["pages"][0]["boxes"]
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0]["id"], "ocr_1_keep")
+
+    @patch("pdf2ppt.api.OcrEngine.extract_text_blocks_batch")
+    def test_detect_accepts_custom_confidence_threshold(
+        self,
+        extract_text_blocks_batch_mock: unittest.mock.Mock,
+    ) -> None:
+        extract_text_blocks_batch_mock.return_value = [
+            SimpleNamespace(
+                blocks=[
+                    SimpleNamespace(
+                        id="ocr_1_keep",
+                        bbox=(10.0, 20.0, 50.0, 60.0),
+                        image_polygon=((10.0, 20.0), (50.0, 20.0), (50.0, 60.0), (10.0, 60.0)),
+                        text="keep",
+                        confidence=0.52,
+                    )
+                ]
+            )
+        ]
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+
+        response = self.client.post(
+            f"/jobs/{job_id}/detect",
+            json={"dpi": 110, "confidence_threshold": 0.5},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        boxes = response.json()["pages"][0]["boxes"]
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(boxes[0]["id"], "ocr_1_keep")
+
+    def test_download_output_returns_structured_not_found_error(self) -> None:
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+
+        response = self.client.get(f"/jobs/{job_id}/output.pptx")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"]["code"], "not-found")
+        self.assertEqual(response.json()["detail"]["message"], "Converted PPTX not found.")
 
     @patch("pdf2ppt.api.convert_pdf")
     def test_convert_returns_page_conversion_error_detail(
