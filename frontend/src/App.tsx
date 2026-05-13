@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { detectConfidenceThreshold as defaultDetectConfidenceThreshold } from "./config";
 import { InspectorPanel } from "./components/InspectorPanel";
 import { JobSidebar } from "./components/JobSidebar";
 import { PreviewEditor } from "./components/PreviewEditor";
@@ -7,6 +8,7 @@ import { useBoxEditorState } from "./hooks/useBoxEditorState";
 import { usePdf2PptApi } from "./hooks/usePdf2PptApi";
 
 export default function App() {
+  const [detectConfidenceThreshold, setDetectConfidenceThreshold] = useState(defaultDetectConfidenceThreshold);
   const [file, setFile] = useState<File | null>(null);
   const api = usePdf2PptApi();
   const editor = useBoxEditorState({ setStatusText: api.setStatusText });
@@ -27,9 +29,9 @@ export default function App() {
       api.setStatusText("Create a job before running detect.");
       return;
     }
-    const payload = await api.runDetect(api.job.job_id);
+    const payload = await api.runDetect(api.job.job_id, detectConfidenceThreshold);
     if (payload) {
-      editor.loadDetectedPages(payload.pages);
+      editor.loadDetectedPages(payload.pages, detectConfidenceThreshold);
     }
   }
 
@@ -59,11 +61,18 @@ export default function App() {
         apiBase={api.apiBase}
         busyAction={api.busyAction}
         convertResult={api.convertResult}
+        detectConfidenceThreshold={detectConfidenceThreshold}
         file={file}
         isBusy={api.isBusy}
         job={api.job}
         onConvert={handleConvert}
         onCreateJob={handleCreateJob}
+        onDetectConfidenceThresholdChange={(value) => {
+          if (!Number.isFinite(value)) {
+            return;
+          }
+          setDetectConfidenceThreshold(Math.min(1, Math.max(0, value)));
+        }}
         onFileChange={setFile}
         onRunDetect={handleRunDetect}
         onSaveBoxes={() => {

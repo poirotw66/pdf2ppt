@@ -120,7 +120,7 @@ function EditorHarness({ initialPages }: { initialPages: PagePayload[] }) {
   const editor = useBoxEditorState({ setStatusText });
 
   useEffect(() => {
-    editor.loadDetectedPages(initialPages);
+    editor.loadDetectedPages(initialPages, detectConfidenceThreshold);
   }, []);
 
   return (

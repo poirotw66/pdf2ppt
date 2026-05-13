@@ -3,6 +3,9 @@ export type JobResponse = {
   status: string;
   original_filename: string;
   page_count: number;
+  created_at: string;
+  updated_at: string;
+  detection_path?: string | null;
   approved_boxes_path?: string | null;
   output_pptx_path?: string | null;
   report_path?: string | null;

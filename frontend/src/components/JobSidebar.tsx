@@ -3,11 +3,13 @@ import type { JobResponse, PagePayload } from "../types";
 type JobSidebarProps = {
   busyAction: string | null;
   convertResult: { page_count: number } | null;
+  detectConfidenceThreshold: number;
   file: File | null;
   isBusy: boolean;
   job: JobResponse | null;
   onConvert: () => void;
   onCreateJob: () => void;
+  onDetectConfidenceThresholdChange: (value: number) => void;
   onFileChange: (file: File | null) => void;
   onRunDetect: () => void;
   onSaveBoxes: () => void;
@@ -22,11 +24,13 @@ export function JobSidebar({
   apiBase,
   busyAction,
   convertResult,
+  detectConfidenceThreshold,
   file,
   isBusy,
   job,
   onConvert,
   onCreateJob,
+  onDetectConfidenceThresholdChange,
   onFileChange,
   onRunDetect,
   onSaveBoxes,
@@ -45,6 +49,17 @@ export function JobSidebar({
           accept="application/pdf"
           onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
         />
+        <label className="control-field">
+          <span>Detect Confidence Threshold</span>
+          <input
+            type="number"
+            min="0"
+            max="1"
+            step="0.01"
+            value={detectConfidenceThreshold.toFixed(2)}
+            onChange={(event) => onDetectConfidenceThresholdChange(Number.parseFloat(event.target.value))}
+          />
+        </label>
         <button onClick={onCreateJob} disabled={isBusy || !file}>{busyAction === "Creating job..." ? "Creating Job..." : "Create Job"}</button>
         <button onClick={onRunDetect} disabled={isBusy || !job}>{busyAction === "Running OCR detect..." ? "Running OCR Detect..." : "Run OCR Detect"}</button>
         <button onClick={onSaveBoxes} disabled={isBusy || !job || pages.length === 0}>Save Boxes</button>

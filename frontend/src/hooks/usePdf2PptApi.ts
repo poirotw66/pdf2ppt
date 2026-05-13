@@ -40,7 +40,7 @@ export function usePdf2PptApi() {
     }
   }
 
-  async function runDetect(jobId: string): Promise<DetectResponse | null> {
+  async function runDetect(jobId: string, confidenceThreshold: number = detectConfidenceThreshold): Promise<DetectResponse | null> {
     setIsBusy(true);
     setBusyAction("Running OCR detect...");
     setStatusText(`Running OCR detect for job ${jobId}...`);
@@ -48,7 +48,7 @@ export function usePdf2PptApi() {
       const response = await fetch(`${apiBase}/jobs/${jobId}/detect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dpi: 144, confidence_threshold: detectConfidenceThreshold }),
+        body: JSON.stringify({ dpi: 144, confidence_threshold: confidenceThreshold }),
       });
       if (!response.ok) {
         throw new Error(await readError(response));

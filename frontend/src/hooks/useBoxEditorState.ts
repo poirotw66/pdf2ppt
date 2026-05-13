@@ -158,10 +158,10 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     setZoom(1);
   }
 
-  function loadDetectedPages(nextPages: PagePayload[]) {
+  function loadDetectedPages(nextPages: PagePayload[], confidenceThreshold: number = detectConfidenceThreshold) {
     const filteredPages = nextPages.map((page) => ({
       ...page,
-      boxes: page.boxes.filter((box) => box.confidence >= detectConfidenceThreshold),
+      boxes: page.boxes.filter((box) => box.confidence >= confidenceThreshold),
     }));
     const removedCount = nextPages.reduce(
       (count, page, index) => count + (page.boxes.length - filteredPages[index].boxes.length),
@@ -174,7 +174,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     setSelectedBoxIds(filteredPages[0]?.boxes[0]?.id ? [filteredPages[0].boxes[0].id] : []);
     setZoom(1);
     if (removedCount > 0) {
-      setStatusText(`Filtered out ${removedCount} OCR box(es) below confidence ${detectConfidenceThreshold.toFixed(2)}.`);
+      setStatusText(`Filtered out ${removedCount} OCR box(es) below confidence ${confidenceThreshold.toFixed(2)}.`);
     }
   }
 
