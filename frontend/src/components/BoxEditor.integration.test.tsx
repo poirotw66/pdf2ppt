@@ -38,6 +38,29 @@ const secondPage: PagePayload = {
   ],
 };
 
+const lowConfidencePage: PagePayload = {
+  page: 1,
+  image_url: "/jobs/demo/pages/low-confidence.png",
+  width: 320,
+  height: 240,
+  boxes: [
+    {
+      id: "box_keep",
+      source: "ocr-auto",
+      bbox: [12, 18, 90, 60],
+      text: "keep",
+      confidence: 0.82,
+    },
+    {
+      id: "box_drop",
+      source: "ocr-auto",
+      bbox: [100, 80, 180, 120],
+      text: "drop",
+      confidence: 0.62,
+    },
+  ],
+};
+
 describe("box editor interactions", () => {
   afterEach(() => {
     cleanup();
@@ -77,6 +100,15 @@ describe("box editor interactions", () => {
     expect(screen.getByTestId("current-page")).toHaveTextContent("2");
     expect(screen.getByTestId("selected-box")).toHaveTextContent("box_2");
     expect(screen.getByTestId("box-count")).toHaveTextContent("1");
+  });
+
+  it("drops OCR boxes below the confidence threshold when detect results load", () => {
+    render(<EditorHarness initialPages={[lowConfidencePage]} />);
+
+    expect(screen.getByTestId("box-count")).toHaveTextContent("1");
+    expect(screen.getByTestId("selected-box")).toHaveTextContent("box_keep");
+    expect(screen.getByTestId("status-text")).toHaveTextContent("Filtered out 1 OCR box(es) below confidence 0.75.");
+    expect(screen.queryByText("drop")).not.toBeInTheDocument();
   });
 });
 

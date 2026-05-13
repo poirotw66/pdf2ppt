@@ -23,7 +23,7 @@ import {
   sortBoxes,
 } from "../utils/geometry";
 
-const lowConfidenceDefault = 0.85;
+const lowConfidenceDefault = 0.75;
 
 type UseBoxEditorStateOptions = {
   setStatusText: (value: string) => void;
@@ -160,11 +160,23 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
   }
 
   function loadDetectedPages(nextPages: PagePayload[]) {
-    setPages(nextPages);
+    const filteredPages = nextPages.map((page) => ({
+      ...page,
+      boxes: page.boxes.filter((box) => box.confidence >= lowConfidenceDefault),
+    }));
+    const removedCount = nextPages.reduce(
+      (count, page, index) => count + (page.boxes.length - filteredPages[index].boxes.length),
+      0,
+    );
+
+    setPages(filteredPages);
     setSelectedPageIndex(0);
-    setSelectedBoxId(nextPages[0]?.boxes[0]?.id ?? null);
-    setSelectedBoxIds(nextPages[0]?.boxes[0]?.id ? [nextPages[0].boxes[0].id] : []);
+    setSelectedBoxId(filteredPages[0]?.boxes[0]?.id ?? null);
+    setSelectedBoxIds(filteredPages[0]?.boxes[0]?.id ? [filteredPages[0].boxes[0].id] : []);
     setZoom(1);
+    if (removedCount > 0) {
+      setStatusText(`Filtered out ${removedCount} OCR box(es) below confidence ${lowConfidenceDefault.toFixed(2)}.`);
+    }
   }
 
   function fitToSlide() {
