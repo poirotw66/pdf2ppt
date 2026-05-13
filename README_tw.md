@@ -341,10 +341,19 @@ npm run dev
 完整流程如下：
 
 1. 在網頁上傳 PDF，建立 job。
-2. 執行 OCR detect，取得逐頁預覽與候選文字框。
+2. 執行 OCR detect，取得候選文字框與預覽 URL。
 3. 逐頁檢查並修改要核准的 boxes。
 4. 把 approved boxes 存回後端。
 5. 執行 convert，讓 pipeline 優先使用 approved boxes；若手動新增框沒有文字，則在 convert 階段做逐框 recognition，最後輸出 PPTX 與 report。
+
+job 儲存與清理：
+
+- 預設會把上傳 PDF、OCR detection payload、approved boxes payload、轉檔輸出存到 `.pdf2ppt_jobs/`。
+- 頁面預覽不再持久化成 artifact。`GET /jobs/{job_id}/pages/{page_number}.jpg` 會從原始 PDF 按需重新 render，並以 JPEG 回傳。
+- 每次建立新 job 時都會執行一次自動清理，刪除 `updated_at` 超過保留期限的 job 目錄。
+- 可用 `PDF2PPT_JOB_ROOT=/path/to/jobs` 指定 job 儲存根目錄。
+- 可用 `PDF2PPT_JOB_RETENTION_HOURS=24` 設定保留時間；設成 `0` 可停用自動清理。
+- 可呼叫 `DELETE /jobs/{job_id}` 立即刪除單一 job 與其所有 artifacts。
 
 目前前端已支援：
 
@@ -362,9 +371,10 @@ npm run dev
 - `POST /jobs/{job_id}/detect`，可選 `ocr_batch_size` 與 `confidence_threshold`
 - `PUT /jobs/{job_id}/boxes`
 - `POST /jobs/{job_id}/convert`，可選 `ocr_batch_size`
-- `GET /jobs/{job_id}/pages/{page_number}.png`
+- `GET /jobs/{job_id}/pages/{page_number}.jpg`
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`
+- `DELETE /jobs/{job_id}`
 
 detect 請求參數補充：
 

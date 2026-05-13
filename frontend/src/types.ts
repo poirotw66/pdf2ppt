@@ -42,6 +42,16 @@ export type ConvertResponse = {
   page_count: number;
 };
 
+export type ApiErrorDetail = {
+  code: string;
+  message: string;
+  page?: number | null;
+};
+
+export type ApiErrorResponse = {
+  detail: ApiErrorDetail;
+};
+
 export type ResizeHandle = "nw" | "ne" | "se" | "sw";
 export type BoxFilter = "all" | "empty-text" | "low-confidence";
 export type BoxSort = "reading-order" | "confidence-asc" | "confidence-desc" | "source";

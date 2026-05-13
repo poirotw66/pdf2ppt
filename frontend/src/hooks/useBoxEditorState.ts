@@ -159,23 +159,13 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
   }
 
   function loadDetectedPages(nextPages: PagePayload[], confidenceThreshold: number = detectConfidenceThreshold) {
-    const filteredPages = nextPages.map((page) => ({
-      ...page,
-      boxes: page.boxes.filter((box) => box.confidence >= confidenceThreshold),
-    }));
-    const removedCount = nextPages.reduce(
-      (count, page, index) => count + (page.boxes.length - filteredPages[index].boxes.length),
-      0,
-    );
-
-    setPages(filteredPages);
+    setPages(nextPages);
     setSelectedPageIndex(0);
-    setSelectedBoxId(filteredPages[0]?.boxes[0]?.id ?? null);
-    setSelectedBoxIds(filteredPages[0]?.boxes[0]?.id ? [filteredPages[0].boxes[0].id] : []);
+    setSelectedBoxId(nextPages[0]?.boxes[0]?.id ?? null);
+    setSelectedBoxIds(nextPages[0]?.boxes[0]?.id ? [nextPages[0].boxes[0].id] : []);
     setZoom(1);
-    if (removedCount > 0) {
-      setStatusText(`Filtered out ${removedCount} OCR box(es) below confidence ${confidenceThreshold.toFixed(2)}.`);
-    }
+    const totalCount = nextPages.reduce((count, page) => count + page.boxes.length, 0);
+    setStatusText(`Loaded ${totalCount} OCR box(es) from backend detect results at threshold ${confidenceThreshold.toFixed(2)}.`);
   }
 
   function fitToSlide() {

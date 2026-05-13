@@ -351,10 +351,19 @@ The project now includes a lightweight review UI for OCR-heavy decks. It is inte
 End-to-end flow:
 
 1. Upload a PDF in the web UI to create a job.
-2. Run OCR detect to generate page previews and candidate text boxes.
+2. Run OCR detect to generate candidate text boxes and preview URLs.
 3. Review each page and adjust the approved boxes before conversion.
 4. Save the approved boxes back to the backend.
 5. Run conversion so the pipeline uses approved boxes first, fills missing text with per-box recognition when needed, then generates the PPTX and report.
+
+Job storage and cleanup:
+
+- Uploaded PDFs, OCR detection payloads, approved box payloads, and conversion outputs are stored under `.pdf2ppt_jobs/` by default.
+- Page previews are no longer persisted as artifacts. `GET /jobs/{job_id}/pages/{page_number}.jpg` renders the preview on demand from the uploaded PDF and returns JPEG.
+- Automatic cleanup runs when a new job is created and removes job directories whose `updated_at` is older than the configured retention window.
+- Configure the job root with `PDF2PPT_JOB_ROOT=/path/to/jobs`.
+- Configure retention with `PDF2PPT_JOB_RETENTION_HOURS=24`. Set it to `0` to disable automatic cleanup.
+- Use `DELETE /jobs/{job_id}` to remove a single job and all of its stored artifacts immediately.
 
 Editor capabilities in the current UI:
 
@@ -372,9 +381,10 @@ Relevant backend endpoints:
 - `POST /jobs/{job_id}/detect` with optional `ocr_batch_size` and `confidence_threshold`
 - `PUT /jobs/{job_id}/boxes`
 - `POST /jobs/{job_id}/convert` with optional `ocr_batch_size`
-- `GET /jobs/{job_id}/pages/{page_number}.png`
+- `GET /jobs/{job_id}/pages/{page_number}.jpg`
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`
+- `DELETE /jobs/{job_id}`
 
 Detect request options:
 

@@ -103,15 +103,14 @@ describe("box editor interactions", () => {
     expect(screen.getByTestId("box-count")).toHaveTextContent("1");
   });
 
-  it("drops OCR boxes below the confidence threshold when detect results load", () => {
+  it("trusts backend-filtered detect results when pages load", () => {
     render(<EditorHarness initialPages={[lowConfidencePage]} />);
 
-    expect(screen.getByTestId("box-count")).toHaveTextContent("1");
+    expect(screen.getByTestId("box-count")).toHaveTextContent("2");
     expect(screen.getByTestId("selected-box")).toHaveTextContent("box_keep");
     expect(screen.getByTestId("status-text")).toHaveTextContent(
-      `Filtered out 1 OCR box(es) below confidence ${detectConfidenceThreshold.toFixed(2)}.`,
+      `Loaded 2 OCR box(es) from backend detect results at threshold ${detectConfidenceThreshold.toFixed(2)}.`,
     );
-    expect(screen.queryByText("drop")).not.toBeInTheDocument();
   });
 });
 

@@ -42,6 +42,23 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(fetched["job_id"], payload["job_id"])
         self.assertEqual(fetched["original_filename"], "sample.pdf")
 
+    def test_delete_job_removes_job_artifacts(self) -> None:
+        pdf_bytes = build_sample_pdf_bytes()
+
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+
+        delete_response = self.client.delete(f"/jobs/{job_id}")
+
+        self.assertEqual(delete_response.status_code, 204)
+        self.assertFalse(self.job_store.job_dir(job_id).exists())
+        get_response = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(get_response.status_code, 404)
+        self.assertEqual(get_response.json()["detail"]["code"], "not-found")
+
     @patch("pdf2ppt.api.OcrEngine.extract_text_blocks_batch")
     def test_detect_generates_preview_payload(
         self,
@@ -76,12 +93,27 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(payload["pages"]), 1)
         first_page = payload["pages"][0]
         self.assertEqual(first_page["page"], 1)
+        self.assertTrue(first_page["image_url"].endswith(".jpg"))
         self.assertEqual(first_page["boxes"][0]["source"], "ocr-auto")
         self.assertEqual(first_page["boxes"][0]["text"], "demo")
 
         preview_response = self.client.get(first_page["image_url"])
         self.assertEqual(preview_response.status_code, 200)
-        self.assertEqual(preview_response.headers["content-type"], "image/png")
+        self.assertEqual(preview_response.headers["content-type"], "image/jpeg")
+        self.assertFalse((self.job_store.job_dir(job_id) / "previews").exists())
+
+    def test_preview_endpoint_returns_not_found_for_missing_page(self) -> None:
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+
+        preview_response = self.client.get(f"/jobs/{job_id}/pages/2.jpg")
+
+        self.assertEqual(preview_response.status_code, 404)
+        self.assertEqual(preview_response.json()["detail"]["code"], "not-found")
 
     def test_put_boxes_persists_approved_boxes(self) -> None:
         pdf_bytes = build_sample_pdf_bytes()

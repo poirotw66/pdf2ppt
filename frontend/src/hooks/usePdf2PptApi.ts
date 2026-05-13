@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { detectConfidenceThreshold } from "../config";
-import type { ConvertResponse, DetectResponse, JobResponse, PagePayload } from "../types";
+import type { ApiErrorResponse, ConvertResponse, DetectResponse, JobResponse, PagePayload } from "../types";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -157,11 +157,8 @@ export function usePdf2PptApi() {
 
 async function readError(response: Response): Promise<string> {
   try {
-    const payload = (await response.json()) as { detail?: string | { message?: string } };
-    if (typeof payload.detail === "string") {
-      return payload.detail;
-    }
-    if (payload.detail && typeof payload.detail.message === "string") {
+    const payload = (await response.json()) as ApiErrorResponse;
+    if (typeof payload.detail?.message === "string") {
       return payload.detail.message;
     }
   } catch {

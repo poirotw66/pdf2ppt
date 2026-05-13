@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Any
 
 import fitz
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
@@ -74,6 +75,13 @@ def get_job(job_id: str) -> JobResponse:
     return _job_to_response(record)
 
 
+@app.delete("/jobs/{job_id}", status_code=204, responses={404: COMMON_ERROR_RESPONSES[404]})
+def delete_job(job_id: str) -> Response:
+    _load_job_or_404(job_id)
+    job_store.delete_job(job_id)
+    return Response(status_code=204)
+
+
 @app.post(
     "/jobs/{job_id}/detect",
     response_model=DetectResponse,
@@ -108,8 +116,6 @@ def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
                 for page_index in range(batch_start, min(batch_start + request.ocr_batch_size, document.page_count)):
                     page = document[page_index]
                     preview_image = _render_page_preview(page, dpi=request.dpi)
-                    preview_path = job_store.preview_image_path(job_id, page_index + 1)
-                    preview_image.save(preview_path, format="PNG")
                     batch_pages.append(page_index)
                     batch_images.append(preview_image)
                     batch_numbers.append(page_index + 1)
@@ -124,7 +130,7 @@ def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
                     pages.append(
                         DetectPageResponse(
                             page=page_index + 1,
-                            image_url=f"/jobs/{job_id}/pages/{page_index + 1}.png",
+                            image_url=f"/jobs/{job_id}/pages/{page_index + 1}.jpg",
                             width=preview_image.width,
                             height=preview_image.height,
                             boxes=boxes,
@@ -229,13 +235,23 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
     )
 
 
-@app.get("/jobs/{job_id}/pages/{page_number}.png", responses={404: COMMON_ERROR_RESPONSES[404]})
+@app.get("/jobs/{job_id}/pages/{page_number}.jpg", responses={404: COMMON_ERROR_RESPONSES[404]})
 def get_job_page_preview(job_id: str, page_number: int) -> FileResponse:
-    _load_job_or_404(job_id)
-    preview_path = job_store.preview_image_path(job_id, page_number)
-    if not preview_path.exists():
-        raise _http_exception(404, "not-found", "Preview image not found.")
-    return FileResponse(preview_path, media_type="image/png")
+    record = _load_job_or_404(job_id)
+    try:
+        with fitz.open(record.input_pdf_path) as document:
+            if page_number < 1 or page_number > document.page_count:
+                raise _http_exception(404, "not-found", "Preview page not found.")
+            preview_image = _render_page_preview(document[page_number - 1], dpi=144)
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise _to_http_exception(InputValidationError(f"Failed to render preview image: {error}")) from error
+
+    buffer = io.BytesIO()
+    preview_image.save(buffer, format="JPEG", quality=85, optimize=True)
+    buffer.seek(0)
+    return Response(content=buffer.getvalue(), media_type="image/jpeg")
 
 
 @app.get("/jobs/{job_id}/output.pptx", responses={404: COMMON_ERROR_RESPONSES[404]})
