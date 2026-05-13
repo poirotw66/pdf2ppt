@@ -306,7 +306,7 @@ Start the backend in one terminal:
 cd /home/justin/pdf2ppt
 source /home/justin/miniconda3/etc/profile.d/conda.sh
 conda activate ppocr
-python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8000
+python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
 ```
 
 Start the frontend in a second terminal:
@@ -323,7 +323,7 @@ Notes:
 
 - `npm install` is only required the first time or after frontend dependency changes.
 - The `npm install` command must be run inside `frontend/`, not the home directory.
-- The frontend proxies `/jobs/*` to the FastAPI backend on port `8000`.
+- The frontend proxies `/jobs/*` to the FastAPI backend on port `8008`.
 - If the same Conda environment also contains `iopaint` or older `gradio` / `fastapi` stacks, dependency conflicts can break the API startup. In that case, reinstall `pydantic`, `pydantic-core`, `fastapi`, and `starlette`, or use a dedicated environment for `pdf2ppt`.
 - If you only want CLI conversion, you do not need to run the review UI.
 
@@ -331,7 +331,7 @@ Run the review backend:
 
 ```bash
 conda activate ppocr
-python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8000
+python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
 ```
 
 Run the review frontend:
@@ -342,7 +342,7 @@ npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173` in the browser. The Vite dev server proxies `/jobs/*` to the FastAPI backend on port `8000`.
+Open `http://127.0.0.1:5173` in the browser. The Vite dev server proxies `/jobs/*` to the FastAPI backend on port `8008`.
 
 ## Review Workflow
 

@@ -11,7 +11,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/jobs": {
-        target: "http://127.0.0.1:8000",
+        target: "http://127.0.0.1:8008",
         changeOrigin: true,
       },
     },

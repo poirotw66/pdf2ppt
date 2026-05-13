@@ -296,7 +296,7 @@ python -m pip install -e .
 cd /home/justin/pdf2ppt
 source /home/justin/miniconda3/etc/profile.d/conda.sh
 conda activate ppocr
-python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8000
+python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
 ```
 
 再在第二個 terminal 啟動前端：
@@ -313,7 +313,7 @@ npm run dev
 
 - `npm install` 只有第一次安裝或前端依賴變動後才需要重新執行。
 - `npm install` 必須在 `frontend/` 目錄下執行，不能在家目錄執行。
-- 前端會把 `/jobs/*` 代理到 `8000` port 的 FastAPI 後端。
+- 前端會把 `/jobs/*` 代理到 `8008` port 的 FastAPI 後端。
 - 如果同一個 Conda 環境裡還裝了 `iopaint`，或其他較舊的 `gradio` / `fastapi` 套件組合，可能會把 API 相依套件弄壞。遇到這種情況，請重新安裝 `pydantic`、`pydantic-core`、`fastapi`、`starlette`，或直接為 `pdf2ppt` 分出獨立環境。
 - 如果你只想跑 CLI 轉檔，不需要啟動這個 review UI。
 
@@ -321,7 +321,7 @@ npm run dev
 
 ```bash
 conda activate ppocr
-python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8000
+python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
 ```
 
 啟動 review 前端：
@@ -332,7 +332,7 @@ npm install
 npm run dev
 ```
 
-之後用瀏覽器開啟 `http://127.0.0.1:5173`。Vite dev server 會把 `/jobs/*` 代理到 `8000` port 的 FastAPI 後端。
+之後用瀏覽器開啟 `http://127.0.0.1:5173`。Vite dev server 會把 `/jobs/*` 代理到 `8008` port 的 FastAPI 後端。
 
 ## Review Workflow
 
