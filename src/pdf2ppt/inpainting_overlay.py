@@ -79,6 +79,9 @@ def render_overlay_background(
         rendered_engine_name: str | None,
         rendered_note: str | None,
     ) -> BackgroundRenderResult:
+        engine_debug_note = getattr(engine, "last_debug_note", None)
+        if engine_debug_note:
+            rendered_note = f"{rendered_note} {engine_debug_note}" if rendered_note else engine_debug_note
         corrected_image, debug_images, correction_note = _apply_targeted_file_back_color_correction(
             page_image,
             rendered_image,

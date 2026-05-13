@@ -140,13 +140,13 @@ Technical flow:
 3. The mask can be expanded with `--inpaint-padding-px` so the erased region covers anti-aliased text edges and OCR box underestimation.
 4. `OpenCvFastInpaintingEngine` converts the page image to a NumPy/OpenCV image.
 5. For clearly low-texture or smooth-gradient masked components, the engine first fits a local background surface directly from the surrounding ring pixels.
-6. Only the remaining masked regions fall back to `cv2.inpaint(..., cv2.INPAINT_TELEA)`, with the Telea radius scaled to each residual component size.
+6. Only the remaining masked regions fall back to `cv2.inpaint(..., cv2.INPAINT_TELEA)`, with nearby small residual components grouped together and the Telea radius adjusted by both component size and surrounding edge density.
 7. A final local blend pass smooths the reconstructed patch boundaries before the repaired image is used as the PowerPoint background.
 
 Implementation details:
 
 - Inpainting algorithm: hybrid local surface fitting plus OpenCV Telea fallback (`cv2.INPAINT_TELEA`)
-- Base Telea radius: `3.0`, then scaled per residual component size
+- Base Telea radius: `3.0`, then adjusted by residual component size and surrounding edge density
 - Input mask: 8-bit single-channel binary mask
 - Image path: RGB PIL image -> BGR OpenCV array -> surface-fit prefill for smooth components -> Telea fallback for residual mask -> boundary blend -> RGB PIL image
 

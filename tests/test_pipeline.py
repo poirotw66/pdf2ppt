@@ -501,10 +501,187 @@ class OcrStyleOptimizationTests(unittest.TestCase):
                 Image.fromarray(mask, mode="L"),
             )
 
+        captured_radii.sort()
         self.assertEqual(len(captured_radii), 2)
         self.assertLess(captured_radii[0], captured_radii[1])
         self.assertGreaterEqual(captured_radii[0], 1.79)
         self.assertLessEqual(captured_radii[1], 7.51)
+
+    def test_opencv_fast_reduces_telea_radius_when_ring_has_dense_edges(self) -> None:
+        width, height = 220, 160
+        base = np.full((height, width, 3), 180, dtype="uint8")
+        base[:, 110:, :] = 120
+        for y in range(height):
+            if y % 6 < 3:
+                base[y, 120:180, :] = 220
+        mask = np.zeros((height, width), dtype="uint8")
+        mask[40:84, 24:68] = 255
+        mask[40:84, 132:176] = 255
+
+        captured_radii: list[float] = []
+
+        def fake_inpaint(local_source: np.ndarray, local_mask: np.ndarray, radius: float, method: int) -> np.ndarray:
+            captured_radii.append(radius)
+            return local_source.copy()
+
+        with (
+            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
+        ):
+            OpenCvFastInpaintingEngine(
+                telea_small_component_max_span_px=20,
+                telea_group_proximity_px=0,
+            ).inpaint(
+                Image.fromarray(base, mode="RGB"),
+                Image.fromarray(mask, mode="L"),
+            )
+
+        self.assertEqual(len(captured_radii), 2)
+        self.assertGreater(captured_radii[0], captured_radii[1])
+
+    def test_opencv_fast_groups_nearby_small_components_before_telea(self) -> None:
+        width, height = 220, 160
+        base = np.full((height, width, 3), 160, dtype="uint8")
+        mask = np.zeros((height, width), dtype="uint8")
+        mask[40:52, 50:62] = 255
+        mask[40:52, 70:82] = 255
+
+        captured_radii: list[float] = []
+
+        def fake_inpaint(local_source: np.ndarray, local_mask: np.ndarray, radius: float, method: int) -> np.ndarray:
+            captured_radii.append(radius)
+            return local_source.copy()
+
+        with (
+            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
+        ):
+            OpenCvFastInpaintingEngine(
+                telea_small_component_max_span_px=24,
+                telea_group_proximity_px=12,
+            ).inpaint(
+                Image.fromarray(base, mode="RGB"),
+                Image.fromarray(mask, mode="L"),
+            )
+
+        self.assertEqual(len(captured_radii), 1)
+
+    def test_opencv_fast_uses_adaptive_group_proximity_for_larger_small_components(self) -> None:
+        width, height = 260, 180
+        base = np.full((height, width, 3), 160, dtype="uint8")
+        mask = np.zeros((height, width), dtype="uint8")
+        mask[30:42, 24:36] = 255
+        mask[30:42, 52:64] = 255
+        mask[90:122, 140:172] = 255
+        mask[90:122, 188:220] = 255
+
+        captured_radii: list[float] = []
+
+        def fake_inpaint(local_source: np.ndarray, local_mask: np.ndarray, radius: float, method: int) -> np.ndarray:
+            captured_radii.append(radius)
+            return local_source.copy()
+
+        with (
+            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
+        ):
+            OpenCvFastInpaintingEngine(
+                telea_small_component_max_span_px=40,
+                telea_group_proximity_px=20,
+            ).inpaint(
+                Image.fromarray(base, mode="RGB"),
+                Image.fromarray(mask, mode="L"),
+            )
+
+        self.assertEqual(len(captured_radii), 3)
+
+    def test_opencv_fast_restores_table_lines_after_masked_text_repair(self) -> None:
+        width, height = 240, 180
+        base_image = Image.new("RGB", (width, height), color=(248, 248, 248))
+        draw = ImageDraw.Draw(base_image)
+        for x in (40, 120, 200):
+            draw.line((x, 20, x, 160), fill=(120, 120, 120), width=2)
+        for y in (20, 70, 120, 160):
+            draw.line((40, y, 200, y), fill=(120, 120, 120), width=2)
+        draw.rectangle((52, 36, 108, 56), fill=(60, 60, 60))
+        draw.rectangle((132, 86, 188, 106), fill=(60, 60, 60))
+
+        mask_image = Image.new("L", (width, height), 0)
+        mask_draw = ImageDraw.Draw(mask_image)
+        mask_draw.rectangle((48, 30, 112, 62), fill=255)
+        mask_draw.rectangle((128, 80, 192, 112), fill=255)
+
+        base_bgr = cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR)
+        mask_array = np.array(mask_image, dtype=np.uint8)
+        with patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base_bgr.copy(), mask_array.copy())):
+            result = OpenCvFastInpaintingEngine().inpaint(base_image, mask_image)
+
+        result_array = np.array(result, dtype=np.int16)
+        base_array = np.array(base_image, dtype=np.int16)
+        vertical_line_error = np.abs(result_array[30:62, 120] - base_array[30:62, 120]).mean()
+        horizontal_line_error = np.abs(result_array[120, 128:192] - base_array[120, 128:192]).mean()
+        self.assertLess(vertical_line_error, 15.0)
+        self.assertLess(horizontal_line_error, 15.0)
+
+    def test_opencv_fast_does_not_restore_isolated_non_grid_line(self) -> None:
+        width, height = 240, 160
+        base_image = Image.new("RGB", (width, height), color=(248, 248, 248))
+        draw = ImageDraw.Draw(base_image)
+        draw.line((30, 80, 210, 80), fill=(120, 120, 120), width=2)
+        draw.rectangle((80, 62, 160, 98), fill=(60, 60, 60))
+
+        mask_image = Image.new("L", (width, height), 0)
+        mask_draw = ImageDraw.Draw(mask_image)
+        mask_draw.rectangle((74, 58, 166, 102), fill=255)
+
+        base_bgr = cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR)
+        mask_array = np.array(mask_image, dtype=np.uint8)
+        with patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base_bgr.copy(), mask_array.copy())):
+            result = OpenCvFastInpaintingEngine().inpaint(base_image, mask_image)
+
+        result_array = np.array(result, dtype=np.int16)
+        base_array = np.array(base_image, dtype=np.int16)
+        isolated_line_error = np.abs(result_array[80, 74:166] - base_array[80, 74:166]).mean()
+        self.assertGreater(isolated_line_error, 25.0)
+
+    def test_render_overlay_background_appends_opencv_fast_telea_debug_note(self) -> None:
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        blocks = [
+            TextBlock(
+                id="ocr_debug",
+                source="ocr",
+                bbox=(20, 12, 35, 24),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 12, 35, 24),
+            )
+        ]
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="auto",
+            inpaint_padding_px=0,
+            inpaint_max_area_ratio=0.2,
+        )
+
+        class FakeOpenCvEngine(OpenCvFastInpaintingEngine):
+            def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
+                self._last_debug_note = (
+                    "Residual Telea groups: 2; group size 1-2; adaptive proximity 10-14 px; "
+                    "edge density 0.010-0.080; final radius 2.10-4.30."
+                )
+                return page_image
+
+        with patch(
+            "pdf2ppt.inpainting_overlay.resolve_background_inpainting_engine",
+            return_value=(FakeOpenCvEngine(), "opencv-fast selected"),
+        ):
+            result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=options)
+
+        self.assertIn("edge density", result.note or "")
+        self.assertIn("group size", result.note or "")
+        self.assertIn("final radius", result.note or "")
 
     def test_opencv_fast_cleans_tight_mask_text_halo_on_smooth_background(self) -> None:
         width, height = 320, 160

@@ -25,6 +25,14 @@ DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_RESIDUAL_SCALE = 4.0
 DEFAULT_TELEA_RADIUS_MIN_SCALE = 0.6
 DEFAULT_TELEA_RADIUS_MAX_SCALE = 2.5
 DEFAULT_TELEA_RADIUS_REFERENCE_SPAN_PX = 48.0
+DEFAULT_TELEA_RADIUS_EDGE_DENSITY_THRESHOLD = 0.08
+DEFAULT_TELEA_RADIUS_EDGE_DENSITY_MIN_FACTOR = 0.7
+DEFAULT_TELEA_SMALL_COMPONENT_MAX_SPAN_PX = 36
+DEFAULT_TELEA_GROUP_PROXIMITY_PX = 12
+DEFAULT_TELEA_GROUP_PROXIMITY_MIN_SCALE = 0.75
+DEFAULT_TELEA_GROUP_PROXIMITY_MAX_SCALE = 2.0
+DEFAULT_STRUCTURAL_LINE_PADDING_PX = 4
+DEFAULT_STRUCTURAL_LINE_MIN_KERNEL_PX = 12
 
 
 @dataclass(slots=True)
@@ -45,6 +53,10 @@ class BackgroundInpaintingEngine:
 
     def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
         raise NotImplementedError
+
+    @property
+    def last_debug_note(self) -> str | None:
+        return None
 
 
 class WhiteBoxInpaintingEngine(BackgroundInpaintingEngine):
@@ -77,6 +89,12 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         telea_radius_min_scale: float = DEFAULT_TELEA_RADIUS_MIN_SCALE,
         telea_radius_max_scale: float = DEFAULT_TELEA_RADIUS_MAX_SCALE,
         telea_radius_reference_span_px: float = DEFAULT_TELEA_RADIUS_REFERENCE_SPAN_PX,
+        telea_radius_edge_density_threshold: float = DEFAULT_TELEA_RADIUS_EDGE_DENSITY_THRESHOLD,
+        telea_radius_edge_density_min_factor: float = DEFAULT_TELEA_RADIUS_EDGE_DENSITY_MIN_FACTOR,
+        telea_small_component_max_span_px: int = DEFAULT_TELEA_SMALL_COMPONENT_MAX_SPAN_PX,
+        telea_group_proximity_px: int = DEFAULT_TELEA_GROUP_PROXIMITY_PX,
+        telea_group_proximity_min_scale: float = DEFAULT_TELEA_GROUP_PROXIMITY_MIN_SCALE,
+        telea_group_proximity_max_scale: float = DEFAULT_TELEA_GROUP_PROXIMITY_MAX_SCALE,
     ) -> None:
         self.radius = radius
         self.flat_background_std_threshold = flat_background_std_threshold
@@ -92,8 +110,20 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         self.telea_radius_min_scale = max(0.1, telea_radius_min_scale)
         self.telea_radius_max_scale = max(self.telea_radius_min_scale, telea_radius_max_scale)
         self.telea_radius_reference_span_px = max(1.0, telea_radius_reference_span_px)
+        self.telea_radius_edge_density_threshold = max(1e-3, telea_radius_edge_density_threshold)
+        self.telea_radius_edge_density_min_factor = float(np.clip(telea_radius_edge_density_min_factor, 0.1, 1.0))
+        self.telea_small_component_max_span_px = max(1, telea_small_component_max_span_px)
+        self.telea_group_proximity_px = max(0, telea_group_proximity_px)
+        self.telea_group_proximity_min_scale = max(0.1, telea_group_proximity_min_scale)
+        self.telea_group_proximity_max_scale = max(self.telea_group_proximity_min_scale, telea_group_proximity_max_scale)
+        self._last_debug_note: str | None = None
+
+    @property
+    def last_debug_note(self) -> str | None:
+        return self._last_debug_note
 
     def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
+        self._last_debug_note = None
         mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
         if np.count_nonzero(mask_array) == 0:
             return page_image.convert("RGB").copy()
@@ -113,15 +143,23 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         )
         if np.count_nonzero(residual_mask) == 0:
             repaired = prefilled_source
+            self._last_debug_note = "Residual Telea groups: 0 after surface prefill."
         else:
-            repaired = _inpaint_residual_components(
+            repaired, diagnostics = _inpaint_residual_components(
                 prefilled_source,
                 residual_mask,
                 base_radius=self.radius,
                 min_radius=self.radius * self.telea_radius_min_scale,
                 max_radius=self.radius * self.telea_radius_max_scale,
                 reference_span_px=self.telea_radius_reference_span_px,
+                edge_density_threshold=self.telea_radius_edge_density_threshold,
+                edge_density_min_factor=self.telea_radius_edge_density_min_factor,
+                small_component_max_span_px=self.telea_small_component_max_span_px,
+                group_proximity_px=self.telea_group_proximity_px,
+                group_proximity_min_scale=self.telea_group_proximity_min_scale,
+                group_proximity_max_scale=self.telea_group_proximity_max_scale,
             )
+            self._last_debug_note = _format_telea_group_diagnostics(diagnostics)
         repaired = _restore_low_texture_regions(
             source,
             repaired,
@@ -137,6 +175,10 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
             smooth_gradient_color_bias_residual_scale=self.smooth_gradient_color_bias_residual_scale,
             blend_sigma=self.blend_sigma,
         )
+        repaired, restored_line_pixels = _restore_structural_line_regions(source, repaired, mask_array)
+        if restored_line_pixels > 0:
+            line_note = f"Structural line restore pixels: {restored_line_pixels}."
+            self._last_debug_note = f"{self._last_debug_note} {line_note}" if self._last_debug_note else line_note
         return Image.fromarray(cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB))
 
 
@@ -214,19 +256,41 @@ def _inpaint_residual_components(
     min_radius: float,
     max_radius: float,
     reference_span_px: float,
-) -> np.ndarray:
+    edge_density_threshold: float,
+    edge_density_min_factor: float,
+    small_component_max_span_px: int,
+    group_proximity_px: int,
+    group_proximity_min_scale: float,
+    group_proximity_max_scale: float,
+) -> tuple[np.ndarray, list[dict[str, float | int]]]:
     component_mask = (residual_mask > 0).astype(np.uint8)
     component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
     if component_count <= 1:
-        return source
+        return source, []
 
     repaired = source.copy()
-    for component_index in range(1, component_count):
-        component = (labels == component_index).astype(np.uint8)
+    gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 80, 160)
+    component_groups = _build_residual_component_groups(
+        labels,
+        component_count=component_count,
+        small_component_max_span_px=small_component_max_span_px,
+        group_proximity_px=group_proximity_px,
+        group_proximity_min_scale=group_proximity_min_scale,
+        group_proximity_max_scale=group_proximity_max_scale,
+    )
+    diagnostics: list[dict[str, float | int]] = []
+    for group in component_groups:
+        component = group["mask"]
         points = cv2.findNonZero(component)
         if points is None:
             continue
         x, y, width, height = cv2.boundingRect(points)
+        ring_mask = _build_component_ring_mask(component, padding_px=max(2, int(group["proximity_px"])))
+        ring_pixel_count = int(np.count_nonzero(ring_mask))
+        edge_density = 0.0
+        if ring_pixel_count > 0:
+            edge_density = float(np.count_nonzero(edges[ring_mask])) / float(ring_pixel_count)
         component_radius = _resolve_component_telea_radius(
             width=width,
             height=height,
@@ -234,6 +298,9 @@ def _inpaint_residual_components(
             min_radius=min_radius,
             max_radius=max_radius,
             reference_span_px=reference_span_px,
+            edge_density=edge_density,
+            edge_density_threshold=edge_density_threshold,
+            edge_density_min_factor=edge_density_min_factor,
         )
         padding = max(2, int(math.ceil(component_radius * 2.0)))
         x0 = max(0, x - padding)
@@ -247,8 +314,140 @@ def _inpaint_residual_components(
         local_component = local_mask > 0
         local_target = repaired[y0:y1, x0:x1]
         local_target[local_component] = local_repaired[local_component]
+        diagnostics.append(
+            {
+                "group_size": int(group["group_size"]),
+                "proximity_px": int(group["proximity_px"]),
+                "edge_density": float(edge_density),
+                "final_radius": float(component_radius),
+            }
+        )
 
-    return repaired
+    return repaired, diagnostics
+
+
+def _build_residual_component_groups(
+    labels: np.ndarray,
+    *,
+    component_count: int,
+    small_component_max_span_px: int,
+    group_proximity_px: int,
+    group_proximity_min_scale: float,
+    group_proximity_max_scale: float,
+) -> list[dict[str, np.ndarray | int]]:
+    small_components: list[dict[str, np.ndarray | tuple[int, int, int, int] | int]] = []
+    groups: list[dict[str, np.ndarray | int]] = []
+    for component_index in range(1, component_count):
+        component = (labels == component_index).astype(np.uint8)
+        points = cv2.findNonZero(component)
+        if points is None:
+            continue
+        x, y, width, height = cv2.boundingRect(points)
+        span = max(width, height)
+        if span <= small_component_max_span_px:
+            small_components.append({
+                "mask": component,
+                "bbox": (x, y, width, height),
+                "span": span,
+            })
+        else:
+            groups.append({"mask": component, "group_size": 1, "proximity_px": 0})
+
+    if not small_components:
+        return groups
+
+    parent = list(range(len(small_components)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left_index, left in enumerate(small_components):
+        left_bbox = left["bbox"]
+        left_span = int(left["span"])
+        for right_index in range(left_index + 1, len(small_components)):
+            right = small_components[right_index]
+            right_bbox = right["bbox"]
+            right_span = int(right["span"])
+            adaptive_proximity = _resolve_group_proximity_px(
+                base_proximity_px=group_proximity_px,
+                span=max(left_span, right_span),
+                reference_span_px=small_component_max_span_px,
+                min_scale=group_proximity_min_scale,
+                max_scale=group_proximity_max_scale,
+            )
+            if _bbox_gap_px(left_bbox, right_bbox) <= adaptive_proximity:
+                union(left_index, right_index)
+
+    grouped_components: dict[int, list[dict[str, np.ndarray | tuple[int, int, int, int] | int]]] = {}
+    for index, component in enumerate(small_components):
+        grouped_components.setdefault(find(index), []).append(component)
+
+    for members in grouped_components.values():
+        group_mask = np.zeros_like(labels, dtype=np.uint8)
+        max_span = 0
+        for member in members:
+            group_mask = np.maximum(group_mask, member["mask"])
+            max_span = max(max_span, int(member["span"]))
+        groups.append(
+            {
+                "mask": group_mask,
+                "group_size": len(members),
+                "proximity_px": _resolve_group_proximity_px(
+                    base_proximity_px=group_proximity_px,
+                    span=max_span,
+                    reference_span_px=small_component_max_span_px,
+                    min_scale=group_proximity_min_scale,
+                    max_scale=group_proximity_max_scale,
+                ),
+            }
+        )
+
+    return groups
+
+
+def _resolve_group_proximity_px(
+    *,
+    base_proximity_px: int,
+    span: int,
+    reference_span_px: int,
+    min_scale: float,
+    max_scale: float,
+) -> int:
+    if base_proximity_px <= 0:
+        return 0
+    scale = float(np.clip(span / max(1.0, float(reference_span_px)), min_scale, max_scale))
+    return max(1, int(round(base_proximity_px * scale)))
+
+
+def _bbox_gap_px(
+    left_bbox: tuple[int, int, int, int] | np.ndarray,
+    right_bbox: tuple[int, int, int, int] | np.ndarray,
+) -> int:
+    left_x, left_y, left_width, left_height = left_bbox
+    right_x, right_y, right_width, right_height = right_bbox
+    left_right = left_x + left_width
+    left_bottom = left_y + left_height
+    right_right = right_x + right_width
+    right_bottom = right_y + right_height
+    x_gap = max(0, right_x - left_right, left_x - right_right)
+    y_gap = max(0, right_y - left_bottom, left_y - right_bottom)
+    return max(x_gap, y_gap)
+
+
+def _build_component_ring_mask(component: np.ndarray, *, padding_px: int) -> np.ndarray:
+    kernel = np.ones((padding_px * 2 + 1, padding_px * 2 + 1), dtype=np.uint8)
+    outer = cv2.dilate(component, kernel, iterations=1).astype(bool)
+    inner = component.astype(bool)
+    return outer & (~inner)
 
 
 def _resolve_component_telea_radius(
@@ -259,10 +458,237 @@ def _resolve_component_telea_radius(
     min_radius: float,
     max_radius: float,
     reference_span_px: float,
+    edge_density: float,
+    edge_density_threshold: float,
+    edge_density_min_factor: float,
 ) -> float:
     component_span = float(max(width, height))
-    scale = component_span / reference_span_px
-    return float(np.clip(base_radius * scale, min_radius, max_radius))
+    size_scale = component_span / reference_span_px
+    density_ratio = min(1.0, max(0.0, edge_density) / edge_density_threshold)
+    edge_scale = 1.0 - density_ratio * (1.0 - edge_density_min_factor)
+    return float(np.clip(base_radius * size_scale * edge_scale, min_radius, max_radius))
+
+
+def _format_telea_group_diagnostics(diagnostics: list[dict[str, float | int]]) -> str:
+    if not diagnostics:
+        return "Residual Telea groups: 0."
+    edge_values = [float(item["edge_density"]) for item in diagnostics]
+    group_sizes = [int(item["group_size"]) for item in diagnostics]
+    radius_values = [float(item["final_radius"]) for item in diagnostics]
+    proximity_values = [int(item["proximity_px"]) for item in diagnostics]
+    return (
+        f"Residual Telea groups: {len(diagnostics)}; "
+        f"group size {min(group_sizes)}-{max(group_sizes)}; "
+        f"adaptive proximity {min(proximity_values)}-{max(proximity_values)} px; "
+        f"edge density {min(edge_values):.3f}-{max(edge_values):.3f}; "
+        f"final radius {min(radius_values):.2f}-{max(radius_values):.2f}."
+    )
+
+
+def _restore_structural_line_regions(
+    source: np.ndarray,
+    repaired: np.ndarray,
+    mask_array: np.ndarray,
+    *,
+    padding_px: int = DEFAULT_STRUCTURAL_LINE_PADDING_PX,
+    min_kernel_px: int = DEFAULT_STRUCTURAL_LINE_MIN_KERNEL_PX,
+) -> tuple[np.ndarray, int]:
+    if np.count_nonzero(mask_array) == 0:
+        return repaired, 0
+
+    gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+    binary = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        12,
+    )
+    binary[mask_array > 0] = 0
+    horizontal_kernel_len = max(min_kernel_px, source.shape[1] // 30)
+    vertical_kernel_len = max(min_kernel_px, source.shape[0] // 20)
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_kernel_len, 1))
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, vertical_kernel_len))
+    horizontal_lines = _filter_structural_line_candidates(
+        cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel),
+        orientation="horizontal",
+        min_span_px=horizontal_kernel_len,
+    )
+    vertical_lines = _filter_structural_line_candidates(
+        cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel),
+        orientation="vertical",
+        min_span_px=vertical_kernel_len,
+    )
+    line_mask = cv2.bitwise_or(horizontal_lines, vertical_lines) > 0
+    if not np.any(line_mask):
+        return repaired, 0
+
+    grid_region_mask = _build_grid_region_mask(horizontal_lines, vertical_lines, mask_array)
+    if not np.any(grid_region_mask):
+        return repaired, 0
+
+    result = repaired.copy()
+    restored_pixels = 0
+    restored_pixels += _bridge_horizontal_line_gaps(
+        source,
+        result,
+        horizontal_lines,
+        mask_array,
+        grid_region_mask,
+        search_radius=max(horizontal_kernel_len, padding_px * 4),
+    )
+    restored_pixels += _bridge_vertical_line_gaps(
+        source,
+        result,
+        vertical_lines,
+        mask_array,
+        grid_region_mask,
+        search_radius=max(vertical_kernel_len, padding_px * 4),
+    )
+    if restored_pixels == 0:
+        return repaired, 0
+    return result, restored_pixels
+
+
+def _bridge_horizontal_line_gaps(
+    source: np.ndarray,
+    result: np.ndarray,
+    horizontal_lines: np.ndarray,
+    mask_array: np.ndarray,
+    grid_region_mask: np.ndarray,
+    *,
+    search_radius: int,
+) -> int:
+    restored_pixels = 0
+    height, width = mask_array.shape
+    for row in range(height):
+        if not np.any(horizontal_lines[row] > 0) or not np.any(mask_array[row] > 0):
+            continue
+        for start, end in _iter_true_runs(mask_array[row] > 0):
+            if not np.any(grid_region_mask[row, start : end + 1]):
+                continue
+            left_slice = slice(max(0, start - search_radius), start)
+            right_slice = slice(end + 1, min(width, end + 1 + search_radius))
+            left_support = np.flatnonzero(horizontal_lines[row, left_slice] > 0)
+            right_support = np.flatnonzero(horizontal_lines[row, right_slice] > 0)
+            if left_support.size == 0 or right_support.size == 0:
+                continue
+            left_positions = left_support + left_slice.start
+            right_positions = right_support + right_slice.start
+            support_values = np.concatenate(
+                [source[row, left_positions].astype(np.float32), source[row, right_positions].astype(np.float32)],
+                axis=0,
+            )
+            fill_color = np.mean(support_values, axis=0)
+            result[row, start : end + 1][mask_array[row, start : end + 1] > 0] = fill_color
+            restored_pixels += end - start + 1
+    return restored_pixels
+
+
+def _bridge_vertical_line_gaps(
+    source: np.ndarray,
+    result: np.ndarray,
+    vertical_lines: np.ndarray,
+    mask_array: np.ndarray,
+    grid_region_mask: np.ndarray,
+    *,
+    search_radius: int,
+) -> int:
+    restored_pixels = 0
+    height, width = mask_array.shape
+    for col in range(width):
+        if not np.any(vertical_lines[:, col] > 0) or not np.any(mask_array[:, col] > 0):
+            continue
+        for start, end in _iter_true_runs(mask_array[:, col] > 0):
+            if not np.any(grid_region_mask[start : end + 1, col]):
+                continue
+            top_slice = slice(max(0, start - search_radius), start)
+            bottom_slice = slice(end + 1, min(height, end + 1 + search_radius))
+            top_support = np.flatnonzero(vertical_lines[top_slice, col] > 0)
+            bottom_support = np.flatnonzero(vertical_lines[bottom_slice, col] > 0)
+            if top_support.size == 0 or bottom_support.size == 0:
+                continue
+            top_positions = top_support + top_slice.start
+            bottom_positions = bottom_support + bottom_slice.start
+            support_values = np.concatenate(
+                [source[top_positions, col].astype(np.float32), source[bottom_positions, col].astype(np.float32)],
+                axis=0,
+            )
+            fill_color = np.mean(support_values, axis=0)
+            result[start : end + 1, col][mask_array[start : end + 1, col] > 0] = fill_color
+            restored_pixels += end - start + 1
+    return restored_pixels
+
+
+def _iter_true_runs(values: np.ndarray) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, value in enumerate(values.tolist()):
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            runs.append((start, index - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(values) - 1))
+    return runs
+
+
+def _build_grid_region_mask(
+    horizontal_lines: np.ndarray,
+    vertical_lines: np.ndarray,
+    mask_array: np.ndarray,
+) -> np.ndarray:
+    horizontal_bool = horizontal_lines > 0
+    vertical_bool = vertical_lines > 0
+    if not np.any(horizontal_bool) or not np.any(vertical_bool):
+        return np.zeros_like(mask_array, dtype=bool)
+
+    intersection_seed = horizontal_bool & vertical_bool
+    if not np.any(intersection_seed):
+        horizontal_kernel = np.ones((1, max(3, mask_array.shape[1] // 80)), dtype=np.uint8)
+        vertical_kernel = np.ones((max(3, mask_array.shape[0] // 80), 1), dtype=np.uint8)
+        expanded_horizontal = cv2.dilate(horizontal_lines, horizontal_kernel, iterations=1) > 0
+        expanded_vertical = cv2.dilate(vertical_lines, vertical_kernel, iterations=1) > 0
+        intersection_seed = expanded_horizontal & expanded_vertical
+        if not np.any(intersection_seed):
+            return np.zeros_like(mask_array, dtype=bool)
+
+    region_kernel = np.ones((max(5, mask_array.shape[0] // 40), max(5, mask_array.shape[1] // 40)), dtype=np.uint8)
+    grid_region = cv2.dilate(intersection_seed.astype(np.uint8), region_kernel, iterations=1) > 0
+    line_region = cv2.dilate((horizontal_bool | vertical_bool).astype(np.uint8), np.ones((5, 5), dtype=np.uint8), iterations=1) > 0
+    mask_vicinity = cv2.dilate((mask_array > 0).astype(np.uint8), np.ones((9, 9), dtype=np.uint8), iterations=1) > 0
+    return grid_region & line_region & mask_vicinity
+
+
+def _filter_structural_line_candidates(
+    line_mask: np.ndarray,
+    *,
+    orientation: str,
+    min_span_px: int,
+) -> np.ndarray:
+    component_mask = (line_mask > 0).astype(np.uint8)
+    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    if component_count <= 1:
+        return line_mask
+
+    filtered = np.zeros_like(line_mask)
+    for component_index in range(1, component_count):
+        component = (labels == component_index).astype(np.uint8)
+        points = cv2.findNonZero(component)
+        if points is None:
+            continue
+        _, _, width, height = cv2.boundingRect(points)
+        if orientation == "horizontal":
+            if width < min_span_px or width < height * 4:
+                continue
+        else:
+            if height < min_span_px or height < width * 4:
+                continue
+        filtered[component.astype(bool)] = 255
+
+    return filtered
 
 
 def _restore_low_texture_regions(
