@@ -290,6 +290,7 @@ class ApiTests(unittest.TestCase):
         output_response = self.client.get(f"/jobs/{job_id}/output.pptx")
         self.assertEqual(output_response.status_code, 200)
         self.assertEqual(output_response.content, b"pptx-bytes")
+        self.assertIn('filename="sample.pptx"', output_response.headers["content-disposition"])
 
         report_response = self.client.get(f"/jobs/{job_id}/report.json")
         self.assertEqual(report_response.status_code, 200)

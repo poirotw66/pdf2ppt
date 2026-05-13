@@ -242,7 +242,12 @@ def download_output_pptx(job_id: str) -> FileResponse:
     output_path = Path(record.output_pptx_path)
     if not output_path.exists():
         raise HTTPException(status_code=404, detail="Converted PPTX file is missing.")
-    return FileResponse(output_path, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    download_filename = f"{Path(record.original_filename).stem}.pptx"
+    return FileResponse(
+        output_path,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename=download_filename,
+    )
 
 
 @app.get("/jobs/{job_id}/report.json", responses={404: COMMON_ERROR_RESPONSES[404]})
