@@ -19,10 +19,12 @@ from .api_models import (
     DetectPageResponse,
     DetectRequest,
     DetectResponse,
+    ErrorResponse,
     JobResponse,
     OcrBoxResponse,
 )
 from .core import ConversionOptions, DEFAULT_OCR_BATCH_SIZE
+from .core import InputValidationError, OcrInitializationError, OcrProcessingError, PageConversionError, Pdf2PptError
 from .job_store import JobRecord, JobStore
 from .models import TextBlock
 from .ocr import OcrEngine
@@ -39,7 +41,16 @@ app.add_middleware(
 job_store = JobStore()
 
 
-@app.post("/jobs", response_model=JobResponse)
+COMMON_ERROR_RESPONSES = {
+    400: {"model": ErrorResponse, "description": "Input validation error."},
+    404: {"model": ErrorResponse, "description": "Requested job or artifact was not found."},
+    500: {"model": ErrorResponse, "description": "Page conversion or internal processing failure."},
+    502: {"model": ErrorResponse, "description": "OCR runtime failed while processing a request."},
+    503: {"model": ErrorResponse, "description": "OCR runtime is unavailable or misconfigured."},
+}
+
+
+@app.post("/jobs", response_model=JobResponse, responses={400: COMMON_ERROR_RESPONSES[400]})
 async def create_job(file: UploadFile = File(...)) -> JobResponse:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
@@ -53,17 +64,25 @@ async def create_job(file: UploadFile = File(...)) -> JobResponse:
     try:
         record = job_store.create_job(filename=file.filename, pdf_bytes=pdf_bytes)
     except Exception as error:
-        raise HTTPException(status_code=400, detail=f"Failed to create job: {error}") from error
+        raise _to_http_exception(InputValidationError(f"Failed to read uploaded PDF: {error}")) from error
     return _job_to_response(record)
 
 
-@app.get("/jobs/{job_id}", response_model=JobResponse)
+@app.get("/jobs/{job_id}", response_model=JobResponse, responses={404: COMMON_ERROR_RESPONSES[404]})
 def get_job(job_id: str) -> JobResponse:
     record = _load_job_or_404(job_id)
     return _job_to_response(record)
 
 
-@app.post("/jobs/{job_id}/detect", response_model=DetectResponse)
+@app.post(
+    "/jobs/{job_id}/detect",
+    response_model=DetectResponse,
+    responses={
+        404: COMMON_ERROR_RESPONSES[404],
+        502: COMMON_ERROR_RESPONSES[502],
+        503: COMMON_ERROR_RESPONSES[503],
+    },
+)
 def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
     record = _load_job_or_404(job_id)
     job_store.update_job(job_id, status="detecting")
@@ -109,14 +128,19 @@ def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
                     )
     except Exception as error:
         job_store.update_job(job_id, status="detect-failed")
-        raise HTTPException(status_code=500, detail=f"OCR detection failed: {error}") from error
+        mapped_error = error if isinstance(error, (Pdf2PptError, OcrInitializationError, OcrProcessingError)) else OcrProcessingError(f"OCR detection failed: {error}")
+        raise _to_http_exception(mapped_error) from error
 
     response = DetectResponse(job_id=job_id, status="detected", pages=pages)
     job_store.save_detection_payload(job_id, response.model_dump())
     return response
 
 
-@app.put("/jobs/{job_id}/boxes", response_model=ApprovedBoxesResponse)
+@app.put(
+    "/jobs/{job_id}/boxes",
+    response_model=ApprovedBoxesResponse,
+    responses={400: COMMON_ERROR_RESPONSES[400], 404: COMMON_ERROR_RESPONSES[404]},
+)
 def save_approved_boxes(job_id: str, request: ApprovedBoxesRequest) -> ApprovedBoxesResponse:
     _load_job_or_404(job_id)
     payload = {"job_id": job_id, "status": "boxes-approved", "pages": request.model_dump()["pages"]}
@@ -129,11 +153,21 @@ def save_approved_boxes(job_id: str, request: ApprovedBoxesRequest) -> ApprovedB
     )
 
 
-@app.post("/jobs/{job_id}/convert", response_model=ConvertResponse)
+@app.post(
+    "/jobs/{job_id}/convert",
+    response_model=ConvertResponse,
+    responses={
+        400: COMMON_ERROR_RESPONSES[400],
+        404: COMMON_ERROR_RESPONSES[404],
+        500: COMMON_ERROR_RESPONSES[500],
+        502: COMMON_ERROR_RESPONSES[502],
+        503: COMMON_ERROR_RESPONSES[503],
+    },
+)
 def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
     record = _load_job_or_404(job_id)
     if record.approved_boxes_path is None:
-        raise HTTPException(status_code=400, detail="No approved boxes found for this job.")
+        raise _to_http_exception(InputValidationError("No approved boxes found for this job."))
 
     approved_boxes_by_page, approved_image_sizes_by_page = _load_approved_boxes_payload(Path(record.approved_boxes_path))
     output_pptx_path = job_store.job_dir(job_id) / "output.pptx"
@@ -169,9 +203,12 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
     job_store.update_job(job_id, status="converting")
     try:
         report = convert_pdf(options)
+    except (InputValidationError, OcrInitializationError, OcrProcessingError, PageConversionError) as error:
+        job_store.update_job(job_id, status="convert-failed")
+        raise _to_http_exception(error) from error
     except Exception as error:
         job_store.update_job(job_id, status="convert-failed")
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {error}") from error
+        raise _to_http_exception(PageConversionError(0, f"Conversion failed: {error}")) from error
 
     job_store.update_job(
         job_id,
@@ -188,7 +225,7 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
     )
 
 
-@app.get("/jobs/{job_id}/pages/{page_number}.png")
+@app.get("/jobs/{job_id}/pages/{page_number}.png", responses={404: COMMON_ERROR_RESPONSES[404]})
 def get_job_page_preview(job_id: str, page_number: int) -> FileResponse:
     _load_job_or_404(job_id)
     preview_path = job_store.preview_image_path(job_id, page_number)
@@ -197,7 +234,7 @@ def get_job_page_preview(job_id: str, page_number: int) -> FileResponse:
     return FileResponse(preview_path, media_type="image/png")
 
 
-@app.get("/jobs/{job_id}/output.pptx")
+@app.get("/jobs/{job_id}/output.pptx", responses={404: COMMON_ERROR_RESPONSES[404]})
 def download_output_pptx(job_id: str) -> FileResponse:
     record = _load_job_or_404(job_id)
     if record.output_pptx_path is None:
@@ -208,7 +245,7 @@ def download_output_pptx(job_id: str) -> FileResponse:
     return FileResponse(output_path, media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
 
-@app.get("/jobs/{job_id}/report.json")
+@app.get("/jobs/{job_id}/report.json", responses={404: COMMON_ERROR_RESPONSES[404]})
 def download_report_json(job_id: str) -> FileResponse:
     record = _load_job_or_404(job_id)
     if record.report_path is None:
@@ -227,7 +264,7 @@ def _load_job_or_404(job_id: str) -> JobRecord:
     try:
         return job_store.get_job(job_id)
     except FileNotFoundError as error:
-        raise HTTPException(status_code=404, detail="Job not found.") from error
+        raise HTTPException(status_code=404, detail={"code": "not-found", "message": "Job not found."}) from error
 
 
 def _job_to_response(record: JobRecord) -> JobResponse:
@@ -275,18 +312,23 @@ def _load_approved_boxes_payload(
         page_number = int(page_payload["page"])
         width = int(page_payload["width"])
         height = int(page_payload["height"])
+        if width < 1 or height < 1:
+            raise InputValidationError(f"Approved box image size must be positive for page {page_number}.")
         image_sizes_by_page[page_number] = (width, height)
         blocks: list[TextBlock] = []
         for index, box in enumerate(page_payload.get("boxes", []), start=1):
             polygon = box.get("polygon")
+            bbox = box.get("bbox")
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                raise InputValidationError(f"Approved box {index} on page {page_number} must contain a 4-value bbox.")
             blocks.append(
                 TextBlock(
                     id=str(box.get("id") or f"approved_{page_number}_{index}"),
                     source="ocr",
-                    bbox=tuple(float(value) for value in box["bbox"]),
+                    bbox=tuple(float(value) for value in bbox),
                     text=str(box.get("text") or ""),
                     confidence=float(box.get("confidence", 1.0)),
-                    image_bbox=tuple(float(value) for value in box["bbox"]),
+                    image_bbox=tuple(float(value) for value in bbox),
                     image_polygon=(
                         tuple((float(point[0]), float(point[1])) for point in polygon)
                         if polygon is not None
@@ -296,3 +338,17 @@ def _load_approved_boxes_payload(
             )
         blocks_by_page[page_number] = blocks
     return blocks_by_page, image_sizes_by_page
+
+
+def _to_http_exception(error: Exception) -> HTTPException:
+    if isinstance(error, InputValidationError):
+        return HTTPException(status_code=400, detail=error.to_detail())
+    if isinstance(error, OcrInitializationError):
+        return HTTPException(status_code=503, detail=error.to_detail())
+    if isinstance(error, OcrProcessingError):
+        return HTTPException(status_code=502, detail=error.to_detail())
+    if isinstance(error, PageConversionError):
+        return HTTPException(status_code=500, detail=error.to_detail())
+    if isinstance(error, Pdf2PptError):
+        return HTTPException(status_code=500, detail=error.to_detail())
+    return HTTPException(status_code=500, detail={"code": "internal-error", "message": str(error)})

@@ -43,9 +43,11 @@ from .block_analysis import (
 from .core import (
     ConversionOptions,
     DEFAULT_OCR_BATCH_SIZE,
+    InputValidationError,
     OcrInitializationError,
     OcrPageData,
     OcrProcessingError,
+    PageConversionError,
     PageSignals,
 )
 from .models import ConversionReport, ImagePlacement, PageResult, QualityScore, TextBlock
@@ -99,6 +101,8 @@ def convert_pdf(
     progress_callback: ProgressCallback | None = None,
 ) -> ConversionReport:
     conversion_started_at = perf_counter()
+    if not options.input_path.exists():
+        raise InputValidationError(f"Input PDF does not exist: {options.input_path}")
     options.output_path.parent.mkdir(parents=True, exist_ok=True)
     options.report_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -136,9 +140,11 @@ def convert_pdf(
                     ocr_engine,
                     precomputed_ocr_page_data=batched_ocr_page_data.get(page.number + 1),
                 )
+            except (OcrInitializationError, OcrProcessingError, PageConversionError):
+                raise
             except Exception as error:
                 logger.exception("Failed to process page %s", page.number + 1)
-                raise RuntimeError(f"Failed to process page {page.number + 1}: {error}") from error
+                raise PageConversionError(page.number + 1, f"Failed to process page {page.number + 1}: {error}") from error
             page_results.append(page_result)
             slide_render_started_at = perf_counter()
             render_page_to_slide(

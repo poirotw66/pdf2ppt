@@ -10,6 +10,33 @@ from PIL import Image
 DEFAULT_OCR_BATCH_SIZE = 3
 
 
+class Pdf2PptError(RuntimeError):
+    error_code = "pdf2ppt-error"
+
+    def to_detail(self) -> dict[str, object]:
+        return {
+            "code": self.error_code,
+            "message": str(self),
+        }
+
+
+class InputValidationError(Pdf2PptError):
+    error_code = "input-error"
+
+
+class PageConversionError(Pdf2PptError):
+    error_code = "page-conversion-error"
+
+    def __init__(self, page_number: int, message: str) -> None:
+        self.page_number = page_number
+        super().__init__(message)
+
+    def to_detail(self) -> dict[str, object]:
+        detail = super().to_detail()
+        detail["page"] = self.page_number
+        return detail
+
+
 @dataclass(slots=True)
 class ConversionOptions:
     input_path: Path
@@ -52,8 +79,20 @@ class OcrPageData:
 
 
 class OcrInitializationError(RuntimeError):
-    pass
+    error_code = "ocr-initialization-error"
+
+    def to_detail(self) -> dict[str, object]:
+        return {
+            "code": self.error_code,
+            "message": str(self),
+        }
 
 
 class OcrProcessingError(RuntimeError):
-    pass
+    error_code = "ocr-processing-error"
+
+    def to_detail(self) -> dict[str, object]:
+        return {
+            "code": self.error_code,
+            "message": str(self),
+        }

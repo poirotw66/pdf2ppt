@@ -376,6 +376,39 @@ Relevant backend endpoints:
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`
 
+Error response model:
+
+- API errors now return structured JSON under `detail`.
+- Shape: `{ "detail": { "code": string, "message": string, "page": number | null } }`
+- `page` is only present for page-scoped conversion failures.
+
+Common error codes:
+
+- `input-error`: invalid upload, missing approved boxes, malformed approved box payload
+- `ocr-initialization-error`: OCR runtime is unavailable or misconfigured
+- `ocr-processing-error`: OCR runtime failed while processing the request
+- `page-conversion-error`: a page failed during conversion
+- `not-found`: unknown job id or missing generated artifact
+
+Typical endpoint status codes:
+
+- `POST /jobs`: `200`, `400`
+- `POST /jobs/{job_id}/detect`: `200`, `404`, `502`, `503`
+- `PUT /jobs/{job_id}/boxes`: `200`, `400`, `404`
+- `POST /jobs/{job_id}/convert`: `200`, `400`, `404`, `500`, `502`, `503`
+
+## CI
+
+The repository includes a GitHub Actions workflow at `.github/workflows/ci.yml`.
+
+It runs:
+
+- backend validation with `pytest`
+- frontend validation with `npm test`
+- frontend production build with `npm run build`
+
+This keeps Python and frontend regressions on the same pull request signal.
+
 Project entry point:
 
 - CLI: `src/pdf2ppt/cli.py`

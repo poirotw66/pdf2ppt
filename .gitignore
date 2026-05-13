@@ -3,7 +3,6 @@ rag_diffusion_debug/
 rag_opencv_debug/
 __pycache__/
 output/
-tests/
 model/
 .pdf2ppt_jobs/
 frontend/node_modules/
@@ -11,3 +10,8 @@ frontend/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+src/*.egg-info/
+tests/__pycache__/
+tests/artifacts/
+!tests/fixtures/
+!tests/fixtures/**

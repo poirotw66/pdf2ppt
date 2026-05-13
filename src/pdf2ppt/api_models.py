@@ -5,6 +5,16 @@ from pydantic import BaseModel, Field
 from .core import DEFAULT_OCR_BATCH_SIZE
 
 
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+    page: int | None = None
+
+
+class ErrorResponse(BaseModel):
+    detail: ErrorDetail
+
+
 class JobResponse(BaseModel):
     job_id: str
     status: str
