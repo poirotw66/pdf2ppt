@@ -75,6 +75,8 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     return Math.min(widthScale, heightScale);
   }, [editorViewportSize.height, editorViewportSize.width, selectedPage]);
   const previewScale = selectedPage ? fitScale * zoom : 1;
+  const fitZoomPercent = Math.round(fitScale * 100);
+  const previewZoomPercent = Math.round(previewScale * 100);
 
   useEffect(() => {
     function onWindowKeyDown(event: KeyboardEvent) {
@@ -154,6 +156,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     setSelectedPageIndex(0);
     setSelectedBoxId(null);
     setSelectedBoxIds([]);
+    setZoom(1);
   }
 
   function loadDetectedPages(nextPages: PagePayload[]) {
@@ -161,6 +164,11 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     setSelectedPageIndex(0);
     setSelectedBoxId(nextPages[0]?.boxes[0]?.id ?? null);
     setSelectedBoxIds(nextPages[0]?.boxes[0]?.id ? [nextPages[0].boxes[0].id] : []);
+    setZoom(1);
+  }
+
+  function fitToSlide() {
+    setZoom(1);
   }
 
   function selectPage(index: number) {
@@ -468,6 +476,8 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     editorTool,
     editorViewportRef,
     expandSelectedBox,
+    fitToSlide,
+    fitZoomPercent,
     groupedBoxes,
     loadDetectedPages,
     lowConfidenceThreshold,
@@ -483,6 +493,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     orderedBoxes,
     pages,
     previewScale,
+    previewZoomPercent,
     resetPages,
     selectBox,
     selectPage,

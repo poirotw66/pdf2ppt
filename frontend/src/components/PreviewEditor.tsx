@@ -12,11 +12,14 @@ type PreviewEditorProps = {
   onEditorMouseMove: (event: MouseEvent<HTMLDivElement>) => void;
   onEditorMouseUp: () => void;
   onEditorToolChange: (tool: EditorTool) => void;
+  onFitToSlide: () => void;
   onSelectBox: (boxId: string) => void;
   onStartMoveBox: (event: MouseEvent<HTMLDivElement>, box: Box) => void;
   onStartResizeBox: (event: MouseEvent<HTMLButtonElement>, box: Box, handle: ResizeHandle) => void;
+  fitZoomPercent: number;
   onZoomChange: (event: ChangeEvent<HTMLInputElement>) => void;
   previewScale: number;
+  previewZoomPercent: number;
   selectedBoxId: string | null;
   selectedBoxIds: string[];
   selectedPage: PagePayload | null;
@@ -34,11 +37,14 @@ export function PreviewEditor({
   onEditorMouseMove,
   onEditorMouseUp,
   onEditorToolChange,
+  onFitToSlide,
   onSelectBox,
   onStartMoveBox,
   onStartResizeBox,
+  fitZoomPercent,
   onZoomChange,
   previewScale,
+  previewZoomPercent,
   selectedBoxId,
   selectedBoxIds,
   selectedPage,
@@ -66,11 +72,15 @@ export function PreviewEditor({
               Create Box
             </button>
           </div>
+          <button type="button" className="tool-chip" onClick={onFitToSlide}>
+            Fit Slide
+          </button>
           <label className="zoom-control">
             <span>Zoom</span>
             <input type="range" min="50" max="200" step="10" value={zoom * 100} onChange={onZoomChange} />
-            <strong>{Math.round(zoom * 100)}%</strong>
+            <strong>{previewZoomPercent}%</strong>
           </label>
+          <span>Fit {fitZoomPercent}%</span>
         </div>
       </div>
       {selectedPage ? (

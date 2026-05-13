@@ -107,11 +107,14 @@ function EditorHarness({ initialPages }: { initialPages: PagePayload[] }) {
         onEditorMouseMove={editor.onEditorMouseMove}
         onEditorMouseUp={editor.onEditorMouseUp}
         onEditorToolChange={editor.setEditorTool}
+        onFitToSlide={editor.fitToSlide}
         onSelectBox={editor.selectBox}
         onStartMoveBox={editor.startMoveBox}
         onStartResizeBox={editor.startResizeBox}
+        fitZoomPercent={editor.fitZoomPercent}
         onZoomChange={editor.onZoomChange}
         previewScale={editor.previewScale}
+        previewZoomPercent={editor.previewZoomPercent}
         selectedBoxId={editor.selectedBoxId}
         selectedBoxIds={editor.selectedBoxIds}
         selectedPage={editor.selectedPage}
