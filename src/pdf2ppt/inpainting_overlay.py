@@ -84,6 +84,10 @@ def render_overlay_background(
         if mask_area_ratio(mask_array) <= options.inpaint_max_area_ratio
         else WhiteBoxInpaintingEngine()
     )
+    if isinstance(engine, OpenCvFastInpaintingEngine):
+        engine.set_protected_line_mask(protected_line_mask)
+    if isinstance(fallback_engine, OpenCvFastInpaintingEngine):
+        fallback_engine.set_protected_line_mask(protected_line_mask)
 
     def finalize_result(
         rendered_image: Image.Image,

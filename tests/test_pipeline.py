@@ -13,6 +13,7 @@ import fitz
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+import pdf2ppt.inpainting_engines as inpainting_engines
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line, main
 from pdf2ppt.inpainting_overlay import (
     _apply_targeted_file_back_color_correction,
@@ -686,6 +687,148 @@ class OcrStyleOptimizationTests(unittest.TestCase):
 
         self.assertEqual(len(captured_radii), 2)
         self.assertGreater(captured_radii[0], captured_radii[1])
+
+    def test_opencv_fast_shrinks_radius_and_crop_near_protected_lines(self) -> None:
+        width, height = 220, 160
+        base = np.full((height, width, 3), 180, dtype="uint8")
+        mask = np.zeros((height, width), dtype="uint8")
+        mask[40:84, 24:68] = 255
+        mask[40:84, 132:176] = 255
+        protected_line_mask = np.zeros((height, width), dtype=bool)
+        protected_line_mask[32:36, 16:76] = True
+
+        captured_calls: list[tuple[tuple[int, int], float, tuple[int, int, int, int]]] = []
+
+        def fake_inpaint(local_source: np.ndarray, local_mask: np.ndarray, radius: float, method: int) -> np.ndarray:
+            points = cv2.findNonZero(local_mask)
+            bbox = cv2.boundingRect(points) if points is not None else (0, 0, 0, 0)
+            captured_calls.append((local_source.shape[:2], radius, bbox))
+            return local_source.copy()
+
+        with (
+            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
+        ):
+            engine = OpenCvFastInpaintingEngine(
+                telea_small_component_max_span_px=20,
+                telea_group_proximity_px=0,
+            )
+            engine.set_protected_line_mask(protected_line_mask)
+            engine.inpaint(
+                Image.fromarray(base, mode="RGB"),
+                Image.fromarray(mask, mode="L"),
+            )
+
+        self.assertEqual(len(captured_calls), 2)
+        protected_call, regular_call = captured_calls
+        self.assertLess(protected_call[1], regular_call[1])
+        self.assertLess(protected_call[0][0] * protected_call[0][1], regular_call[0][0] * regular_call[0][1])
+        protected_height, protected_width = protected_call[0]
+        protected_x, protected_y, protected_bbox_width, protected_bbox_height = protected_call[2]
+        top_margin = protected_y
+        bottom_margin = protected_height - (protected_y + protected_bbox_height)
+        self.assertLess(top_margin, bottom_margin)
+
+    def test_inpaint_residual_components_excludes_protected_lines_from_edge_density(self) -> None:
+        width, height = 220, 160
+        source = np.full((height, width, 3), 180, dtype="uint8")
+        residual_mask = np.zeros((height, width), dtype="uint8")
+        residual_mask[40:84, 24:68] = 255
+        protected_line_mask = np.zeros((height, width), dtype=bool)
+        protected_line_mask[32:36, 16:76] = True
+        source[32:36, 16:76] = 20
+
+        with patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=lambda local_source, local_mask, radius, method: local_source.copy()):
+            _, diagnostics = inpainting_engines._inpaint_residual_components(
+                source,
+                residual_mask,
+                protected_line_mask=protected_line_mask,
+                base_radius=3.0,
+                min_radius=1.8,
+                max_radius=7.5,
+                reference_span_px=48.0,
+                edge_density_threshold=0.08,
+                edge_density_min_factor=0.7,
+                small_component_max_span_px=20,
+                group_proximity_px=0,
+                group_proximity_min_scale=0.75,
+                group_proximity_max_scale=2.0,
+            )
+
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(int(diagnostics[0]["protected_nearby"]), 1)
+        self.assertEqual(float(diagnostics[0]["edge_density"]), 0.0)
+
+    def test_resolve_component_background_patch_excludes_protected_lines_from_prefill_ring(self) -> None:
+        width, height = 180, 120
+        source = np.full((height, width, 3), 180, dtype="uint8")
+        component = np.zeros((height, width), dtype="uint8")
+        component[40:80, 60:120] = 1
+        protected_line_mask = np.zeros((height, width), dtype=bool)
+        protected_line_mask[34:38, 48:132] = True
+        source[34:38, 48:132] = 20
+        gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 80, 160)
+        kernel = np.ones((17, 17), dtype=np.uint8)
+        expand_kernel = np.ones((5, 5), dtype=np.uint8)
+        gap_kernel = np.ones((13, 13), dtype=np.uint8)
+        captured_overlaps: list[int] = []
+
+        def fake_fit_component_background_surface(
+            local_source: np.ndarray,
+            local_component: np.ndarray,
+            ring_mask: np.ndarray,
+            *,
+            context_dilate_px: int,
+            model: str,
+        ) -> tuple[int, int, int, int, np.ndarray, float]:
+            captured_overlaps.append(int(np.count_nonzero(ring_mask & protected_line_mask)))
+            patch_height, patch_width = local_component.shape
+            patch_values = np.full((patch_height, patch_width, 3), 180.0, dtype=np.float32)
+            return 0, 0, patch_width, patch_height, patch_values, 0.0
+
+        with patch(
+            "pdf2ppt.inpainting_engines._fit_component_background_surface",
+            side_effect=fake_fit_component_background_surface,
+        ):
+            inpainting_engines._resolve_component_background_patch(
+                source,
+                gray,
+                edges,
+                component,
+                protected_line_mask=None,
+                kernel=kernel,
+                expand_kernel=expand_kernel,
+                gap_kernel=gap_kernel,
+                flat_background_std_threshold=4.0,
+                flat_background_edge_threshold=0.01,
+                context_dilate_px=8,
+                smooth_gradient_edge_threshold=0.015,
+                smooth_gradient_residual_threshold=16.0,
+                smooth_gradient_color_bias_max_delta=0.0,
+                smooth_gradient_color_bias_residual_scale=4.0,
+            )
+            inpainting_engines._resolve_component_background_patch(
+                source,
+                gray,
+                edges,
+                component,
+                protected_line_mask=protected_line_mask,
+                kernel=kernel,
+                expand_kernel=expand_kernel,
+                gap_kernel=gap_kernel,
+                flat_background_std_threshold=4.0,
+                flat_background_edge_threshold=0.01,
+                context_dilate_px=8,
+                smooth_gradient_edge_threshold=0.015,
+                smooth_gradient_residual_threshold=16.0,
+                smooth_gradient_color_bias_max_delta=0.0,
+                smooth_gradient_color_bias_residual_scale=4.0,
+            )
+
+        self.assertEqual(len(captured_overlaps), 2)
+        self.assertGreater(captured_overlaps[0], 0)
+        self.assertEqual(captured_overlaps[1], 0)
 
     def test_opencv_fast_groups_nearby_small_components_before_telea(self) -> None:
         width, height = 220, 160

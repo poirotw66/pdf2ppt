@@ -117,10 +117,17 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         self.telea_group_proximity_min_scale = max(0.1, telea_group_proximity_min_scale)
         self.telea_group_proximity_max_scale = max(self.telea_group_proximity_min_scale, telea_group_proximity_max_scale)
         self._last_debug_note: str | None = None
+        self._protected_line_mask: np.ndarray | None = None
 
     @property
     def last_debug_note(self) -> str | None:
         return self._last_debug_note
+
+    def set_protected_line_mask(self, protected_line_mask: np.ndarray | None) -> None:
+        if protected_line_mask is None:
+            self._protected_line_mask = None
+            return
+        self._protected_line_mask = protected_line_mask.astype(bool, copy=True)
 
     def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
         self._last_debug_note = None
@@ -131,6 +138,7 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         prefilled_source, residual_mask = _prefill_low_texture_regions(
             source,
             mask_array,
+            protected_line_mask=self._protected_line_mask,
             flat_background_std_threshold=self.flat_background_std_threshold,
             flat_background_edge_threshold=self.flat_background_edge_threshold,
             context_dilate_px=self.context_dilate_px,
@@ -148,6 +156,7 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
             repaired, diagnostics = _inpaint_residual_components(
                 prefilled_source,
                 residual_mask,
+                protected_line_mask=self._protected_line_mask,
                 base_radius=self.radius,
                 min_radius=self.radius * self.telea_radius_min_scale,
                 max_radius=self.radius * self.telea_radius_max_scale,
@@ -164,6 +173,7 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
             source,
             repaired,
             mask_array,
+            protected_line_mask=self._protected_line_mask,
             flat_background_std_threshold=self.flat_background_std_threshold,
             flat_background_edge_threshold=self.flat_background_edge_threshold,
             context_dilate_px=self.context_dilate_px,
@@ -186,6 +196,7 @@ def _prefill_low_texture_regions(
     source: np.ndarray,
     mask_array: np.ndarray,
     *,
+    protected_line_mask: np.ndarray | None,
     flat_background_std_threshold: float,
     flat_background_edge_threshold: float,
     context_dilate_px: int,
@@ -224,6 +235,7 @@ def _prefill_low_texture_regions(
             gray,
             edges,
             component,
+            protected_line_mask=protected_line_mask,
             kernel=kernel,
             expand_kernel=expand_kernel,
             gap_kernel=gap_kernel,
@@ -252,6 +264,7 @@ def _inpaint_residual_components(
     source: np.ndarray,
     residual_mask: np.ndarray,
     *,
+    protected_line_mask: np.ndarray | None,
     base_radius: float,
     min_radius: float,
     max_radius: float,
@@ -286,7 +299,15 @@ def _inpaint_residual_components(
         if points is None:
             continue
         x, y, width, height = cv2.boundingRect(points)
+        protected_nearby = False
+        if protected_line_mask is not None and np.any(protected_line_mask):
+            protected_padding = max(5, int(group["proximity_px"]) + 5)
+            protected_kernel = np.ones((protected_padding * 2 + 1, protected_padding * 2 + 1), dtype=np.uint8)
+            protected_vicinity = cv2.dilate(component, protected_kernel, iterations=1) > 0
+            protected_nearby = bool(np.any(protected_line_mask & protected_vicinity))
         ring_mask = _build_component_ring_mask(component, padding_px=max(2, int(group["proximity_px"])))
+        if protected_nearby and protected_line_mask is not None:
+            ring_mask &= ~protected_line_mask
         ring_pixel_count = int(np.count_nonzero(ring_mask))
         edge_density = 0.0
         if ring_pixel_count > 0:
@@ -302,11 +323,24 @@ def _inpaint_residual_components(
             edge_density_threshold=edge_density_threshold,
             edge_density_min_factor=edge_density_min_factor,
         )
-        padding = max(2, int(math.ceil(component_radius * 2.0)))
-        x0 = max(0, x - padding)
-        y0 = max(0, y - padding)
-        x1 = min(source.shape[1], x + width + padding)
-        y1 = min(source.shape[0], y + height + padding)
+        if protected_nearby:
+            component_radius = max(min_radius, component_radius * 0.65)
+            padding_scale = 1.1
+        else:
+            padding_scale = 2.0
+        padding = max(2, int(math.ceil(component_radius * padding_scale)))
+        if protected_nearby and protected_line_mask is not None:
+            x0, y0, x1, y1 = _resolve_protected_inpaint_crop_bounds(
+                protected_line_mask,
+                component_bbox=(x, y, width, height),
+                image_shape=source.shape[:2],
+                base_padding=padding,
+            )
+        else:
+            x0 = max(0, x - padding)
+            y0 = max(0, y - padding)
+            x1 = min(source.shape[1], x + width + padding)
+            y1 = min(source.shape[0], y + height + padding)
 
         local_source = repaired[y0:y1, x0:x1]
         local_mask = (component[y0:y1, x0:x1] * 255).astype(np.uint8)
@@ -320,6 +354,7 @@ def _inpaint_residual_components(
                 "proximity_px": int(group["proximity_px"]),
                 "edge_density": float(edge_density),
                 "final_radius": float(component_radius),
+                "protected_nearby": int(protected_nearby),
             }
         )
 
@@ -469,6 +504,40 @@ def _resolve_component_telea_radius(
     return float(np.clip(base_radius * size_scale * edge_scale, min_radius, max_radius))
 
 
+def _resolve_protected_inpaint_crop_bounds(
+    protected_line_mask: np.ndarray,
+    *,
+    component_bbox: tuple[int, int, int, int],
+    image_shape: tuple[int, int],
+    base_padding: int,
+) -> tuple[int, int, int, int]:
+    x, y, width, height = component_bbox
+    image_height, image_width = image_shape
+    score_padding = max(base_padding, 8)
+    symmetric_x0 = max(0, x - score_padding)
+    symmetric_y0 = max(0, y - score_padding)
+    symmetric_x1 = min(image_width, x + width + score_padding)
+    symmetric_y1 = min(image_height, y + height + score_padding)
+    near_padding = max(2, int(math.ceil(base_padding * 0.35)))
+    far_padding = max(near_padding + 1, base_padding)
+
+    left_score = int(np.count_nonzero(protected_line_mask[symmetric_y0:symmetric_y1, symmetric_x0:x]))
+    right_score = int(np.count_nonzero(protected_line_mask[symmetric_y0:symmetric_y1, x + width : symmetric_x1]))
+    top_score = int(np.count_nonzero(protected_line_mask[symmetric_y0:y, symmetric_x0:symmetric_x1]))
+    bottom_score = int(np.count_nonzero(protected_line_mask[y + height : symmetric_y1, symmetric_x0:symmetric_x1]))
+
+    left_padding = near_padding if left_score > 0 else far_padding
+    right_padding = near_padding if right_score > 0 else far_padding
+    top_padding = near_padding if top_score > 0 else far_padding
+    bottom_padding = near_padding if bottom_score > 0 else far_padding
+
+    x0 = max(0, x - left_padding)
+    y0 = max(0, y - top_padding)
+    x1 = min(image_width, x + width + right_padding)
+    y1 = min(image_height, y + height + bottom_padding)
+    return x0, y0, x1, y1
+
+
 def _format_telea_group_diagnostics(diagnostics: list[dict[str, float | int]]) -> str:
     if not diagnostics:
         return "Residual Telea groups: 0."
@@ -476,12 +545,14 @@ def _format_telea_group_diagnostics(diagnostics: list[dict[str, float | int]]) -
     group_sizes = [int(item["group_size"]) for item in diagnostics]
     radius_values = [float(item["final_radius"]) for item in diagnostics]
     proximity_values = [int(item["proximity_px"]) for item in diagnostics]
+    protected_count = sum(int(item.get("protected_nearby", 0)) for item in diagnostics)
     return (
         f"Residual Telea groups: {len(diagnostics)}; "
         f"group size {min(group_sizes)}-{max(group_sizes)}; "
         f"adaptive proximity {min(proximity_values)}-{max(proximity_values)} px; "
         f"edge density {min(edge_values):.3f}-{max(edge_values):.3f}; "
-        f"final radius {min(radius_values):.2f}-{max(radius_values):.2f}."
+        f"final radius {min(radius_values):.2f}-{max(radius_values):.2f}; "
+        f"protected groups {protected_count}."
     )
 
 
@@ -696,6 +767,7 @@ def _restore_low_texture_regions(
     repaired: np.ndarray,
     mask_array: np.ndarray,
     *,
+    protected_line_mask: np.ndarray | None,
     flat_background_std_threshold: float,
     flat_background_edge_threshold: float,
     context_dilate_px: int,
@@ -734,6 +806,7 @@ def _restore_low_texture_regions(
             gray,
             edges,
             component,
+            protected_line_mask=protected_line_mask,
             kernel=kernel,
             expand_kernel=expand_kernel,
             gap_kernel=gap_kernel,
@@ -765,6 +838,7 @@ def _resolve_component_background_patch(
     edges: np.ndarray,
     component: np.ndarray,
     *,
+    protected_line_mask: np.ndarray | None,
     kernel: np.ndarray,
     expand_kernel: np.ndarray | None,
     gap_kernel: np.ndarray | None,
@@ -785,6 +859,10 @@ def _resolve_component_background_patch(
         context_component = cv2.dilate(expanded_component, gap_kernel, iterations=1)
 
     ring_mask = cv2.dilate(context_component, kernel, iterations=1).astype(bool) & (~context_component.astype(bool))
+    if protected_line_mask is not None and np.any(protected_line_mask):
+        protected_vicinity = cv2.dilate(component, np.ones((11, 11), dtype=np.uint8), iterations=1) > 0
+        if np.any(protected_line_mask & protected_vicinity):
+            ring_mask &= ~protected_line_mask
     ring_pixel_count = int(np.count_nonzero(ring_mask))
     if ring_pixel_count < 64:
         return expanded_component, None
