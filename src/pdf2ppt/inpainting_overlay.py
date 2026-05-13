@@ -16,6 +16,7 @@ from .inpainting_engines import (
     WhiteBoxInpaintingEngine,
 )
 from .inpainting_masks import (
+    build_refined_text_mask_for_inpainting,
     build_text_mask_image,
     compute_mask_crop_box,
     estimate_background_complexity,
@@ -50,12 +51,14 @@ def render_overlay_background(
     *,
     options: ConversionOptions,
 ) -> BackgroundRenderResult:
-    mask_image = build_text_mask_image(
+    mask_refinement = build_refined_text_mask_for_inpainting(
+        page_image,
         text_blocks,
         page_image.size,
         page_rect,
         padding_px=max(0, options.inpaint_padding_px),
     )
+    mask_image = mask_refinement.mask_image
     mask_array = np.array(mask_image, dtype=np.uint8)
     if np.count_nonzero(mask_array) == 0:
         logger.info("No overlay mask pixels were generated for background rendering")
@@ -64,6 +67,15 @@ def render_overlay_background(
             engine_name=None,
             note="No overlay mask pixels were generated.",
             mask_image=mask_image,
+        )
+
+    protected_line_mask = _build_protected_table_line_mask(mask_refinement, mask_array)
+    prepared_page_image = page_image
+    if np.any(protected_line_mask):
+        prepared_page_image = _neutralize_protected_table_lines(
+            page_image,
+            mask_array,
+            protected_line_mask,
         )
 
     engine, note = resolve_background_inpainting_engine(page_image, mask_image, options)
@@ -79,10 +91,25 @@ def render_overlay_background(
         rendered_engine_name: str | None,
         rendered_note: str | None,
     ) -> BackgroundRenderResult:
+        mask_debug_images = {
+            "raw_mask": mask_refinement.raw_mask_image,
+            "refined_mask": mask_refinement.refined_mask_image,
+        }
+        if mask_refinement.table_line_mask_image is not None:
+            mask_debug_images["table_line_mask"] = mask_refinement.table_line_mask_image
+        if getattr(mask_refinement, "grid_line_mask_image", None) is not None:
+            mask_debug_images["grid_line_mask"] = mask_refinement.grid_line_mask_image
+        if np.any(protected_line_mask):
+            mask_debug_images["protected_line_mask"] = Image.fromarray(
+                (protected_line_mask.astype(np.uint8) * 255),
+                mode="L",
+            )
         engine_debug_note = getattr(engine, "last_debug_note", None)
         if engine_debug_note:
             rendered_note = f"{rendered_note} {engine_debug_note}" if rendered_note else engine_debug_note
-        corrected_image, debug_images, correction_note = _apply_targeted_file_back_color_correction(
+        if np.any(protected_line_mask):
+            rendered_image = _restore_protected_table_lines(page_image, rendered_image, protected_line_mask)
+        corrected_image, correction_debug_images, correction_note = _apply_targeted_file_back_color_correction(
             page_image,
             rendered_image,
             text_blocks,
@@ -97,20 +124,23 @@ def render_overlay_background(
             engine_name=rendered_engine_name,
             note=final_note,
             mask_image=mask_image,
-            debug_images=debug_images,
+            debug_images={
+                **mask_debug_images,
+                **correction_debug_images,
+            },
         )
 
     logger.info("Using background engine %s", engine.name)
     logger.debug("Background engine note: %s", note)
     if engine.name == fallback_engine.name:
         return finalize_result(
-            engine.inpaint(page_image, mask_image),
+            engine.inpaint(prepared_page_image, mask_image),
             rendered_engine_name=engine.name,
             rendered_note=note,
         )
 
     try:
-        rendered_image = engine.inpaint(page_image, mask_image)
+        rendered_image = engine.inpaint(prepared_page_image, mask_image)
         rendered_note = note
     except BackgroundInpaintingError as error:
         logger.warning(
@@ -119,13 +149,67 @@ def render_overlay_background(
             fallback_engine.name,
             error,
         )
-        rendered_image = fallback_engine.inpaint(page_image, mask_image)
+        rendered_image = fallback_engine.inpaint(prepared_page_image, mask_image)
         rendered_note = f"{note} Fallback to {fallback_engine.name}: {error}"
     return finalize_result(
         rendered_image,
         rendered_engine_name=engine.name if rendered_note == note else fallback_engine.name,
         rendered_note=rendered_note,
     )
+
+
+def _build_protected_table_line_mask(mask_refinement: object, mask_array: np.ndarray) -> np.ndarray:
+    grid_line_mask_image = getattr(mask_refinement, "grid_line_mask_image", None)
+    if grid_line_mask_image is None:
+        return np.zeros_like(mask_array, dtype=bool)
+    grid_line_mask = np.array(grid_line_mask_image.convert("L"), dtype=np.uint8) > 0
+    if not np.any(grid_line_mask):
+        return np.zeros_like(mask_array, dtype=bool)
+    mask_vicinity = cv2.dilate((mask_array > 0).astype(np.uint8), np.ones((5, 5), dtype=np.uint8), iterations=1) > 0
+    return grid_line_mask & mask_vicinity
+
+
+def _neutralize_protected_table_lines(
+    page_image: Image.Image,
+    mask_array: np.ndarray,
+    protected_line_mask: np.ndarray,
+) -> Image.Image:
+    source_rgb = np.array(page_image.convert("RGB"), dtype=np.uint8)
+    sanitized = source_rgb.copy()
+    component_mask = protected_line_mask.astype(np.uint8)
+    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    exclusion_mask = (mask_array > 0) | protected_line_mask
+    for component_index in range(1, component_count):
+        component = labels == component_index
+        points = cv2.findNonZero(component.astype(np.uint8))
+        if points is None:
+            continue
+        x, y, width, height = cv2.boundingRect(points)
+        padding = 8
+        x0 = max(0, x - padding)
+        y0 = max(0, y - padding)
+        x1 = min(source_rgb.shape[1], x + width + padding)
+        y1 = min(source_rgb.shape[0], y + height + padding)
+        local_component = component[y0:y1, x0:x1]
+        local_exclusion = exclusion_mask[y0:y1, x0:x1]
+        context_ring = cv2.dilate(local_component.astype(np.uint8), np.ones((9, 9), dtype=np.uint8), iterations=1) > 0
+        context_ring &= ~local_exclusion
+        if not np.any(context_ring):
+            continue
+        fill_color = np.mean(source_rgb[y0:y1, x0:x1][context_ring], axis=0)
+        sanitized[y0:y1, x0:x1][local_component] = fill_color
+    return Image.fromarray(sanitized, mode="RGB")
+
+
+def _restore_protected_table_lines(
+    page_image: Image.Image,
+    rendered_image: Image.Image,
+    protected_line_mask: np.ndarray,
+) -> Image.Image:
+    source_rgb = np.array(page_image.convert("RGB"), dtype=np.uint8)
+    rendered_rgb = np.array(rendered_image.convert("RGB"), dtype=np.uint8, copy=True)
+    rendered_rgb[protected_line_mask] = source_rgb[protected_line_mask]
+    return Image.fromarray(rendered_rgb, mode="RGB")
 
 
 def _apply_targeted_file_back_color_correction(

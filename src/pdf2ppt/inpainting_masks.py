@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import cv2
 import fitz
 import numpy as np
@@ -13,6 +15,18 @@ DEFAULT_LOW_TEXTURE_STD_THRESHOLD = 4.0
 DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD = 0.01
 DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX = 8
 DEFAULT_LOW_TEXTURE_MIN_CONTEXT_PIXELS = 64
+DEFAULT_TABLE_LINE_MIN_KERNEL_PX = 12
+DEFAULT_TABLE_LINE_SHRINK_KERNEL_PX = 3
+DEFAULT_TABLE_LINE_BOUNDARY_BAND_PX = 5
+
+
+@dataclass(slots=True)
+class InpaintingMaskRefinementResult:
+    mask_image: Image.Image
+    raw_mask_image: Image.Image
+    refined_mask_image: Image.Image
+    table_line_mask_image: Image.Image | None
+    grid_line_mask_image: Image.Image | None
 
 
 def build_text_mask_image(
@@ -38,6 +52,170 @@ def build_text_mask_image(
     kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
     expanded = cv2.dilate(mask_array, kernel, iterations=1)
     return Image.fromarray(expanded, mode="L")
+
+
+def refine_text_mask_for_inpainting(
+    page_image: Image.Image,
+    text_blocks: list[TextBlock],
+    image_size: tuple[int, int],
+    page_rect: fitz.Rect,
+    *,
+    padding_px: int = 0,
+) -> Image.Image:
+    return build_refined_text_mask_for_inpainting(
+        page_image,
+        text_blocks,
+        image_size,
+        page_rect,
+        padding_px=padding_px,
+    ).mask_image
+
+
+def build_refined_text_mask_for_inpainting(
+    page_image: Image.Image,
+    text_blocks: list[TextBlock],
+    image_size: tuple[int, int],
+    page_rect: fitz.Rect,
+    *,
+    padding_px: int = 0,
+) -> InpaintingMaskRefinementResult:
+    base_mask_image = build_text_mask_image(text_blocks, image_size, page_rect, padding_px=0)
+    base_mask_array = np.array(base_mask_image, dtype=np.uint8)
+    if np.count_nonzero(base_mask_array) == 0:
+        return InpaintingMaskRefinementResult(
+            mask_image=base_mask_image,
+            raw_mask_image=base_mask_image,
+            refined_mask_image=base_mask_image,
+            table_line_mask_image=None,
+            grid_line_mask_image=None,
+        )
+
+    raw_mask_image = build_text_mask_image(text_blocks, image_size, page_rect, padding_px=padding_px)
+    refined_mask_image = raw_mask_image
+    refined_mask_array = np.array(refined_mask_image, dtype=np.uint8)
+    ocr_blocks = [block for block in text_blocks if block.source == "ocr"]
+    if not ocr_blocks:
+        return InpaintingMaskRefinementResult(
+            mask_image=refined_mask_image,
+            raw_mask_image=raw_mask_image,
+            refined_mask_image=refined_mask_image,
+            table_line_mask_image=None,
+            grid_line_mask_image=None,
+        )
+
+    horizontal_line_mask, vertical_line_mask = _detect_table_line_orientation_masks(page_image)
+    table_line_mask = horizontal_line_mask | vertical_line_mask
+    table_line_mask_image = Image.fromarray((table_line_mask.astype(np.uint8) * 255), mode="L")
+    grid_line_mask = _build_grid_line_mask(horizontal_line_mask, vertical_line_mask)
+    grid_line_mask_image = Image.fromarray((grid_line_mask.astype(np.uint8) * 255), mode="L")
+    if not np.any(table_line_mask):
+        return InpaintingMaskRefinementResult(
+            mask_image=refined_mask_image,
+            raw_mask_image=raw_mask_image,
+            refined_mask_image=refined_mask_image,
+            table_line_mask_image=table_line_mask_image,
+            grid_line_mask_image=grid_line_mask_image,
+        )
+
+    ocr_vicinity_image = build_text_mask_image(
+        ocr_blocks,
+        image_size,
+        page_rect,
+        padding_px=max(1, padding_px + 1),
+    )
+    ocr_vicinity = np.array(ocr_vicinity_image, dtype=np.uint8) > 0
+    padded_fringe = (refined_mask_array > 0) & ~(base_mask_array > 0)
+    ocr_base_mask_image = build_text_mask_image(ocr_blocks, image_size, page_rect, padding_px=0)
+    ocr_base_mask = np.array(ocr_base_mask_image, dtype=np.uint8) > 0
+    ocr_boundary_band = _build_mask_boundary_band(ocr_base_mask, band_px=DEFAULT_TABLE_LINE_BOUNDARY_BAND_PX)
+
+    line_vicinity = cv2.dilate(table_line_mask.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
+    shrink_region = padded_fringe & ocr_vicinity & line_vicinity
+    if np.any(shrink_region):
+        shrunken_mask = cv2.erode(
+            refined_mask_array,
+            np.ones((DEFAULT_TABLE_LINE_SHRINK_KERNEL_PX, DEFAULT_TABLE_LINE_SHRINK_KERNEL_PX), dtype=np.uint8),
+            iterations=1,
+        )
+        refined_mask_array[shrink_region] = shrunken_mask[shrink_region]
+
+    refined_mask_array[padded_fringe & table_line_mask] = 0
+    refined_mask_array[ocr_boundary_band & line_vicinity] = 0
+    refined_mask_array[base_mask_array > 0] = 255
+    refined_mask_array[ocr_boundary_band & line_vicinity] = 0
+    refined_mask_image = Image.fromarray(refined_mask_array, mode="L")
+    return InpaintingMaskRefinementResult(
+        mask_image=refined_mask_image,
+        raw_mask_image=raw_mask_image,
+        refined_mask_image=refined_mask_image,
+        table_line_mask_image=table_line_mask_image,
+        grid_line_mask_image=grid_line_mask_image,
+    )
+
+
+def _build_mask_boundary_band(mask: np.ndarray, *, band_px: int) -> np.ndarray:
+    if band_px <= 0 or not np.any(mask):
+        return np.zeros_like(mask, dtype=bool)
+    kernel_size = band_px * 2 + 1
+    eroded = cv2.erode(mask.astype(np.uint8) * 255, np.ones((kernel_size, kernel_size), dtype=np.uint8), iterations=1)
+    return mask & ~(eroded > 0)
+
+
+def _detect_table_line_orientation_masks(page_image: Image.Image) -> tuple[np.ndarray, np.ndarray]:
+    gray = cv2.cvtColor(np.array(page_image.convert("RGB"), dtype=np.uint8), cv2.COLOR_RGB2GRAY)
+    binary = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_MEAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        10,
+    )
+    height, width = gray.shape
+    horizontal_kernel_len = max(DEFAULT_TABLE_LINE_MIN_KERNEL_PX, width // 24)
+    vertical_kernel_len = max(DEFAULT_TABLE_LINE_MIN_KERNEL_PX, height // 24)
+    horizontal = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((1, horizontal_kernel_len), dtype=np.uint8))
+    vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((vertical_kernel_len, 1), dtype=np.uint8))
+    horizontal = _filter_line_components(horizontal, orientation="horizontal", min_span_px=horizontal_kernel_len)
+    vertical = _filter_line_components(vertical, orientation="vertical", min_span_px=vertical_kernel_len)
+    return horizontal > 0, vertical > 0
+
+
+def _build_grid_line_mask(horizontal_line_mask: np.ndarray, vertical_line_mask: np.ndarray) -> np.ndarray:
+    if not np.any(horizontal_line_mask) or not np.any(vertical_line_mask):
+        return np.zeros_like(horizontal_line_mask, dtype=bool)
+
+    expanded_horizontal = cv2.dilate(horizontal_line_mask.astype(np.uint8), np.ones((3, 9), dtype=np.uint8), iterations=1) > 0
+    expanded_vertical = cv2.dilate(vertical_line_mask.astype(np.uint8), np.ones((9, 3), dtype=np.uint8), iterations=1) > 0
+    intersection_seed = expanded_horizontal & expanded_vertical
+    if not np.any(intersection_seed):
+        return np.zeros_like(horizontal_line_mask, dtype=bool)
+
+    grid_region = cv2.dilate(intersection_seed.astype(np.uint8), np.ones((21, 21), dtype=np.uint8), iterations=1) > 0
+    return (horizontal_line_mask | vertical_line_mask) & grid_region
+
+
+def _filter_line_components(line_mask: np.ndarray, *, orientation: str, min_span_px: int) -> np.ndarray:
+    component_mask = (line_mask > 0).astype(np.uint8)
+    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    if component_count <= 1:
+        return line_mask
+
+    filtered = np.zeros_like(line_mask)
+    for component_index in range(1, component_count):
+        component = (labels == component_index).astype(np.uint8)
+        points = cv2.findNonZero(component)
+        if points is None:
+            continue
+        _, _, width, height = cv2.boundingRect(points)
+        if orientation == "horizontal":
+            if width < min_span_px or width < height * 4:
+                continue
+        else:
+            if height < min_span_px or height < width * 4:
+                continue
+        filtered[component.astype(bool)] = 255
+    return filtered
 
 
 def mask_text_regions_with_white_boxes(
@@ -138,13 +316,16 @@ def compute_mask_crop_box(mask_image: Image.Image, *, padding_px: int) -> tuple[
 
 __all__ = [
     "build_text_mask_image",
+    "build_refined_text_mask_for_inpainting",
     "compute_mask_crop_box",
     "DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX",
     "DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD",
     "DEFAULT_LOW_TEXTURE_MIN_CONTEXT_PIXELS",
     "DEFAULT_LOW_TEXTURE_STD_THRESHOLD",
+    "InpaintingMaskRefinementResult",
     "estimate_background_complexity",
     "estimate_low_texture_mask_fraction",
     "mask_area_ratio",
     "mask_text_regions_with_white_boxes",
+    "refine_text_mask_for_inpainting",
 ]

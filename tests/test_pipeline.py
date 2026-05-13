@@ -14,7 +14,12 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line, main
-from pdf2ppt.inpainting_overlay import _apply_targeted_file_back_color_correction
+from pdf2ppt.inpainting_overlay import (
+    _apply_targeted_file_back_color_correction,
+    _neutralize_protected_table_lines,
+    _restore_protected_table_lines,
+)
+from pdf2ppt.inpainting_masks import refine_text_mask_for_inpainting
 from pdf2ppt.models import QualityScore, TextBlock
 from pdf2ppt.ocr import build_local_ocr_model_kwargs, ensure_local_model_dir, suppress_known_paddle_runtime_warnings
 from pdf2ppt.pipeline import (
@@ -258,6 +263,63 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertEqual(mask.getpixel((8, 10)), 255)
         self.assertEqual(mask.getpixel((5, 10)), 0)
 
+    def test_refine_text_mask_for_inpainting_preserves_table_line_in_padded_fringe(self) -> None:
+        image = Image.new("RGB", (80, 80), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.line((0, 18, 79, 18), fill=(90, 90, 90), width=2)
+        blocks = [
+            TextBlock(
+                id="ocr_refine_1",
+                source="ocr",
+                bbox=(20, 20, 60, 40),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 20, 60, 40),
+            )
+        ]
+
+        mask = refine_text_mask_for_inpainting(image, blocks, (80, 80), fitz.Rect(0, 0, 80, 80), padding_px=4)
+
+        self.assertEqual(mask.getpixel((30, 18)), 0)
+        self.assertEqual(mask.getpixel((30, 22)), 255)
+
+    def test_refine_text_mask_for_inpainting_keeps_padding_when_no_table_line_exists(self) -> None:
+        image = Image.new("RGB", (80, 80), color=(255, 255, 255))
+        blocks = [
+            TextBlock(
+                id="ocr_refine_2",
+                source="ocr",
+                bbox=(20, 20, 60, 40),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 20, 60, 40),
+            )
+        ]
+
+        mask = refine_text_mask_for_inpainting(image, blocks, (80, 80), fitz.Rect(0, 0, 80, 80), padding_px=4)
+
+        self.assertEqual(mask.getpixel((18, 30)), 255)
+
+    def test_refine_text_mask_for_inpainting_preserves_table_line_inside_ocr_boundary_band(self) -> None:
+        image = Image.new("RGB", (80, 80), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.line((20, 20, 60, 20), fill=(90, 90, 90), width=2)
+        blocks = [
+            TextBlock(
+                id="ocr_refine_3",
+                source="ocr",
+                bbox=(20, 20, 60, 40),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 20, 60, 40),
+            )
+        ]
+
+        mask = refine_text_mask_for_inpainting(image, blocks, (80, 80), fitz.Rect(0, 0, 80, 80), padding_px=0)
+
+        self.assertEqual(mask.getpixel((30, 20)), 0)
+        self.assertEqual(mask.getpixel((30, 30)), 255)
+
     def test_render_overlay_background_auto_uses_opencv_fast_for_small_mask(self) -> None:
         image = Image.new("RGB", (60, 40), color=(35, 45, 55))
         blocks = [
@@ -283,6 +345,92 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("opencv-fast", result.note or "")
         pixel = result.image.getpixel((25, 18))
         self.assertTrue(all(abs(channel - expected) <= 4 for channel, expected in zip(pixel, (35, 45, 55))))
+
+    def test_render_overlay_background_emits_mask_debug_images(self) -> None:
+        image = Image.new("RGB", (80, 80), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.line((20, 20, 60, 20), fill=(90, 90, 90), width=2)
+        draw.line((20, 20, 20, 50), fill=(90, 90, 90), width=2)
+        blocks = [
+            TextBlock(
+                id="ocr_debug_masks",
+                source="ocr",
+                bbox=(20, 20, 60, 40),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 20, 60, 40),
+            )
+        ]
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="opencv-fast",
+            inpaint_padding_px=4,
+            inpaint_max_area_ratio=0.2,
+        )
+
+        result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 80, 80), options=options)
+
+        self.assertIn("raw_mask", result.debug_images)
+        self.assertIn("refined_mask", result.debug_images)
+        self.assertIn("table_line_mask", result.debug_images)
+        self.assertIn("grid_line_mask", result.debug_images)
+        self.assertIn("protected_line_mask", result.debug_images)
+
+    def test_render_overlay_background_skips_protected_line_mask_for_isolated_line(self) -> None:
+        image = Image.new("RGB", (80, 80), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.line((20, 20, 60, 20), fill=(90, 90, 90), width=2)
+        blocks = [
+            TextBlock(
+                id="ocr_debug_isolated_line",
+                source="ocr",
+                bbox=(20, 20, 60, 40),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 20, 60, 40),
+            )
+        ]
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="opencv-fast",
+            inpaint_padding_px=4,
+            inpaint_max_area_ratio=0.2,
+        )
+
+        result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 80, 80), options=options)
+
+        self.assertIn("table_line_mask", result.debug_images)
+        self.assertIn("grid_line_mask", result.debug_images)
+        self.assertNotIn("protected_line_mask", result.debug_images)
+
+    def test_neutralize_and_restore_protected_table_lines_avoids_black_border_sampling(self) -> None:
+        source = np.full((80, 120, 3), 248, dtype=np.uint8)
+        source[20:22, 20:100] = 40
+        mask_array = np.zeros((80, 120), dtype=np.uint8)
+        mask_array[22:42, 24:96] = 255
+        protected_line_mask = np.zeros((80, 120), dtype=bool)
+        protected_line_mask[20:22, 20:100] = True
+
+        neutralized = _neutralize_protected_table_lines(
+            Image.fromarray(source, mode="RGB"),
+            mask_array,
+            protected_line_mask,
+        )
+        neutralized_array = np.array(neutralized, dtype=np.int16)
+        self.assertGreater(neutralized_array[20:22, 30:90].mean(), 220.0)
+
+        restored = _restore_protected_table_lines(
+            Image.fromarray(source, mode="RGB"),
+            neutralized,
+            protected_line_mask,
+        )
+        restored_array = np.array(restored, dtype=np.int16)
+        source_array = source.astype(np.int16)
+        self.assertLess(np.abs(restored_array[20:22, 30:90] - source_array[20:22, 30:90]).mean(), 1.0)
 
     def test_render_overlay_background_auto_falls_back_to_white_box_for_large_mask(self) -> None:
         grid_y, grid_x = np.indices((40, 60), dtype=np.uint8)
