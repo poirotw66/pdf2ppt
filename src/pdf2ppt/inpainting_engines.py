@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 
 import cv2
@@ -21,6 +22,9 @@ DEFAULT_SMOOTH_GRADIENT_EDGE_THRESHOLD = 0.015
 DEFAULT_SMOOTH_GRADIENT_QUADRATIC_RESIDUAL_THRESHOLD = 16.0
 DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_MAX_DELTA = 0.0
 DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_RESIDUAL_SCALE = 4.0
+DEFAULT_TELEA_RADIUS_MIN_SCALE = 0.6
+DEFAULT_TELEA_RADIUS_MAX_SCALE = 2.5
+DEFAULT_TELEA_RADIUS_REFERENCE_SPAN_PX = 48.0
 
 
 @dataclass(slots=True)
@@ -70,6 +74,9 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         smooth_gradient_color_bias_max_delta: float = DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_MAX_DELTA,
         smooth_gradient_color_bias_residual_scale: float = DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_RESIDUAL_SCALE,
         blend_sigma: float = 1.4,
+        telea_radius_min_scale: float = DEFAULT_TELEA_RADIUS_MIN_SCALE,
+        telea_radius_max_scale: float = DEFAULT_TELEA_RADIUS_MAX_SCALE,
+        telea_radius_reference_span_px: float = DEFAULT_TELEA_RADIUS_REFERENCE_SPAN_PX,
     ) -> None:
         self.radius = radius
         self.flat_background_std_threshold = flat_background_std_threshold
@@ -82,13 +89,39 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         self.smooth_gradient_color_bias_max_delta = max(0.0, smooth_gradient_color_bias_max_delta)
         self.smooth_gradient_color_bias_residual_scale = max(1e-3, smooth_gradient_color_bias_residual_scale)
         self.blend_sigma = max(0.1, blend_sigma)
+        self.telea_radius_min_scale = max(0.1, telea_radius_min_scale)
+        self.telea_radius_max_scale = max(self.telea_radius_min_scale, telea_radius_max_scale)
+        self.telea_radius_reference_span_px = max(1.0, telea_radius_reference_span_px)
 
     def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
         mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
         if np.count_nonzero(mask_array) == 0:
             return page_image.convert("RGB").copy()
         source = cv2.cvtColor(np.array(page_image.convert("RGB")), cv2.COLOR_RGB2BGR)
-        repaired = cv2.inpaint(source, mask_array, self.radius, cv2.INPAINT_TELEA)
+        prefilled_source, residual_mask = _prefill_low_texture_regions(
+            source,
+            mask_array,
+            flat_background_std_threshold=self.flat_background_std_threshold,
+            flat_background_edge_threshold=self.flat_background_edge_threshold,
+            context_dilate_px=self.context_dilate_px,
+            context_gap_px=self.context_gap_px,
+            component_expand_px=self.component_expand_px,
+            smooth_gradient_edge_threshold=self.smooth_gradient_edge_threshold,
+            smooth_gradient_residual_threshold=self.smooth_gradient_residual_threshold,
+            smooth_gradient_color_bias_max_delta=self.smooth_gradient_color_bias_max_delta,
+            smooth_gradient_color_bias_residual_scale=self.smooth_gradient_color_bias_residual_scale,
+        )
+        if np.count_nonzero(residual_mask) == 0:
+            repaired = prefilled_source
+        else:
+            repaired = _inpaint_residual_components(
+                prefilled_source,
+                residual_mask,
+                base_radius=self.radius,
+                min_radius=self.radius * self.telea_radius_min_scale,
+                max_radius=self.radius * self.telea_radius_max_scale,
+                reference_span_px=self.telea_radius_reference_span_px,
+            )
         repaired = _restore_low_texture_regions(
             source,
             repaired,
@@ -105,6 +138,131 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
             blend_sigma=self.blend_sigma,
         )
         return Image.fromarray(cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB))
+
+
+def _prefill_low_texture_regions(
+    source: np.ndarray,
+    mask_array: np.ndarray,
+    *,
+    flat_background_std_threshold: float,
+    flat_background_edge_threshold: float,
+    context_dilate_px: int,
+    context_gap_px: int,
+    component_expand_px: int,
+    smooth_gradient_edge_threshold: float,
+    smooth_gradient_residual_threshold: float,
+    smooth_gradient_color_bias_max_delta: float,
+    smooth_gradient_color_bias_residual_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    component_mask = (mask_array > 0).astype(np.uint8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    if component_count <= 1:
+        return source, mask_array
+
+    gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 80, 160)
+    kernel = np.ones((context_dilate_px * 2 + 1, context_dilate_px * 2 + 1), dtype=np.uint8)
+    expand_kernel = None
+    if component_expand_px > 0:
+        expand_kernel = np.ones((component_expand_px * 2 + 1, component_expand_px * 2 + 1), dtype=np.uint8)
+    gap_kernel = None
+    if context_gap_px > 0:
+        gap_kernel = np.ones((context_gap_px * 2 + 1, context_gap_px * 2 + 1), dtype=np.uint8)
+
+    prefilled = source.astype(np.float32).copy()
+    residual_mask = mask_array.copy()
+    for component_index, stat in enumerate(stats[1:], start=1):
+        _, _, _, _, area = stat
+        if area <= 0:
+            continue
+
+        component = (labels == component_index).astype(np.uint8)
+        expanded_component, patch = _resolve_component_background_patch(
+            source,
+            gray,
+            edges,
+            component,
+            kernel=kernel,
+            expand_kernel=expand_kernel,
+            gap_kernel=gap_kernel,
+            flat_background_std_threshold=flat_background_std_threshold,
+            flat_background_edge_threshold=flat_background_edge_threshold,
+            context_dilate_px=context_dilate_px,
+            smooth_gradient_edge_threshold=smooth_gradient_edge_threshold,
+            smooth_gradient_residual_threshold=smooth_gradient_residual_threshold,
+            smooth_gradient_color_bias_max_delta=smooth_gradient_color_bias_max_delta,
+            smooth_gradient_color_bias_residual_scale=smooth_gradient_color_bias_residual_scale,
+        )
+        if patch is None:
+            continue
+
+        x0, y0, x1, y1, patch_values, _ = patch
+        local_component = expanded_component[y0:y1, x0:x1].astype(bool)
+        if not np.any(local_component):
+            continue
+        prefilled[y0:y1, x0:x1][local_component] = patch_values[local_component]
+        residual_mask[expanded_component.astype(bool)] = 0
+
+    return np.clip(prefilled, 0, 255).astype(np.uint8), residual_mask
+
+
+def _inpaint_residual_components(
+    source: np.ndarray,
+    residual_mask: np.ndarray,
+    *,
+    base_radius: float,
+    min_radius: float,
+    max_radius: float,
+    reference_span_px: float,
+) -> np.ndarray:
+    component_mask = (residual_mask > 0).astype(np.uint8)
+    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    if component_count <= 1:
+        return source
+
+    repaired = source.copy()
+    for component_index in range(1, component_count):
+        component = (labels == component_index).astype(np.uint8)
+        points = cv2.findNonZero(component)
+        if points is None:
+            continue
+        x, y, width, height = cv2.boundingRect(points)
+        component_radius = _resolve_component_telea_radius(
+            width=width,
+            height=height,
+            base_radius=base_radius,
+            min_radius=min_radius,
+            max_radius=max_radius,
+            reference_span_px=reference_span_px,
+        )
+        padding = max(2, int(math.ceil(component_radius * 2.0)))
+        x0 = max(0, x - padding)
+        y0 = max(0, y - padding)
+        x1 = min(source.shape[1], x + width + padding)
+        y1 = min(source.shape[0], y + height + padding)
+
+        local_source = repaired[y0:y1, x0:x1]
+        local_mask = (component[y0:y1, x0:x1] * 255).astype(np.uint8)
+        local_repaired = cv2.inpaint(local_source, local_mask, component_radius, cv2.INPAINT_TELEA)
+        local_component = local_mask > 0
+        local_target = repaired[y0:y1, x0:x1]
+        local_target[local_component] = local_repaired[local_component]
+
+    return repaired
+
+
+def _resolve_component_telea_radius(
+    *,
+    width: int,
+    height: int,
+    base_radius: float,
+    min_radius: float,
+    max_radius: float,
+    reference_span_px: float,
+) -> float:
+    component_span = float(max(width, height))
+    scale = component_span / reference_span_px
+    return float(np.clip(base_radius * scale, min_radius, max_radius))
 
 
 def _restore_low_texture_regions(
@@ -145,65 +303,26 @@ def _restore_low_texture_regions(
             continue
 
         component = (labels == component_index).astype(np.uint8)
-        expanded_component = component
-        if expand_kernel is not None:
-            expanded_component = cv2.dilate(component, expand_kernel, iterations=1)
-
-        context_component = expanded_component
-        if gap_kernel is not None:
-            context_component = cv2.dilate(expanded_component, gap_kernel, iterations=1)
-
-        ring_mask = cv2.dilate(context_component, kernel, iterations=1).astype(bool) & (~context_component.astype(bool))
-        ring_pixel_count = int(np.count_nonzero(ring_mask))
-        if ring_pixel_count < 64:
-            continue
-
-        context_values = gray[ring_mask]
-        luma_std = float(np.std(context_values))
-        edge_density = float(np.count_nonzero(edges[ring_mask])) / float(ring_pixel_count)
-        patch = None
-        patch_model: str | None = None
-        if luma_std <= flat_background_std_threshold and edge_density <= flat_background_edge_threshold:
-            patch = _fit_component_background_surface(
-                source,
-                expanded_component,
-                ring_mask,
-                context_dilate_px=context_dilate_px,
-                model="plane",
-            )
-            patch_model = "plane"
-        elif edge_density <= smooth_gradient_edge_threshold:
-            patch = _fit_component_background_surface(
-                source,
-                expanded_component,
-                ring_mask,
-                context_dilate_px=context_dilate_px,
-                model="quadratic",
-            )
-            if patch is not None and patch[-1] > smooth_gradient_residual_threshold:
-                patch = None
-            else:
-                patch_model = "quadratic"
-
+        expanded_component, patch = _resolve_component_background_patch(
+            source,
+            gray,
+            edges,
+            component,
+            kernel=kernel,
+            expand_kernel=expand_kernel,
+            gap_kernel=gap_kernel,
+            flat_background_std_threshold=flat_background_std_threshold,
+            flat_background_edge_threshold=flat_background_edge_threshold,
+            context_dilate_px=context_dilate_px,
+            smooth_gradient_edge_threshold=smooth_gradient_edge_threshold,
+            smooth_gradient_residual_threshold=smooth_gradient_residual_threshold,
+            smooth_gradient_color_bias_max_delta=smooth_gradient_color_bias_max_delta,
+            smooth_gradient_color_bias_residual_scale=smooth_gradient_color_bias_residual_scale,
+        )
         if patch is None:
             continue
 
-        x0, y0, x1, y1, patch_values, patch_residual = patch
-        if patch_model == "quadratic" and smooth_gradient_color_bias_max_delta > 0.0:
-            local_ring = ring_mask[y0:y1, x0:x1]
-            source_patch = source[y0:y1, x0:x1]
-            local_component_mask = expanded_component[y0:y1, x0:x1].astype(bool)
-            effective_max_delta = smooth_gradient_color_bias_max_delta * min(
-                1.0,
-                patch_residual / smooth_gradient_color_bias_residual_scale,
-            )
-            patch_values = _align_patch_mean_to_ring_background(
-                patch_values,
-                source_patch,
-                local_component_mask,
-                local_ring,
-                max_delta=effective_max_delta,
-            )
+        x0, y0, x1, y1, patch_values, _ = patch
         local_component = expanded_component[y0:y1, x0:x1].astype(np.float32)
         alpha = cv2.GaussianBlur(local_component, (0, 0), sigmaX=blend_sigma, sigmaY=blend_sigma)
         alpha = np.clip(alpha * 1.5, 0.0, 1.0)[..., None]
@@ -212,6 +331,86 @@ def _restore_low_texture_regions(
         )
 
     return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _resolve_component_background_patch(
+    source: np.ndarray,
+    gray: np.ndarray,
+    edges: np.ndarray,
+    component: np.ndarray,
+    *,
+    kernel: np.ndarray,
+    expand_kernel: np.ndarray | None,
+    gap_kernel: np.ndarray | None,
+    flat_background_std_threshold: float,
+    flat_background_edge_threshold: float,
+    context_dilate_px: int,
+    smooth_gradient_edge_threshold: float,
+    smooth_gradient_residual_threshold: float,
+    smooth_gradient_color_bias_max_delta: float,
+    smooth_gradient_color_bias_residual_scale: float,
+) -> tuple[np.ndarray, tuple[int, int, int, int, np.ndarray, float] | None]:
+    expanded_component = component
+    if expand_kernel is not None:
+        expanded_component = cv2.dilate(component, expand_kernel, iterations=1)
+
+    context_component = expanded_component
+    if gap_kernel is not None:
+        context_component = cv2.dilate(expanded_component, gap_kernel, iterations=1)
+
+    ring_mask = cv2.dilate(context_component, kernel, iterations=1).astype(bool) & (~context_component.astype(bool))
+    ring_pixel_count = int(np.count_nonzero(ring_mask))
+    if ring_pixel_count < 64:
+        return expanded_component, None
+
+    context_values = gray[ring_mask]
+    luma_std = float(np.std(context_values))
+    edge_density = float(np.count_nonzero(edges[ring_mask])) / float(ring_pixel_count)
+    patch = None
+    patch_model: str | None = None
+    if luma_std <= flat_background_std_threshold and edge_density <= flat_background_edge_threshold:
+        patch = _fit_component_background_surface(
+            source,
+            expanded_component,
+            ring_mask,
+            context_dilate_px=context_dilate_px,
+            model="plane",
+        )
+        patch_model = "plane"
+    elif edge_density <= smooth_gradient_edge_threshold:
+        patch = _fit_component_background_surface(
+            source,
+            expanded_component,
+            ring_mask,
+            context_dilate_px=context_dilate_px,
+            model="quadratic",
+        )
+        if patch is not None and patch[-1] > smooth_gradient_residual_threshold:
+            patch = None
+        else:
+            patch_model = "quadratic"
+
+    if patch is None:
+        return expanded_component, None
+
+    x0, y0, x1, y1, patch_values, patch_residual = patch
+    if patch_model == "quadratic" and smooth_gradient_color_bias_max_delta > 0.0:
+        local_ring = ring_mask[y0:y1, x0:x1]
+        source_patch = source[y0:y1, x0:x1]
+        local_component_mask = expanded_component[y0:y1, x0:x1].astype(bool)
+        effective_max_delta = smooth_gradient_color_bias_max_delta * min(
+            1.0,
+            patch_residual / smooth_gradient_color_bias_residual_scale,
+        )
+        patch_values = _align_patch_mean_to_ring_background(
+            patch_values,
+            source_patch,
+            local_component_mask,
+            local_ring,
+            max_delta=effective_max_delta,
+        )
+        patch = (x0, y0, x1, y1, patch_values, patch_residual)
+    return expanded_component, patch
 
 
 def _fit_component_background_surface(

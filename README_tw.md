@@ -133,20 +133,22 @@ pdf2ppt input.pdf output.pptx \
 2. 透過 `build_text_mask_image()` 把這些文字區域轉成二值遮罩。
 3. 可利用 `--inpaint-padding-px` 擴張遮罩，蓋住抗鋸齒邊緣與 OCR 框略小的情況。
 4. `OpenCvFastInpaintingEngine` 會把頁面影像轉成 NumPy / OpenCV 格式。
-5. 接著呼叫 `cv2.inpaint(..., cv2.INPAINT_TELEA)`，用小半徑做局部修補。
-6. 修補後的影像成為背景，再把可編輯文字方塊疊回 PowerPoint。
+5. 對明顯屬於低紋理或平滑漸層的遮罩元件，會先根據外圍 ring pixels 直接擬合局部背景曲面。
+6. 只有剩下無法可靠擬合的遮罩區塊，才會回退到 `cv2.inpaint(..., cv2.INPAINT_TELEA)`，並依每個 residual component 的尺寸調整 Telea 半徑。
+7. 最後再做一次局部 blend，讓重建區塊的邊界更平順，再作為 PowerPoint 背景。
 
 實作細節：
 
-- 修補演算法：OpenCV Telea 方法（`cv2.INPAINT_TELEA`）
-- 預設半徑：`3.0`
+- 修補演算法：局部曲面擬合加 OpenCV Telea fallback（`cv2.INPAINT_TELEA`）
+- Telea 基準半徑：`3.0`，之後會依 residual component 尺寸自適應縮放
 - 遮罩格式：8-bit 單通道二值 mask
-- 影像流程：PIL RGB -> OpenCV BGR -> Telea 修補 -> PIL RGB
+- 影像流程：PIL RGB -> OpenCV BGR -> 平滑區塊先做 surface-fit 預填 -> 剩餘遮罩再做 Telea 修補 -> 邊界 blend -> PIL RGB
 
 為什麼它很快：
 
 - 它是傳統影像處理，不是生成式模型。
-- 核心做法是從遮罩邊界往內推估周邊顏色與結構。
+- 對平滑背景，很多區塊可以直接用鄰近背景擬合，不必先對整塊遮罩做迭代式修補。
+- Telea fallback 仍然會從遮罩邊界往內推估周邊顏色與結構。
 - 主要成本來自影像尺寸與遮罩大小，不需要模型載入與神經網路推論。
 
 適合的情境：

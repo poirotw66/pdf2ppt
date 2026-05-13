@@ -139,20 +139,22 @@ Technical flow:
 2. Those text regions are converted into a binary mask by `build_text_mask_image()`.
 3. The mask can be expanded with `--inpaint-padding-px` so the erased region covers anti-aliased text edges and OCR box underestimation.
 4. `OpenCvFastInpaintingEngine` converts the page image to a NumPy/OpenCV image.
-5. The engine calls `cv2.inpaint(..., cv2.INPAINT_TELEA)` with a small radius.
-6. The repaired image is used as the background, and editable text boxes are drawn on top in PowerPoint.
+5. For clearly low-texture or smooth-gradient masked components, the engine first fits a local background surface directly from the surrounding ring pixels.
+6. Only the remaining masked regions fall back to `cv2.inpaint(..., cv2.INPAINT_TELEA)`, with the Telea radius scaled to each residual component size.
+7. A final local blend pass smooths the reconstructed patch boundaries before the repaired image is used as the PowerPoint background.
 
 Implementation details:
 
-- Inpainting algorithm: OpenCV Telea method (`cv2.INPAINT_TELEA`)
-- Default radius: `3.0`
+- Inpainting algorithm: hybrid local surface fitting plus OpenCV Telea fallback (`cv2.INPAINT_TELEA`)
+- Base Telea radius: `3.0`, then scaled per residual component size
 - Input mask: 8-bit single-channel binary mask
-- Image path: RGB PIL image -> BGR OpenCV array -> Telea inpaint -> RGB PIL image
+- Image path: RGB PIL image -> BGR OpenCV array -> surface-fit prefill for smooth components -> Telea fallback for residual mask -> boundary blend -> RGB PIL image
 
 Why this method is fast:
 
 - It is a classical image-processing algorithm, not a generative model.
-- It fills missing pixels by propagating nearby color and structure inward from the mask boundary.
+- Smooth regions can often be reconstructed directly from nearby context without invoking iterative inpainting on the full mask.
+- The Telea fallback still fills missing pixels by propagating nearby color and structure inward from the mask boundary.
 - Runtime is dominated by image size and mask size, not by neural inference or model loading.
 
 When it works well:

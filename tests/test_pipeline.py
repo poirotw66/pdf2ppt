@@ -451,6 +451,61 @@ class OcrStyleOptimizationTests(unittest.TestCase):
         mae = np.abs(result_array - base_array)[mask > 0].mean()
         self.assertLess(mae, 1.0)
 
+    def test_opencv_fast_skips_telea_for_smooth_gradient_background(self) -> None:
+        width, height = 180, 120
+        grid_y, grid_x = np.indices((height, width), dtype=np.float32)
+        base = np.stack(
+            [
+                150.0 + 0.03 * grid_x + 0.08 * grid_y,
+                140.0 + 0.02 * grid_x + 0.06 * grid_y,
+                130.0 + 0.01 * grid_x + 0.05 * grid_y,
+            ],
+            axis=2,
+        ).clip(0, 255).astype("uint8")
+        mask = np.zeros((height, width), dtype="uint8")
+        mask[25:95, 45:135] = 255
+
+        with patch("pdf2ppt.inpainting_engines.cv2.inpaint") as inpaint_mock:
+            result = OpenCvFastInpaintingEngine().inpaint(
+                Image.fromarray(base, mode="RGB"),
+                Image.fromarray(mask, mode="L"),
+            )
+
+        inpaint_mock.assert_not_called()
+        result_array = np.array(result, dtype=np.int16)
+        base_array = base.astype(np.int16)
+        mae = np.abs(result_array - base_array)[mask > 0].mean()
+        self.assertLess(mae, 1.0)
+
+    def test_opencv_fast_uses_adaptive_telea_radius_per_component_size(self) -> None:
+        width, height = 220, 160
+        base = np.zeros((height, width, 3), dtype="uint8")
+        for channel in range(3):
+            base[:, :, channel] = np.linspace(40 + channel * 20, 180 + channel * 15, width, dtype=np.uint8)
+        mask = np.zeros((height, width), dtype="uint8")
+        mask[16:28, 16:28] = 255
+        mask[50:122, 110:198] = 255
+
+        captured_radii: list[float] = []
+
+        def fake_inpaint(local_source: np.ndarray, local_mask: np.ndarray, radius: float, method: int) -> np.ndarray:
+            captured_radii.append(radius)
+            return local_source.copy()
+
+        with (
+            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
+        ):
+            OpenCvFastInpaintingEngine().inpaint(
+                Image.fromarray(base, mode="RGB"),
+                Image.fromarray(mask, mode="L"),
+            )
+
+        self.assertEqual(len(captured_radii), 2)
+        self.assertLess(captured_radii[0], captured_radii[1])
+        self.assertGreaterEqual(captured_radii[0], 1.79)
+        self.assertLessEqual(captured_radii[1], 7.51)
+
     def test_opencv_fast_cleans_tight_mask_text_halo_on_smooth_background(self) -> None:
         width, height = 320, 160
         grid_y, grid_x = np.indices((height, width), dtype=np.float32)
