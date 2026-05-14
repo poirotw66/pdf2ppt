@@ -78,12 +78,14 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
     text_frame.margin_bottom = 0
     text_frame.auto_size = MSO_AUTO_SIZE.NONE
     text_frame.clear()
+    _set_text_frame_wrap(text_frame, should_wrap=should_wrap_text_block(block))
 
     paragraph = text_frame.paragraphs[0]
     paragraph.alignment = PP_ALIGN.LEFT
     run = paragraph.add_run()
     run.text = block.text
     used_fit_text = fit_text_frame(text_frame, block, scale_x=scale_x, scale_y=scale_y)
+    _set_text_frame_wrap(text_frame, should_wrap=should_wrap_text_block(block))
 
     font = run.font
     font.name = resolved_font_family
@@ -106,7 +108,7 @@ def fit_text_frame(text_frame: Any, block: TextBlock, *, scale_x: float, scale_y
     if block.source != "ocr" or not block.text.strip():
         return False
     script = classify_text_script(block.text)
-    font_path = choose_measurement_font(script)
+    font_path = choose_measurement_font(script, bold=block.bold)
     if font_path is None:
         logger.debug("No measurement font available for script=%s; skipping fit_text", script)
         return False
@@ -144,7 +146,7 @@ def resolve_fallback_font_size_pt(block: TextBlock, *, scale_x: float, scale_y: 
         return base_size_pt
 
     script = classify_text_script(block.text)
-    font_path = choose_measurement_font(script)
+    font_path = choose_measurement_font(script, bold=block.bold)
     if font_path is None:
         return base_size_pt
 
@@ -271,6 +273,16 @@ def bbox_to_shape_geometry(
     width = pt_to_emu(max(1.0, (x1 - x0) * scale_x))
     height = pt_to_emu(max(1.0, (y1 - y0) * scale_y))
     return left, top, width, height
+
+
+def _set_text_frame_wrap(text_frame: Any, *, should_wrap: bool) -> None:
+    if not hasattr(text_frame, "_txBody"):
+        return
+    body_properties = text_frame._txBody.bodyPr
+    if should_wrap:
+        body_properties.set("wrap", "square")
+    else:
+        body_properties.set("wrap", "none")
 
 
 def _set_run_typefaces(run: Any, typefaces: dict[str, str]) -> None:

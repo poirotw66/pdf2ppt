@@ -2174,6 +2174,23 @@ class FontSizingTests(unittest.TestCase):
         self.assertGreater(resolved_size, 48.0)
         self.assertLessEqual(resolved_size, 96.0)
 
+    def test_resolve_fallback_font_size_pt_uses_bold_measurement_for_latin_title(self) -> None:
+        block = TextBlock(
+            id="ocr_fallback_font_5",
+            source="ocr",
+            bbox=(438.0, 54.0, 609.5, 113.0),
+            text="Agent",
+            confidence=0.99,
+            font_size=48.0,
+            bold=True,
+            block_role="title",
+        )
+
+        resolved_size = resolve_fallback_font_size_pt(block, scale_x=1.0, scale_y=1.0)
+
+        self.assertLessEqual(resolved_size, 51.0)
+        self.assertGreaterEqual(resolved_size, 48.0)
+
     @patch("pdf2ppt.ppt_render.fit_text_frame", return_value=True)
     @patch("pdf2ppt.ppt_render.resolve_fallback_font_size_pt", return_value=27.0)
     def test_add_text_block_clamps_oversized_fit_text_for_single_line_ocr(
@@ -2274,6 +2291,23 @@ class FontSizingTests(unittest.TestCase):
         self.assertIn('a:latin typeface="Noto Sans CJK TC"', paragraph_xml)
         self.assertIn('a:ea typeface="Noto Sans CJK TC"', paragraph_xml)
         self.assertIn('a:cs typeface="Noto Sans CJK TC"', paragraph_xml)
+
+    def test_add_text_block_writes_wrap_none_for_single_line_ocr(self) -> None:
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        block = TextBlock(
+            id="ocr_wrap_xml_1",
+            source="ocr",
+            bbox=(0, 0, 167.5, 34.5),
+            text="錯誤/不安全",
+            confidence=0.9,
+            font_size=29.5,
+        )
+
+        add_text_block(slide, block, scale_x=1.0, scale_y=1.0)
+
+        textbox = slide.shapes[-1]
+        self.assertIn('wrap="none"', textbox.text_frame._txBody.xml)
 
     def test_resolve_vertical_anchor_uses_middle_for_single_line_ocr(self) -> None:
         anchor = resolve_vertical_anchor(

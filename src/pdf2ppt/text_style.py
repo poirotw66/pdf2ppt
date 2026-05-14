@@ -15,6 +15,7 @@ from .models import TextBlock
 logger = logging.getLogger(__name__)
 
 DEFAULT_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+DEFAULT_BOLD_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 DEFAULT_CJK_FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 DEFAULT_TEXT_COLOR = "#1F1F1F"
 
@@ -133,15 +134,18 @@ def is_cjk(char: str) -> bool:
     )
 
 
-def choose_measurement_font(script: str) -> str | None:
-    return _choose_measurement_font_cached(script)
+def choose_measurement_font(script: str, *, bold: bool = False) -> str | None:
+    return _choose_measurement_font_cached(script, bold)
 
 
-@lru_cache(maxsize=8)
-def _choose_measurement_font_cached(script: str) -> str | None:
-    candidates = [DEFAULT_FONT_PATH]
+@lru_cache(maxsize=16)
+def _choose_measurement_font_cached(script: str, bold: bool) -> str | None:
     if script in {"cjk", "mixed"}:
-        candidates = [DEFAULT_CJK_FONT_PATH, DEFAULT_FONT_PATH]
+        candidates = [DEFAULT_CJK_FONT_PATH, DEFAULT_BOLD_FONT_PATH if bold else DEFAULT_FONT_PATH, DEFAULT_FONT_PATH]
+    elif bold:
+        candidates = [DEFAULT_BOLD_FONT_PATH, DEFAULT_FONT_PATH]
+    else:
+        candidates = [DEFAULT_FONT_PATH]
     for candidate in candidates:
         if Path(candidate).exists():
             return candidate
