@@ -148,6 +148,18 @@ def resolve_fallback_font_size_pt(block: TextBlock, *, scale_x: float, scale_y: 
         height_pt=height_pt,
     )
     start_size = max(6, int(round(base_size_pt)))
+    if is_title_like_single_line_ocr_block(block, width_pt=width_pt, height_pt=height_pt):
+        start_size = max(
+            start_size,
+            resolve_ocr_fit_max_size(
+                block,
+                font_path=font_path,
+                base_size=start_size,
+                scale_x=scale_x,
+                scale_y=scale_y,
+                script=script,
+            ),
+        )
     for size in range(start_size, 5, -1):
         measured_width, measured_height = measure_text_dimensions(block.text, size, font_path)
         if measured_width <= width_limit and measured_height <= height_pt * 1.03:
@@ -224,6 +236,19 @@ def is_tiny_latin_footer_label(text: str, script: str, width_pt: float, height_p
     if len(stripped) < 6 or len(stripped) > 16:
         return False
     return width_pt <= 100.0 and height_pt <= 16.0
+
+
+def is_title_like_single_line_ocr_block(block: TextBlock, *, width_pt: float, height_pt: float) -> bool:
+    if block.source != "ocr" or "\n" in block.text:
+        return False
+    if block.block_role == "title":
+        return True
+    stripped = block.text.strip()
+    if len(stripped) < 4 or len(stripped) > 36:
+        return False
+    if (block.font_size or 0.0) < 28.0:
+        return False
+    return width_pt >= 400.0 and height_pt >= 56.0
 
 
 def bbox_to_shape_geometry(

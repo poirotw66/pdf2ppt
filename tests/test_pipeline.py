@@ -2035,6 +2035,22 @@ class FontSizingTests(unittest.TestCase):
         self.assertLessEqual(resolved_size, 11.0)
         self.assertGreaterEqual(resolved_size, 6.0)
 
+    def test_resolve_fallback_font_size_pt_can_scale_up_title_like_single_line_ocr(self) -> None:
+        block = TextBlock(
+            id="ocr_fallback_font_4",
+            source="ocr",
+            bbox=(0, 0, 1184, 122.5),
+            text="金融業生成式AI平台工程",
+            confidence=0.9,
+            font_size=48,
+            block_role="body",
+        )
+
+        resolved_size = resolve_fallback_font_size_pt(block, scale_x=1.0, scale_y=1.0)
+
+        self.assertGreater(resolved_size, 48.0)
+        self.assertLessEqual(resolved_size, 96.0)
+
     @patch("pdf2ppt.ppt_render.fit_text_frame", return_value=True)
     @patch("pdf2ppt.ppt_render.resolve_fallback_font_size_pt", return_value=27.0)
     def test_add_text_block_clamps_oversized_fit_text_for_single_line_ocr(
