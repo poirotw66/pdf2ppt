@@ -228,8 +228,9 @@ Diagnostics:
 
 Output size tuning:
 
-- By default, embedded page backgrounds now use `JPEG` at quality `82` and `110 DPI` to reduce PPTX size.
-- Increase `--background-dpi` or switch to `--background-format png` when visual fidelity matters more than file size.
+- Full-page backgrounds still default to `JPEG` at quality `82` and `110 DPI` to reduce PPTX size.
+- Overlay backgrounds are now embedded as lossless `PNG` automatically so text-removal edges do not pick up JPEG halos.
+- Increase `--background-dpi` when visual fidelity matters more than file size.
 - Lower `--background-jpeg-quality` further when the deck is still too large.
 
 ## Conversion Modes

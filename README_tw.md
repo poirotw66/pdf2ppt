@@ -218,8 +218,9 @@ pdf2ppt input.pdf output.pptx \
 
 輸出體積調整建議：
 
-- 現在預設會以 `JPEG`、品質 `82`、`110 DPI` 嵌入背景頁面，通常能有效降低 PPTX 大小。
-- 如果你更重視畫質，可以提高 `--background-dpi`，或切換成 `--background-format png`。
+- 完整頁背景仍預設以 `JPEG`、品質 `82`、`110 DPI` 嵌入，通常能有效降低 PPTX 大小。
+- `overlay` 背景現在會自動改用無損 `PNG`，避免擦字後的邊緣被 JPEG 壓出灰邊。
+- 如果你更重視畫質，可以再提高 `--background-dpi`。
 - 如果檔案仍偏大，可以再降低 `--background-jpeg-quality`。
 
 ## 轉換模式

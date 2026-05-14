@@ -1556,6 +1556,60 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
         ocr_engine.recognize_text_in_box.assert_called_once()
         self.assertEqual([block.text for block in result.text_blocks], ["Manual OCR"])
 
+    @patch("pdf2ppt.pipeline.render_overlay_background")
+    @patch("pdf2ppt.pipeline.pil_to_image_bytes", return_value=b"png-bytes")
+    @patch("pdf2ppt.pipeline.choose_background_mode", return_value=("overlay", None))
+    @patch("pdf2ppt.pipeline.classify_page", return_value="scanned")
+    @patch(
+        "pdf2ppt.pipeline.compute_page_signals",
+        return_value=PageSignals(
+            native_char_count=0,
+            native_text_area_ratio=0.0,
+            image_area_ratio=1.0,
+            drawing_count=0,
+        ),
+    )
+    @patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], []))
+    def test_analyze_page_encodes_overlay_background_as_png(
+        self,
+        _extract_native_text_blocks_mock: unittest.mock.Mock,
+        _compute_page_signals_mock: unittest.mock.Mock,
+        _classify_page_mock: unittest.mock.Mock,
+        _choose_background_mode_mock: unittest.mock.Mock,
+        encode_background_mock: unittest.mock.Mock,
+        render_overlay_background_mock: unittest.mock.Mock,
+    ) -> None:
+        preview_image = Image.new("RGB", (200, 100), (10, 10, 10))
+        render_overlay_background_mock.return_value = SimpleNamespace(
+            image=preview_image,
+            engine_name="opencv-fast",
+            note="ok",
+            mask_image=None,
+            debug_images={},
+        )
+        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            background_image_format="jpeg",
+            background_jpeg_quality=70,
+        )
+        ocr_engine = unittest.mock.Mock()
+        ocr_engine.extract_text_blocks.return_value = SimpleNamespace(blocks=[], image=preview_image)
+
+        with patch("pdf2ppt.pipeline.render_page_image", return_value=preview_image):
+            result = analyze_page(page, options, ocr_engine=ocr_engine)
+
+        self.assertEqual(result.background_image_bytes, b"png-bytes")
+        encode_background_mock.assert_called_once_with(
+            unittest.mock.ANY,
+            image_format="png",
+            jpeg_quality=70,
+        )
+        encoded_background = encode_background_mock.call_args.args[0]
+        self.assertEqual(encoded_background.size, (153, 76))
+
     @patch("pdf2ppt.pipeline.pil_to_image_bytes", return_value=b"jpeg-bytes")
     @patch("pdf2ppt.pipeline.render_page_image")
     @patch("pdf2ppt.pipeline.choose_background_mode", return_value=("full-page", "fallback"))
@@ -2144,7 +2198,14 @@ class FontSizingTests(unittest.TestCase):
 
         textbox = slide.shapes[-1]
         run_xml = textbox.text_frame.paragraphs[0].runs[0]._r.xml
+        self.assertIn('a:latin typeface="Noto Sans CJK TC"', run_xml)
         self.assertIn('a:ea typeface="Noto Sans CJK TC"', run_xml)
+        self.assertIn('a:cs typeface="Noto Sans CJK TC"', run_xml)
+        paragraph_xml = textbox.text_frame.paragraphs[0]._p.xml
+        self.assertIn('a:endParaRPr', paragraph_xml)
+        self.assertIn('a:latin typeface="Noto Sans CJK TC"', paragraph_xml)
+        self.assertIn('a:ea typeface="Noto Sans CJK TC"', paragraph_xml)
+        self.assertIn('a:cs typeface="Noto Sans CJK TC"', paragraph_xml)
 
     def test_resolve_vertical_anchor_uses_middle_for_single_line_ocr(self) -> None:
         anchor = resolve_vertical_anchor(

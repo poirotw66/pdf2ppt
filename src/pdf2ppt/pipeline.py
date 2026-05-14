@@ -319,9 +319,12 @@ def analyze_page(
             background_inpaint_note = background_result.note
             mask_image = background_result.mask_image
         background_encode_started_at = perf_counter()
+        background_image_format = options.background_image_format
+        if background_mode == "overlay":
+            background_image_format = "png"
         background_image_bytes = pil_to_image_bytes(
             background_image,
-            image_format=options.background_image_format,
+            image_format=background_image_format,
             jpeg_quality=options.background_jpeg_quality,
         )
         background_encode_seconds = perf_counter() - background_encode_started_at

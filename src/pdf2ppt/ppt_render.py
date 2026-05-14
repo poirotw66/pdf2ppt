@@ -15,6 +15,7 @@ from .text_style import (
     choose_measurement_font,
     classify_text_script,
     default_font_family,
+    default_ppt_typefaces,
     measure_text_dimensions,
     ocr_fit_height_cap_ratio,
     single_line_fit_width_ratio,
@@ -63,6 +64,9 @@ def render_page_to_slide(
 def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> None:
     script = classify_text_script(block.text)
     resolved_font_family = block.font_family or default_font_family(script)
+    resolved_typefaces = default_ppt_typefaces(script)
+    if block.font_family:
+        resolved_typefaces = {"latin": block.font_family, "ea": block.font_family, "cs": block.font_family}
     left, top, width, height = bbox_to_shape_geometry(block.bbox, scale_x, scale_y)
     textbox = slide.shapes.add_textbox(left, top, max(width, Emu(1)), max(height, Emu(1)))
     text_frame = textbox.text_frame
@@ -83,7 +87,7 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
 
     font = run.font
     font.name = resolved_font_family
-    _set_run_typefaces(run, resolved_font_family)
+    _set_run_typefaces(run, resolved_typefaces)
     if used_fit_text and block.source == "ocr" and "\n" not in block.text:
         safe_font_size_pt = resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y)
         current_font_size_pt = getattr(font.size, "pt", None) if font.size is not None else None
@@ -95,6 +99,7 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
         font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
     font.bold = block.bold
     font.italic = block.italic
+    _set_paragraph_end_typefaces(paragraph, resolved_typefaces)
 
 
 def fit_text_frame(text_frame: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> bool:
@@ -268,7 +273,7 @@ def bbox_to_shape_geometry(
     return left, top, width, height
 
 
-def _set_run_typefaces(run: Any, font_family: str) -> None:
+def _set_run_typefaces(run: Any, typefaces: dict[str, str]) -> None:
     if not hasattr(run, "_r"):
         return
     r_pr = run._r.get_or_add_rPr()
@@ -276,10 +281,24 @@ def _set_run_typefaces(run: Any, font_family: str) -> None:
         for child in list(r_pr):
             if child.tag == child_tag:
                 r_pr.remove(child)
-    for tag_name in ("a:latin", "a:ea", "a:cs"):
+    for tag_name, key in (("a:latin", "latin"), ("a:ea", "ea"), ("a:cs", "cs")):
         typeface = OxmlElement(tag_name)
-        typeface.set("typeface", font_family)
+        typeface.set("typeface", typefaces[key])
         r_pr.append(typeface)
+
+
+def _set_paragraph_end_typefaces(paragraph: Any, typefaces: dict[str, str]) -> None:
+    if not hasattr(paragraph, "_p"):
+        return
+    end_paragraph_properties = paragraph._p.get_or_add_endParaRPr()
+    for child_tag in (qn("a:latin"), qn("a:ea"), qn("a:cs")):
+        for child in list(end_paragraph_properties):
+            if child.tag == child_tag:
+                end_paragraph_properties.remove(child)
+    for tag_name, key in (("a:latin", "latin"), ("a:ea", "ea"), ("a:cs", "cs")):
+        typeface = OxmlElement(tag_name)
+        typeface.set("typeface", typefaces[key])
+        end_paragraph_properties.append(typeface)
 
 
 def pt_to_emu(value: float) -> Emu:

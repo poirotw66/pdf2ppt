@@ -154,6 +154,15 @@ def default_font_family(script: str) -> str:
     return "DejaVu Sans"
 
 
+def default_ppt_typefaces(script: str) -> dict[str, str]:
+    family = default_font_family(script)
+    return {
+        "latin": family,
+        "ea": family,
+        "cs": family,
+    }
+
+
 def script_target_width_ratio(script: str, text: str) -> float:
     if script == "numeric":
         return 0.88
