@@ -43,6 +43,21 @@ TARGETED_FILE_BACK_BLEND_SIGMA = 1.6
 TARGETED_FILE_BACK_CONTRAST_SIGMA = 3.0
 TARGETED_FILE_BACK_LUMA_SPAN_MAX_SCALE = 1.4
 TARGETED_FILE_BACK_LUMA_DETAIL_MAX_SCALE = 2.5
+TARGETED_FOOTER_LABEL_CONTEXT_GAP_PX = 2
+TARGETED_FOOTER_LABEL_CONTEXT_DILATE_PX = 8
+TARGETED_FOOTER_LABEL_CROP_PADDING_PX = 20
+TARGETED_FOOTER_LABEL_LUMA_MAX_DELTA = 28.0
+TARGETED_FOOTER_LABEL_CHROMA_MAX_DELTA = 8.0
+TARGETED_FOOTER_LABEL_BLEND_SIGMA = 1.4
+TARGETED_FOOTER_LABEL_BLEND_GAIN = 1.6
+FOOTER_BLEED_RESTORE_SOURCE_MIN_GRAY = 160
+FOOTER_BLEED_RESTORE_RENDERED_DELTA = 18
+FOOTER_BLEED_RESTORE_MIN_RATIO = 0.45
+FOOTER_BLEED_RESTORE_OUTER_MIN_RATIO = 0.3
+FOOTER_TOP_WASH_SOURCE_MIN_GRAY = 220
+FOOTER_TOP_WASH_RENDERED_DELTA = 6
+FOOTER_TOP_WASH_MIN_RATIO = 0.18
+FOOTER_TOP_WASH_MIN_RUN_RATIO = 0.15
 
 
 def render_overlay_background(
@@ -121,16 +136,25 @@ def render_overlay_background(
                 text_blocks=text_blocks,
                 page_rect=page_rect,
             )
-        corrected_image, correction_debug_images, correction_note = _apply_targeted_file_back_color_correction(
+        corrected_image, footer_debug_images, footer_note = _apply_targeted_footer_label_color_correction(
             page_image,
             rendered_image,
             text_blocks,
             page_rect,
             options=options,
         )
+        corrected_image, correction_debug_images, correction_note = _apply_targeted_file_back_color_correction(
+            page_image,
+            corrected_image,
+            text_blocks,
+            page_rect,
+            options=options,
+        )
         final_note = rendered_note
+        if footer_note:
+            final_note = f"{final_note} {footer_note}" if final_note else footer_note
         if correction_note:
-            final_note = f"{rendered_note} {correction_note}" if rendered_note else correction_note
+            final_note = f"{final_note} {correction_note}" if final_note else correction_note
         return BackgroundRenderResult(
             image=corrected_image,
             engine_name=rendered_engine_name,
@@ -139,6 +163,7 @@ def render_overlay_background(
             debug_images={
                 **mask_debug_images,
                 **engine_debug_images,
+                **footer_debug_images,
                 **correction_debug_images,
             },
         )
@@ -240,14 +265,18 @@ def _restore_protected_table_lines(
         fringe_mask &= source_gray <= gray_cap
         fringe_mask &= (source_gray.astype(np.int16) + 12) < rendered_gray.astype(np.int16)
         restore_mask |= fringe_mask
-        if text_blocks and page_rect is not None:
-            restore_mask |= _build_footer_bottom_border_restore_mask(
-                source_gray,
-                rendered_gray,
-                protected_line_mask,
-                text_blocks=text_blocks,
-                page_rect=page_rect,
-            )
+    else:
+        source_gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
+        rendered_gray = cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2GRAY)
+
+    if text_blocks and page_rect is not None:
+        restore_mask |= _build_footer_bottom_border_restore_mask(
+            source_gray,
+            rendered_gray,
+            protected_line_mask,
+            text_blocks=text_blocks,
+            page_rect=page_rect,
+        )
     rendered_rgb[restore_mask] = source_rgb[restore_mask]
     return Image.fromarray(rendered_rgb, mode="RGB")
 
@@ -280,6 +309,30 @@ def _build_footer_bottom_border_restore_mask(
         if x1 <= x0 or y1 <= y0:
             continue
 
+        restore_mask |= _build_footer_dark_bleed_restore_mask(
+            source_gray,
+            rendered_gray,
+            x0=x0,
+            x1=x1,
+            y0=y0,
+            y1=y1,
+        )
+        restore_mask |= _build_footer_top_wash_restore_mask(
+            source_gray,
+            rendered_gray,
+            x0=x0,
+            x1=x1,
+            y0=y0,
+            y1=y1,
+        )
+        restore_mask |= _build_footer_top_outer_wash_restore_mask(
+            source_gray,
+            rendered_gray,
+            x0=x0,
+            x1=x1,
+            y0=y0,
+        )
+
         seed_y0 = max(0, y1 - 2)
         seed_y1 = min(image_height, y1 + 3)
         seed_region = protected_line_mask[seed_y0:seed_y1, x0:x1]
@@ -302,6 +355,115 @@ def _build_footer_bottom_border_restore_mask(
             candidate_mask = cv2.morphologyEx(candidate_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((1, 7), dtype=np.uint8), iterations=1) > 0
             restore_mask |= candidate_mask
 
+    return restore_mask
+
+
+def _build_footer_dark_bleed_restore_mask(
+    source_gray: np.ndarray,
+    rendered_gray: np.ndarray,
+    *,
+    x0: int,
+    x1: int,
+    y0: int,
+    y1: int,
+) -> np.ndarray:
+    restore_mask = np.zeros_like(source_gray, dtype=bool)
+    image_height = source_gray.shape[0]
+    inner_min_coverage = max(12, int((x1 - x0) * FOOTER_BLEED_RESTORE_MIN_RATIO))
+    outer_min_coverage = max(12, int((x1 - x0) * FOOTER_BLEED_RESTORE_OUTER_MIN_RATIO))
+    row_ranges = (
+        (range(max(y0, y1 - 6), y1), inner_min_coverage),
+        (range(y1, min(image_height, y1 + 6)), outer_min_coverage),
+    )
+    for rows, min_coverage in row_ranges:
+        for row in rows:
+            source_row = source_gray[row, x0:x1].astype(np.int16)
+            rendered_row = rendered_gray[row, x0:x1].astype(np.int16)
+            candidate = (source_row >= FOOTER_BLEED_RESTORE_SOURCE_MIN_GRAY) & (
+                (rendered_row + FOOTER_BLEED_RESTORE_RENDERED_DELTA) < source_row
+            )
+            if np.count_nonzero(candidate) < min_coverage:
+                continue
+            candidate_mask = np.zeros_like(source_gray, dtype=bool)
+            candidate_mask[row, x0:x1] = candidate
+            candidate_mask = cv2.morphologyEx(candidate_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((1, 7), dtype=np.uint8), iterations=1) > 0
+            restore_mask |= candidate_mask
+    return restore_mask
+
+
+def _build_footer_top_wash_restore_mask(
+    source_gray: np.ndarray,
+    rendered_gray: np.ndarray,
+    *,
+    x0: int,
+    x1: int,
+    y0: int,
+    y1: int,
+) -> np.ndarray:
+    restore_mask = np.zeros_like(source_gray, dtype=bool)
+    max_rows = min(y1, y0 + 4)
+    min_coverage = max(24, int((x1 - x0) * FOOTER_TOP_WASH_MIN_RATIO))
+    min_run = max(20, int((x1 - x0) * FOOTER_TOP_WASH_MIN_RUN_RATIO))
+    for row in range(y0, max_rows):
+        source_row = source_gray[row, x0:x1].astype(np.int16)
+        rendered_row = rendered_gray[row, x0:x1].astype(np.int16)
+        candidate = (source_row >= FOOTER_TOP_WASH_SOURCE_MIN_GRAY) & (
+            (rendered_row + FOOTER_TOP_WASH_RENDERED_DELTA) < source_row
+        )
+        count = int(np.count_nonzero(candidate))
+        if count < min_coverage:
+            continue
+        longest_run = 0
+        current_run = 0
+        for value in candidate:
+            if value:
+                current_run += 1
+                longest_run = max(longest_run, current_run)
+            else:
+                current_run = 0
+        if longest_run < min_run:
+            continue
+        candidate_mask = np.zeros_like(source_gray, dtype=bool)
+        candidate_mask[row, x0:x1] = candidate
+        candidate_mask = cv2.morphologyEx(candidate_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((1, 9), dtype=np.uint8), iterations=1) > 0
+        restore_mask |= candidate_mask
+    return restore_mask
+
+
+def _build_footer_top_outer_wash_restore_mask(
+    source_gray: np.ndarray,
+    rendered_gray: np.ndarray,
+    *,
+    x0: int,
+    x1: int,
+    y0: int,
+) -> np.ndarray:
+    restore_mask = np.zeros_like(source_gray, dtype=bool)
+    min_coverage = max(24, int((x1 - x0) * FOOTER_TOP_WASH_MIN_RATIO))
+    min_run = max(20, int((x1 - x0) * FOOTER_TOP_WASH_MIN_RUN_RATIO))
+    for row in range(max(0, y0 - 3), y0):
+        source_row = source_gray[row, x0:x1].astype(np.int16)
+        rendered_row = rendered_gray[row, x0:x1].astype(np.int16)
+        candidate = (source_row >= FOOTER_TOP_WASH_SOURCE_MIN_GRAY) & (
+            (rendered_row + FOOTER_TOP_WASH_RENDERED_DELTA) < source_row
+        )
+        count = int(np.count_nonzero(candidate))
+        if count < min_coverage:
+            continue
+        longest_run = 0
+        current_run = 0
+        for value in candidate:
+            if value:
+                current_run += 1
+                longest_run = max(longest_run, current_run)
+            else:
+                current_run = 0
+        if longest_run < min_run:
+            continue
+        candidate_mask = np.zeros_like(source_gray, dtype=bool)
+        candidate_mask[row, x0:x1] = candidate
+        candidate_mask = cv2.morphologyEx(candidate_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((1, 9), dtype=np.uint8), iterations=1) > 0
+        restore_mask |= candidate_mask
     return restore_mask
 
 
@@ -396,6 +558,116 @@ def _apply_targeted_file_back_color_correction(
     if not notes:
         return repaired_image.convert("RGB"), {}, None
     return Image.fromarray(corrected_rgb, mode="RGB"), debug_images, " ".join(notes)
+
+
+def _apply_targeted_footer_label_color_correction(
+    page_image: Image.Image,
+    repaired_image: Image.Image,
+    text_blocks: list[TextBlock],
+    page_rect: fitz.Rect,
+    *,
+    options: ConversionOptions,
+) -> tuple[Image.Image, dict[str, Image.Image], str | None]:
+    target_blocks = [block for block in text_blocks if _is_footer_label_color_correction_candidate(block, page_rect=page_rect)]
+    if not target_blocks:
+        return repaired_image.convert("RGB"), {}, None
+
+    source_rgb = np.array(page_image.convert("RGB"), dtype=np.uint8)
+    corrected_rgb = np.array(repaired_image.convert("RGB"), dtype=np.uint8, copy=True)
+    debug_images: dict[str, Image.Image] = {}
+    notes: list[str] = []
+
+    for index, block in enumerate(target_blocks, start=1):
+        block_mask_image = build_text_mask_image(
+            [block],
+            page_image.size,
+            page_rect,
+            padding_px=0,
+        )
+        crop_box = compute_mask_crop_box(block_mask_image, padding_px=TARGETED_FOOTER_LABEL_CROP_PADDING_PX)
+        if crop_box is None:
+            continue
+
+        block_mask = np.array(block_mask_image.convert("L"), dtype=np.uint8) > 0
+        if not np.any(block_mask):
+            continue
+
+        gap_kernel = np.ones(
+            (TARGETED_FOOTER_LABEL_CONTEXT_GAP_PX * 2 + 1, TARGETED_FOOTER_LABEL_CONTEXT_GAP_PX * 2 + 1),
+            dtype=np.uint8,
+        )
+        context_kernel = np.ones(
+            (TARGETED_FOOTER_LABEL_CONTEXT_DILATE_PX * 2 + 1, TARGETED_FOOTER_LABEL_CONTEXT_DILATE_PX * 2 + 1),
+            dtype=np.uint8,
+        )
+        inner = cv2.dilate(block_mask.astype(np.uint8), gap_kernel, iterations=1)
+        outer = cv2.dilate(inner, context_kernel, iterations=1)
+        ring_mask = (outer > 0) & (inner == 0)
+        if int(np.count_nonzero(ring_mask)) < 64:
+            continue
+
+        x0, y0, x1, y1 = crop_box
+        local_component = block_mask[y0:y1, x0:x1]
+        local_ring = ring_mask[y0:y1, x0:x1]
+        if not np.any(local_component) or not np.any(local_ring):
+            continue
+
+        source_crop = source_rgb[y0:y1, x0:x1]
+        repaired_crop = corrected_rgb[y0:y1, x0:x1].copy()
+        corrected_crop, delta_rgb = _blend_local_component_toward_ring(
+            source_crop,
+            repaired_crop,
+            local_component,
+            local_ring,
+            blend_sigma=TARGETED_FOOTER_LABEL_BLEND_SIGMA,
+            blend_gain=TARGETED_FOOTER_LABEL_BLEND_GAIN,
+        )
+        corrected_rgb[y0:y1, x0:x1] = corrected_crop
+
+        suffix = f"footer_label_{index:02d}"
+        debug_images[f"{suffix}_corrected"] = Image.fromarray(corrected_crop, mode="RGB")
+        debug_images[f"{suffix}_mask"] = Image.fromarray((local_component.astype(np.uint8) * 255), mode="L")
+        notes.append(
+            f"Applied footer label flat tone correction to '{block.text}' "
+            f"(dR {delta_rgb[0]:.1f}, dG {delta_rgb[1]:.1f}, dB {delta_rgb[2]:.1f})."
+        )
+
+    if not notes:
+        return repaired_image.convert("RGB"), {}, None
+    return Image.fromarray(corrected_rgb, mode="RGB"), debug_images, " ".join(notes)
+
+
+def _is_footer_label_color_correction_candidate(block: TextBlock, *, page_rect: fitz.Rect) -> bool:
+    if block.source != "ocr" or block.block_role != "body" or "\n" in block.text:
+        return False
+    if "%" not in block.text:
+        return False
+    width_pt = block.bbox[2] - block.bbox[0]
+    height_pt = block.bbox[3] - block.bbox[1]
+    if width_pt < 140.0 or width_pt > 240.0 or height_pt > 42.0:
+        return False
+    return block.bbox[3] >= float(page_rect.height) * 0.85
+
+
+def _blend_local_component_toward_ring(
+    source_crop: np.ndarray,
+    repaired_crop: np.ndarray,
+    local_component: np.ndarray,
+    local_ring: np.ndarray,
+    *,
+    blend_sigma: float,
+    blend_gain: float,
+) -> tuple[np.ndarray, tuple[float, float, float]]:
+    if not np.any(local_component) or not np.any(local_ring):
+        return repaired_crop, (0.0, 0.0, 0.0)
+    ring_mean = source_crop[local_ring].astype(np.float32).mean(axis=0)
+    component_mean = repaired_crop[local_component].astype(np.float32).mean(axis=0)
+    alpha = cv2.GaussianBlur(local_component.astype(np.float32), (0, 0), sigmaX=blend_sigma, sigmaY=blend_sigma)
+    alpha = np.clip(alpha * blend_gain, 0.0, 1.0)[..., None]
+    corrected = repaired_crop.astype(np.float32)
+    corrected = corrected * (1.0 - alpha) + ring_mean[None, None, :] * alpha
+    delta = tuple(float(ring_mean[index] - component_mean[index]) for index in range(3))
+    return np.clip(corrected, 0.0, 255.0).astype(np.uint8), delta
 
 
 def _align_local_luminance_and_chroma_to_ring(

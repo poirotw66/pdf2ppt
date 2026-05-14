@@ -19,6 +19,7 @@ import pdf2ppt.inpainting_engines as inpainting_engines
 import pdf2ppt.inpainting_masks as inpainting_masks
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line, main
 from pdf2ppt.inpainting_overlay import (
+    _apply_targeted_footer_label_color_correction,
     _apply_targeted_file_back_color_correction,
     _neutralize_protected_table_lines,
     _restore_protected_table_lines,
@@ -528,6 +529,49 @@ class BackgroundModeTests(unittest.TestCase):
         restored_array = np.array(restored, dtype=np.int16)
         source_array = source.astype(np.int16)
         self.assertLess(np.abs(restored_array[132:136, 50:170] - source_array[132:136, 50:170]).mean(), 1.0)
+
+    def test_restore_protected_table_lines_recovers_footer_light_band_without_seed(self) -> None:
+        width, height = 220, 140
+        source = np.full((height, width, 3), 240, dtype=np.uint8)
+        rendered = np.full((height, width, 3), 240, dtype=np.uint8)
+        source[83:86, 30:190] = 242
+        rendered[83:86, 30:190] = 234
+        source[86:89, 30:190] = 242
+        rendered[86:89, 30:190] = 234
+        source[120:126, 30:190] = 236
+        rendered[120:126, 30:190] = 140
+        source[126:130, 30:190] = 236
+        source[130:134, 30:190] = 96
+        rendered[126:130, 30:190] = 140
+        source[131, 50:108] = 236
+        rendered[131, 50:108] = 140
+        rendered[130:134, 30:190] = 96
+        protected_line_mask = np.zeros((height, width), dtype=bool)
+        block = TextBlock(
+            id="ocr_footer_2",
+            source="ocr",
+            bbox=(30.0, 86.0, 190.0, 126.0),
+            text="同義改寫 (100%)",
+            confidence=0.99,
+            block_role="body",
+        )
+
+        restored = _restore_protected_table_lines(
+            Image.fromarray(source, mode="RGB"),
+            Image.fromarray(rendered, mode="RGB"),
+            protected_line_mask,
+            text_blocks=[block],
+            page_rect=fitz.Rect(0, 0, width, height),
+        )
+
+        restored_array = np.array(restored, dtype=np.int16)
+        source_array = source.astype(np.int16)
+        self.assertLess(np.abs(restored_array[83:86, 50:170] - source_array[83:86, 50:170]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[86:89, 50:170] - source_array[86:89, 50:170]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[120:126, 50:170] - source_array[120:126, 50:170]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[126:130, 50:170] - source_array[126:130, 50:170]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[131, 50:108] - source_array[131, 50:108]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[130:134, 50:170] - source_array[130:134, 50:170]).mean(), 1.0)
 
     def test_restore_protected_table_lines_skips_non_footer_body_blocks_for_footer_border_restore(self) -> None:
         width, height = 220, 140
@@ -1375,6 +1419,56 @@ class OcrStyleOptimizationTests(unittest.TestCase):
         self.assertIn("File-Back", note or "")
         self.assertIn("file_back_corrected", debug_images)
         self.assertIn("file_back_mask", debug_images)
+
+    def test_apply_targeted_footer_label_color_correction_reduces_mask_ring_gap(self) -> None:
+        width, height = 320, 180
+        base = np.full((height, width, 3), 238, dtype=np.uint8)
+        repaired = base.copy().astype(np.float32)
+        repaired[136:176, 68:248] -= 26.0
+        repaired = np.clip(repaired, 0, 255).astype(np.uint8)
+        page_image = Image.fromarray(base, mode="RGB")
+        repaired_image = Image.fromarray(repaired, mode="RGB")
+        block = TextBlock(
+            id="ocr_footer_label",
+            source="ocr",
+            bbox=(68.0, 136.0, 248.0, 176.0),
+            text="同義改寫 (100%)",
+            confidence=0.95,
+            block_role="body",
+            image_bbox=(68.0, 136.0, 248.0, 176.0),
+            image_polygon=((68.0, 138.0), (248.0, 136.0), (246.0, 176.0), (70.0, 174.0)),
+        )
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="opencv-fast",
+            inpaint_padding_px=0,
+        )
+
+        corrected_image, debug_images, note = _apply_targeted_footer_label_color_correction(
+            page_image,
+            repaired_image,
+            [block],
+            fitz.Rect(0, 0, width, height),
+            options=options,
+        )
+
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillConvexPoly(mask, np.array([[68, 138], [248, 136], [246, 176], [70, 174]], dtype=np.int32), 1)
+        inner = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+        outer = cv2.dilate(inner.astype(np.uint8), np.ones((17, 17), np.uint8), iterations=1).astype(bool)
+        ring = outer & (~inner)
+        repaired_arr = np.array(repaired_image, dtype=np.uint8)
+        corrected_arr = np.array(corrected_image, dtype=np.uint8)
+        ring_mean = base[ring].astype(np.float32).mean(axis=0)
+        repaired_gap = np.abs(repaired_arr[mask.astype(bool)].astype(np.float32).mean(axis=0) - ring_mean).mean()
+        corrected_gap = np.abs(corrected_arr[mask.astype(bool)].astype(np.float32).mean(axis=0) - ring_mean).mean()
+
+        self.assertLess(corrected_gap, repaired_gap)
+        self.assertIn("footer label flat tone correction", (note or "").lower())
+        self.assertIn("footer_label_01_corrected", debug_images)
+        self.assertIn("footer_label_01_mask", debug_images)
 
 class AnalyzePagePerformanceTests(unittest.TestCase):
     @patch("pdf2ppt.pipeline.extract_image_elements", return_value=[])
