@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 from typing import Any
 
 from pptx.dml.color import RGBColor
@@ -146,12 +147,13 @@ def resolve_fallback_font_size_pt(block: TextBlock, *, scale_x: float, scale_y: 
         return base_size_pt
 
     script = classify_text_script(block.text)
+    height_pt = max(1.0, (block.bbox[3] - block.bbox[1]) * scale_y)
+    heuristic_cap = resolve_single_line_ocr_size_cap_pt(block.text, script, height_pt)
     font_path = choose_measurement_font(script, bold=block.bold)
     if font_path is None:
-        return base_size_pt
+        return min(base_size_pt, heuristic_cap) if heuristic_cap is not None else base_size_pt
 
     width_pt = max(1.0, (block.bbox[2] - block.bbox[0]) * scale_x)
-    height_pt = max(1.0, (block.bbox[3] - block.bbox[1]) * scale_y)
     width_limit = width_pt if "\n" in block.text else resolve_single_line_width_limit_pt(
         block.text,
         width_pt,
@@ -174,8 +176,10 @@ def resolve_fallback_font_size_pt(block: TextBlock, *, scale_x: float, scale_y: 
     for size in range(start_size, 5, -1):
         measured_width, measured_height = measure_text_dimensions(block.text, size, font_path)
         if measured_width <= width_limit and measured_height <= height_pt * 1.03:
-            return float(size)
-    return 6.0
+            resolved_size = float(size)
+            return min(resolved_size, heuristic_cap) if heuristic_cap is not None else resolved_size
+    fallback_size = 6.0
+    return min(fallback_size, heuristic_cap) if heuristic_cap is not None else fallback_size
 
 
 def should_wrap_text_block(block: TextBlock) -> bool:
@@ -201,6 +205,9 @@ def resolve_ocr_fit_max_size(
 ) -> int:
     height_pt = max(1.0, (block.bbox[3] - block.bbox[1]) * scale_y)
     max_size = min(96, max(base_size + 3, int(round(height_pt * ocr_fit_height_cap_ratio(script)))))
+    heuristic_cap = resolve_single_line_ocr_size_cap_pt(block.text, script, height_pt)
+    if heuristic_cap is not None:
+        max_size = min(max_size, int(math.floor(heuristic_cap)))
     if "\n" in block.text:
         return max_size
 
@@ -213,6 +220,12 @@ def resolve_ocr_fit_max_size(
         if measured_width <= width_limit and measured_height <= height_pt * 1.03:
             return size
     return min(base_size, max_size)
+
+
+def resolve_single_line_ocr_size_cap_pt(text: str, script: str, height_pt: float) -> float | None:
+    if is_bracketed_ocr_label(text):
+        return max(6.0, math.floor(height_pt * 0.66))
+    return None
 
 
 def resolve_single_line_width_limit_pt(text: str, width_pt: float, script: str, *, height_pt: float) -> float:

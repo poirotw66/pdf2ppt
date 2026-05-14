@@ -226,8 +226,20 @@ def measure_text_dimensions(text: str, font_size: int, font_path: str) -> tuple[
 
 
 @lru_cache(maxsize=128)
-def load_measurement_font(font_path: str, font_size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(font_path, font_size)
+def load_measurement_font(font_path: str, font_size: int) -> ImageFont.ImageFont:
+    candidate_paths = [font_path, DEFAULT_CJK_FONT_PATH, DEFAULT_FONT_PATH, DEFAULT_BOLD_FONT_PATH]
+    tried: set[str] = set()
+    for candidate in candidate_paths:
+        if not candidate or candidate in tried:
+            continue
+        tried.add(candidate)
+        if not Path(candidate).exists():
+            continue
+        try:
+            return ImageFont.truetype(candidate, font_size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def gray_image_to_array(gray_crop: Image.Image) -> np.ndarray:
