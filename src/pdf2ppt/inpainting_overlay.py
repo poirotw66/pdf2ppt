@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import cv2
 import logging
+import math
 
 import fitz
 import numpy as np
@@ -113,7 +114,13 @@ def render_overlay_background(
         if engine_debug_note:
             rendered_note = f"{rendered_note} {engine_debug_note}" if rendered_note else engine_debug_note
         if np.any(protected_line_mask):
-            rendered_image = _restore_protected_table_lines(page_image, rendered_image, protected_line_mask)
+            rendered_image = _restore_protected_table_lines(
+                page_image,
+                rendered_image,
+                protected_line_mask,
+                text_blocks=text_blocks,
+                page_rect=page_rect,
+            )
         corrected_image, correction_debug_images, correction_note = _apply_targeted_file_back_color_correction(
             page_image,
             rendered_image,
@@ -211,11 +218,91 @@ def _restore_protected_table_lines(
     page_image: Image.Image,
     rendered_image: Image.Image,
     protected_line_mask: np.ndarray,
+    *,
+    text_blocks: list[TextBlock] | None = None,
+    page_rect: fitz.Rect | None = None,
 ) -> Image.Image:
     source_rgb = np.array(page_image.convert("RGB"), dtype=np.uint8)
     rendered_rgb = np.array(rendered_image.convert("RGB"), dtype=np.uint8, copy=True)
-    rendered_rgb[protected_line_mask] = source_rgb[protected_line_mask]
+    restore_mask = protected_line_mask.copy()
+    if np.any(protected_line_mask):
+        source_gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
+        rendered_gray = cv2.cvtColor(rendered_rgb, cv2.COLOR_RGB2GRAY)
+        line_values = source_gray[protected_line_mask].astype(np.float32)
+        gray_cap = float(np.percentile(line_values, 90)) + 80.0
+        dilated_mask = cv2.dilate(protected_line_mask.astype(np.uint8), np.ones((5, 5), dtype=np.uint8), iterations=1) > 0
+        fringe_mask = dilated_mask & (~protected_line_mask)
+        downward_seed = cv2.dilate(protected_line_mask.astype(np.uint8), np.ones((1, 5), dtype=np.uint8), iterations=1) > 0
+        downward_fringe = np.zeros_like(protected_line_mask, dtype=bool)
+        for dy in range(1, 4):
+            downward_fringe[dy:, :] |= downward_seed[:-dy, :]
+        fringe_mask |= downward_fringe & (~protected_line_mask)
+        fringe_mask &= source_gray <= gray_cap
+        fringe_mask &= (source_gray.astype(np.int16) + 12) < rendered_gray.astype(np.int16)
+        restore_mask |= fringe_mask
+        if text_blocks and page_rect is not None:
+            restore_mask |= _build_footer_bottom_border_restore_mask(
+                source_gray,
+                rendered_gray,
+                protected_line_mask,
+                text_blocks=text_blocks,
+                page_rect=page_rect,
+            )
+    rendered_rgb[restore_mask] = source_rgb[restore_mask]
     return Image.fromarray(rendered_rgb, mode="RGB")
+
+
+def _build_footer_bottom_border_restore_mask(
+    source_gray: np.ndarray,
+    rendered_gray: np.ndarray,
+    protected_line_mask: np.ndarray,
+    *,
+    text_blocks: list[TextBlock],
+    page_rect: fitz.Rect,
+) -> np.ndarray:
+    restore_mask = np.zeros_like(protected_line_mask, dtype=bool)
+    image_height, image_width = source_gray.shape
+    scale_x = image_width / max(1.0, float(page_rect.width))
+    scale_y = image_height / max(1.0, float(page_rect.height))
+
+    for block in text_blocks:
+        if block.source != "ocr" or "\n" in block.text:
+            continue
+        width_pt = block.bbox[2] - block.bbox[0]
+        height_pt = block.bbox[3] - block.bbox[1]
+        if width_pt < 120.0 or height_pt > 42.0:
+            continue
+
+        x0 = max(0, int(math.floor(block.bbox[0] * scale_x)) - 2)
+        y0 = max(0, int(math.floor(block.bbox[1] * scale_y)))
+        x1 = min(image_width, int(math.ceil(block.bbox[2] * scale_x)) + 2)
+        y1 = min(image_height, int(math.ceil(block.bbox[3] * scale_y)))
+        if x1 <= x0 or y1 <= y0:
+            continue
+
+        seed_y0 = max(0, y1 - 2)
+        seed_y1 = min(image_height, y1 + 3)
+        seed_region = protected_line_mask[seed_y0:seed_y1, x0:x1]
+        if np.count_nonzero(seed_region) < max(4, int((x1 - x0) * 0.02)):
+            continue
+
+        seed_values = source_gray[seed_y0:seed_y1, x0:x1][seed_region].astype(np.float32)
+        if seed_values.size == 0:
+            continue
+        gray_cap = float(np.percentile(seed_values, 90)) + 80.0
+
+        for row in range(y1, min(image_height, y1 + 7)):
+            source_row = source_gray[row, x0:x1].astype(np.int16)
+            rendered_row = rendered_gray[row, x0:x1].astype(np.int16)
+            candidate = (source_row <= gray_cap) & ((source_row + 12) < rendered_row)
+            if np.count_nonzero(candidate) < int((x1 - x0) * 0.7):
+                continue
+            candidate_mask = np.zeros_like(protected_line_mask, dtype=bool)
+            candidate_mask[row, x0:x1] = candidate
+            candidate_mask = cv2.morphologyEx(candidate_mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((1, 7), dtype=np.uint8), iterations=1) > 0
+            restore_mask |= candidate_mask
+
+    return restore_mask
 
 
 def _apply_targeted_file_back_color_correction(

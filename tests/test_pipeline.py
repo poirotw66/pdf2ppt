@@ -436,6 +436,62 @@ class BackgroundModeTests(unittest.TestCase):
         source_array = source.astype(np.int16)
         self.assertLess(np.abs(restored_array[20:22, 30:90] - source_array[20:22, 30:90]).mean(), 1.0)
 
+    def test_restore_protected_table_lines_recovers_dark_line_fringe(self) -> None:
+        source = np.full((40, 80, 3), 245, dtype=np.uint8)
+        source[18:20, 10:70] = 40
+        source[17, 10:70] = 78
+        source[20, 10:70] = 78
+        source[16, 10:70] = 96
+        source[21, 10:70] = 96
+        source[22, 10:70] = 110
+        rendered = np.full((40, 80, 3), 245, dtype=np.uint8)
+        protected_line_mask = np.zeros((40, 80), dtype=bool)
+        protected_line_mask[18:20, 10:70] = True
+
+        restored = _restore_protected_table_lines(
+            Image.fromarray(source, mode="RGB"),
+            Image.fromarray(rendered, mode="RGB"),
+            protected_line_mask,
+        )
+
+        restored_array = np.array(restored, dtype=np.int16)
+        source_array = source.astype(np.int16)
+        self.assertLess(np.abs(restored_array[17, 20:60] - source_array[17, 20:60]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[20, 20:60] - source_array[20, 20:60]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[16, 20:60] - source_array[16, 20:60]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[21, 20:60] - source_array[21, 20:60]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[22, 20:60] - source_array[22, 20:60]).mean(), 1.0)
+        self.assertGreater(restored_array[10:14, 20:60].mean(), 240.0)
+
+    def test_restore_protected_table_lines_extends_low_contrast_footer_border_from_seed(self) -> None:
+        width, height = 220, 140
+        source = np.full((height, width, 3), 240, dtype=np.uint8)
+        rendered = np.full((height, width, 3), 240, dtype=np.uint8)
+        source[102:106, 30:190] = 96
+        protected_line_mask = np.zeros((height, width), dtype=bool)
+        protected_line_mask[100:102, 104:114] = True
+        source[100:102, 104:114] = 72
+        rendered[102:106, 30:190] = 240
+        block = TextBlock(
+            id="ocr_footer_1",
+            source="ocr",
+            bbox=(30.0, 60.0, 190.0, 100.0),
+            text="高頻FAQ(98.8%)",
+            confidence=0.99,
+        )
+
+        restored = _restore_protected_table_lines(
+            Image.fromarray(source, mode="RGB"),
+            Image.fromarray(rendered, mode="RGB"),
+            protected_line_mask,
+            text_blocks=[block],
+            page_rect=fitz.Rect(0, 0, width, height),
+        )
+
+        restored_array = np.array(restored, dtype=np.int16)
+        source_array = source.astype(np.int16)
+        self.assertLess(np.abs(restored_array[102:106, 50:170] - source_array[102:106, 50:170]).mean(), 1.0)
+
     def test_render_overlay_background_auto_falls_back_to_white_box_for_large_mask(self) -> None:
         grid_y, grid_x = np.indices((40, 60), dtype=np.uint8)
         textured = np.stack(
