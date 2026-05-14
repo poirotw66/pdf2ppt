@@ -141,7 +141,12 @@ def resolve_fallback_font_size_pt(block: TextBlock, *, scale_x: float, scale_y: 
 
     width_pt = max(1.0, (block.bbox[2] - block.bbox[0]) * scale_x)
     height_pt = max(1.0, (block.bbox[3] - block.bbox[1]) * scale_y)
-    width_limit = width_pt if "\n" in block.text else width_pt * single_line_fit_width_ratio(script)
+    width_limit = width_pt if "\n" in block.text else resolve_single_line_width_limit_pt(
+        block.text,
+        width_pt,
+        script,
+        height_pt=height_pt,
+    )
     start_size = max(6, int(round(base_size_pt)))
     for size in range(start_size, 5, -1):
         measured_width, measured_height = measure_text_dimensions(block.text, size, font_path)
@@ -177,13 +182,48 @@ def resolve_ocr_fit_max_size(
         return max_size
 
     width_pt = max(1.0, (block.bbox[2] - block.bbox[0]) * scale_x)
-    width_limit = width_pt * single_line_fit_width_ratio(script)
+    height_pt = max(1.0, (block.bbox[3] - block.bbox[1]) * scale_y)
+    width_limit = resolve_single_line_width_limit_pt(block.text, width_pt, script, height_pt=height_pt)
     size_cap = max(6, max_size)
     for size in range(size_cap, 5, -1):
         measured_width, measured_height = measure_text_dimensions(block.text, size, font_path)
         if measured_width <= width_limit and measured_height <= height_pt * 1.03:
             return size
     return min(base_size, max_size)
+
+
+def resolve_single_line_width_limit_pt(text: str, width_pt: float, script: str, *, height_pt: float) -> float:
+    ratio = single_line_fit_width_ratio(script)
+    if is_bracketed_ocr_label(text):
+        ratio = min(ratio, 0.87)
+    if is_tiny_latin_footer_label(text, script, width_pt, height_pt):
+        ratio = min(ratio, 0.90)
+    return width_pt * ratio
+
+
+def is_bracketed_ocr_label(text: str) -> bool:
+    stripped = text.strip()
+    if len(stripped) < 4 or len(stripped) > 12:
+        return False
+    bracket_pairs = {
+        "[": "]",
+        "(": ")",
+        "{": "}",
+        "【": "】",
+        "（": "）",
+        "［": "］",
+    }
+    closing = bracket_pairs.get(stripped[0])
+    return closing is not None and stripped.endswith(closing)
+
+
+def is_tiny_latin_footer_label(text: str, script: str, width_pt: float, height_pt: float) -> bool:
+    stripped = text.strip()
+    if script != "latin":
+        return False
+    if len(stripped) < 6 or len(stripped) > 16:
+        return False
+    return width_pt <= 100.0 and height_pt <= 16.0
 
 
 def bbox_to_shape_geometry(

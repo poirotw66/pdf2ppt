@@ -1736,6 +1736,36 @@ class FontSizingTests(unittest.TestCase):
         self.assertLess(resolved_size, 18.0)
         self.assertGreaterEqual(resolved_size, 6.0)
 
+    def test_resolve_fallback_font_size_pt_uses_tighter_limit_for_bracketed_label(self) -> None:
+        block = TextBlock(
+            id="ocr_fallback_font_2",
+            source="ocr",
+            bbox=(0, 0, 162.5, 38),
+            text="[加權準確率]",
+            confidence=0.9,
+            font_size=29,
+        )
+
+        resolved_size = resolve_fallback_font_size_pt(block, scale_x=1.0, scale_y=1.0)
+
+        self.assertLessEqual(resolved_size, 25.0)
+        self.assertGreaterEqual(resolved_size, 6.0)
+
+    def test_resolve_fallback_font_size_pt_uses_tighter_limit_for_tiny_latin_footer_label(self) -> None:
+        block = TextBlock(
+            id="ocr_fallback_font_3",
+            source="ocr",
+            bbox=(0, 0, 80.5, 13.5),
+            text="NotebookLM",
+            confidence=0.9,
+            font_size=13,
+        )
+
+        resolved_size = resolve_fallback_font_size_pt(block, scale_x=1.0, scale_y=1.0)
+
+        self.assertLessEqual(resolved_size, 11.0)
+        self.assertGreaterEqual(resolved_size, 6.0)
+
     @patch("pdf2ppt.ppt_render.fit_text_frame", return_value=True)
     @patch("pdf2ppt.ppt_render.resolve_fallback_font_size_pt", return_value=27.0)
     def test_add_text_block_clamps_oversized_fit_text_for_single_line_ocr(
@@ -1858,6 +1888,46 @@ class FontSizingTests(unittest.TestCase):
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         )
         self.assertLessEqual(measured_width, 120 * 0.96)
+
+    def test_resolve_ocr_fit_max_size_uses_tighter_limit_for_bracketed_label(self) -> None:
+        size = resolve_ocr_fit_max_size(
+            TextBlock(
+                id="ocr_width_2",
+                source="ocr",
+                bbox=(0, 0, 162.5, 38),
+                text="[加權準確率]",
+                confidence=0.9,
+                font_size=29,
+            ),
+            font_path="/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            base_size=29,
+            scale_x=1.0,
+            scale_y=1.0,
+            script="mixed",
+        )
+
+        self.assertLessEqual(size, 25)
+        self.assertGreaterEqual(size, 6)
+
+    def test_resolve_ocr_fit_max_size_uses_tighter_limit_for_tiny_latin_footer_label(self) -> None:
+        size = resolve_ocr_fit_max_size(
+            TextBlock(
+                id="ocr_width_3",
+                source="ocr",
+                bbox=(0, 0, 80.5, 13.5),
+                text="NotebookLM",
+                confidence=0.9,
+                font_size=13,
+            ),
+            font_path="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            base_size=13,
+            scale_x=1.0,
+            scale_y=1.0,
+            script="latin",
+        )
+
+        self.assertLessEqual(size, 11)
+        self.assertGreaterEqual(size, 6)
 
 
 class TextColorTests(unittest.TestCase):
