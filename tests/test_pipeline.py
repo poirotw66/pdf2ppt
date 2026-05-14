@@ -800,6 +800,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
                 edges,
                 component,
                 protected_line_mask=None,
+                protected_prefill_ring_mask=None,
                 kernel=kernel,
                 expand_kernel=expand_kernel,
                 gap_kernel=gap_kernel,
@@ -817,6 +818,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
                 edges,
                 component,
                 protected_line_mask=protected_line_mask,
+                protected_prefill_ring_mask=np.zeros((height, width), dtype=np.uint8),
                 kernel=kernel,
                 expand_kernel=expand_kernel,
                 gap_kernel=gap_kernel,
@@ -832,6 +834,66 @@ class OcrStyleOptimizationTests(unittest.TestCase):
         self.assertEqual(len(captured_overlaps), 2)
         self.assertGreater(captured_overlaps[0], 0)
         self.assertEqual(captured_overlaps[1], 0)
+
+    def test_resolve_component_background_patch_allows_relaxed_quadratic_for_wide_short_component(self) -> None:
+        width, height = 420, 160
+        source = np.full((height, width, 3), 180, dtype="uint8")
+        component = np.zeros((height, width), dtype="uint8")
+        component[70:118, 40:260] = 1
+        gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+        edges = np.zeros((height, width), dtype="uint8")
+        kernel = np.ones((17, 17), dtype=np.uint8)
+        expand_kernel = np.ones((5, 5), dtype=np.uint8)
+        gap_kernel = np.ones((13, 13), dtype=np.uint8)
+
+        expanded = cv2.dilate(component, expand_kernel, iterations=1)
+        context_component = cv2.dilate(expanded, gap_kernel, iterations=1)
+        ring_mask = cv2.dilate(context_component, kernel, iterations=1).astype(bool) & (~context_component.astype(bool))
+        ring_points = np.argwhere(ring_mask)
+        edge_count = max(1, int(round(float(np.count_nonzero(ring_mask)) * 0.02)))
+        edges[tuple(ring_points[:edge_count].T)] = 255
+
+        call_models: list[str] = []
+
+        def fake_fit_component_background_surface(
+            local_source: np.ndarray,
+            local_component: np.ndarray,
+            local_ring_mask: np.ndarray,
+            *,
+            context_dilate_px: int,
+            model: str,
+        ) -> tuple[int, int, int, int, np.ndarray, float] | None:
+            call_models.append(model)
+            patch_height, patch_width = local_component.shape
+            patch_values = np.full((patch_height, patch_width, 3), 180.0, dtype=np.float32)
+            return 0, 0, patch_width, patch_height, patch_values, 8.0
+
+        with patch(
+            "pdf2ppt.inpainting_engines._fit_component_background_surface",
+            side_effect=fake_fit_component_background_surface,
+        ):
+            expanded_component, resolved_patch = inpainting_engines._resolve_component_background_patch(
+                source,
+                gray,
+                edges,
+                component,
+                protected_line_mask=None,
+                protected_prefill_ring_mask=None,
+                kernel=kernel,
+                expand_kernel=expand_kernel,
+                gap_kernel=gap_kernel,
+                flat_background_std_threshold=4.0,
+                flat_background_edge_threshold=0.01,
+                context_dilate_px=8,
+                smooth_gradient_edge_threshold=0.015,
+                smooth_gradient_residual_threshold=16.0,
+                smooth_gradient_color_bias_max_delta=0.0,
+                smooth_gradient_color_bias_residual_scale=4.0,
+            )
+
+        self.assertIsNotNone(resolved_patch)
+        self.assertGreater(np.count_nonzero(expanded_component), 0)
+        self.assertEqual(call_models, ["quadratic"])
 
     def test_opencv_fast_groups_nearby_small_components_before_telea(self) -> None:
         width, height = 220, 160

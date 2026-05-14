@@ -22,6 +22,10 @@ DEFAULT_SMOOTH_GRADIENT_EDGE_THRESHOLD = 0.015
 DEFAULT_SMOOTH_GRADIENT_QUADRATIC_RESIDUAL_THRESHOLD = 16.0
 DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_MAX_DELTA = 0.0
 DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_RESIDUAL_SCALE = 4.0
+DEFAULT_RELAXED_QUADRATIC_EDGE_THRESHOLD = 0.03
+DEFAULT_RELAXED_QUADRATIC_MIN_WIDTH_PX = 120
+DEFAULT_RELAXED_QUADRATIC_MAX_HEIGHT_PX = 72
+DEFAULT_RELAXED_QUADRATIC_MIN_ASPECT_RATIO = 3.0
 DEFAULT_TELEA_RADIUS_MIN_SCALE = 0.6
 DEFAULT_TELEA_RADIUS_MAX_SCALE = 2.5
 DEFAULT_TELEA_RADIUS_REFERENCE_SPAN_PX = 48.0
@@ -893,6 +897,10 @@ def _resolve_component_background_patch(
     context_values = gray[ring_mask]
     luma_std = float(np.std(context_values))
     edge_density = float(np.count_nonzero(edges[ring_mask])) / float(ring_pixel_count)
+    component_points = cv2.findNonZero(expanded_component)
+    if component_points is None:
+        return expanded_component, None
+    _, _, component_width, component_height = cv2.boundingRect(component_points)
     patch = None
     patch_model: str | None = None
     if luma_std <= flat_background_std_threshold and edge_density <= flat_background_edge_threshold:
@@ -916,12 +924,28 @@ def _resolve_component_background_patch(
             patch = None
         else:
             patch_model = "quadratic"
+    elif _should_try_relaxed_quadratic_prefill(
+        width=component_width,
+        height=component_height,
+        edge_density=edge_density,
+    ):
+        patch = _fit_component_background_surface(
+            source,
+            expanded_component,
+            ring_mask,
+            context_dilate_px=context_dilate_px,
+            model="quadratic",
+        )
+        if patch is not None and patch[-1] > smooth_gradient_residual_threshold:
+            patch = None
+        else:
+            patch_model = "quadratic-relaxed"
 
     if patch is None:
         return expanded_component, None
 
     x0, y0, x1, y1, patch_values, patch_residual = patch
-    if patch_model == "quadratic" and smooth_gradient_color_bias_max_delta > 0.0:
+    if patch_model in {"quadratic", "quadratic-relaxed"} and smooth_gradient_color_bias_max_delta > 0.0:
         local_ring = ring_mask[y0:y1, x0:x1]
         source_patch = source[y0:y1, x0:x1]
         local_component_mask = expanded_component[y0:y1, x0:x1].astype(bool)
@@ -938,6 +962,16 @@ def _resolve_component_background_patch(
         )
         patch = (x0, y0, x1, y1, patch_values, patch_residual)
     return expanded_component, patch
+
+
+def _should_try_relaxed_quadratic_prefill(*, width: int, height: int, edge_density: float) -> bool:
+    if width < DEFAULT_RELAXED_QUADRATIC_MIN_WIDTH_PX:
+        return False
+    if height > DEFAULT_RELAXED_QUADRATIC_MAX_HEIGHT_PX:
+        return False
+    if width / max(1.0, float(height)) < DEFAULT_RELAXED_QUADRATIC_MIN_ASPECT_RATIO:
+        return False
+    return edge_density <= DEFAULT_RELAXED_QUADRATIC_EDGE_THRESHOLD
 
 
 def _fit_component_background_surface(
