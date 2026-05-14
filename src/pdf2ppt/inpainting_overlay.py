@@ -45,11 +45,12 @@ TARGETED_FILE_BACK_LUMA_SPAN_MAX_SCALE = 1.4
 TARGETED_FILE_BACK_LUMA_DETAIL_MAX_SCALE = 2.5
 TARGETED_FOOTER_LABEL_CONTEXT_GAP_PX = 2
 TARGETED_FOOTER_LABEL_CONTEXT_DILATE_PX = 8
+TARGETED_FOOTER_LABEL_BROAD_CONTEXT_DILATE_PX = 24
 TARGETED_FOOTER_LABEL_CROP_PADDING_PX = 20
-TARGETED_FOOTER_LABEL_LUMA_MAX_DELTA = 28.0
-TARGETED_FOOTER_LABEL_CHROMA_MAX_DELTA = 8.0
 TARGETED_FOOTER_LABEL_BLEND_SIGMA = 1.4
 TARGETED_FOOTER_LABEL_BLEND_GAIN = 1.6
+TARGETED_FOOTER_LABEL_MAX_BROAD_LIFT = 14.0
+TARGETED_FOOTER_LABEL_BROAD_TARGET_PERCENTILE = 85.0
 FOOTER_BLEED_RESTORE_SOURCE_MIN_GRAY = 160
 FOOTER_BLEED_RESTORE_RENDERED_DELTA = 18
 FOOTER_BLEED_RESTORE_MIN_RATIO = 0.45
@@ -576,6 +577,12 @@ def _apply_targeted_footer_label_color_correction(
     corrected_rgb = np.array(repaired_image.convert("RGB"), dtype=np.uint8, copy=True)
     debug_images: dict[str, Image.Image] = {}
     notes: list[str] = []
+    shared_target_rgb = _resolve_shared_footer_label_target_rgb(
+        source_rgb,
+        page_image.size,
+        target_blocks,
+        page_rect,
+    )
 
     for index, block in enumerate(target_blocks, start=1):
         block_mask_image = build_text_mask_image(
@@ -600,25 +607,40 @@ def _apply_targeted_footer_label_color_correction(
             (TARGETED_FOOTER_LABEL_CONTEXT_DILATE_PX * 2 + 1, TARGETED_FOOTER_LABEL_CONTEXT_DILATE_PX * 2 + 1),
             dtype=np.uint8,
         )
+        broad_context_kernel = np.ones(
+            (TARGETED_FOOTER_LABEL_BROAD_CONTEXT_DILATE_PX * 2 + 1, TARGETED_FOOTER_LABEL_BROAD_CONTEXT_DILATE_PX * 2 + 1),
+            dtype=np.uint8,
+        )
         inner = cv2.dilate(block_mask.astype(np.uint8), gap_kernel, iterations=1)
         outer = cv2.dilate(inner, context_kernel, iterations=1)
         ring_mask = (outer > 0) & (inner == 0)
         if int(np.count_nonzero(ring_mask)) < 64:
             continue
+        broad_outer = cv2.dilate(inner, broad_context_kernel, iterations=1)
+        broad_ring_mask = (broad_outer > 0) & (outer == 0)
 
         x0, y0, x1, y1 = crop_box
         local_component = block_mask[y0:y1, x0:x1]
         local_ring = ring_mask[y0:y1, x0:x1]
+        local_broad_ring = broad_ring_mask[y0:y1, x0:x1]
         if not np.any(local_component) or not np.any(local_ring):
             continue
 
         source_crop = source_rgb[y0:y1, x0:x1]
         repaired_crop = corrected_rgb[y0:y1, x0:x1].copy()
+        target_rgb = shared_target_rgb
+        broad_lift = 0.0
+        if target_rgb is None:
+            target_rgb, broad_lift = _resolve_footer_label_target_rgb(
+                source_crop,
+                local_ring,
+                local_broad_ring,
+                max_broad_lift=TARGETED_FOOTER_LABEL_MAX_BROAD_LIFT,
+            )
         corrected_crop, delta_rgb = _blend_local_component_toward_ring(
-            source_crop,
+            target_rgb,
             repaired_crop,
             local_component,
-            local_ring,
             blend_sigma=TARGETED_FOOTER_LABEL_BLEND_SIGMA,
             blend_gain=TARGETED_FOOTER_LABEL_BLEND_GAIN,
         )
@@ -629,12 +651,65 @@ def _apply_targeted_footer_label_color_correction(
         debug_images[f"{suffix}_mask"] = Image.fromarray((local_component.astype(np.uint8) * 255), mode="L")
         notes.append(
             f"Applied footer label flat tone correction to '{block.text}' "
-            f"(dR {delta_rgb[0]:.1f}, dG {delta_rgb[1]:.1f}, dB {delta_rgb[2]:.1f})."
+            f"(dR {delta_rgb[0]:.1f}, dG {delta_rgb[1]:.1f}, dB {delta_rgb[2]:.1f}, broad lift {broad_lift:.1f})."
         )
 
     if not notes:
         return repaired_image.convert("RGB"), {}, None
     return Image.fromarray(corrected_rgb, mode="RGB"), debug_images, " ".join(notes)
+
+
+def _resolve_shared_footer_label_target_rgb(
+    source_rgb: np.ndarray,
+    image_size: tuple[int, int],
+    target_blocks: list[TextBlock],
+    page_rect: fitz.Rect,
+) -> np.ndarray | None:
+    target_samples: list[np.ndarray] = []
+    for block in target_blocks:
+        block_mask_image = build_text_mask_image(
+            [block],
+            image_size,
+            page_rect,
+            padding_px=0,
+        )
+        crop_box = compute_mask_crop_box(block_mask_image, padding_px=TARGETED_FOOTER_LABEL_CROP_PADDING_PX)
+        if crop_box is None:
+            continue
+        block_mask = np.array(block_mask_image.convert("L"), dtype=np.uint8) > 0
+        if not np.any(block_mask):
+            continue
+        gap_kernel = np.ones(
+            (TARGETED_FOOTER_LABEL_CONTEXT_GAP_PX * 2 + 1, TARGETED_FOOTER_LABEL_CONTEXT_GAP_PX * 2 + 1),
+            dtype=np.uint8,
+        )
+        context_kernel = np.ones(
+            (TARGETED_FOOTER_LABEL_CONTEXT_DILATE_PX * 2 + 1, TARGETED_FOOTER_LABEL_CONTEXT_DILATE_PX * 2 + 1),
+            dtype=np.uint8,
+        )
+        broad_context_kernel = np.ones(
+            (TARGETED_FOOTER_LABEL_BROAD_CONTEXT_DILATE_PX * 2 + 1, TARGETED_FOOTER_LABEL_BROAD_CONTEXT_DILATE_PX * 2 + 1),
+            dtype=np.uint8,
+        )
+        inner = cv2.dilate(block_mask.astype(np.uint8), gap_kernel, iterations=1)
+        outer = cv2.dilate(inner, context_kernel, iterations=1)
+        broad_outer = cv2.dilate(inner, broad_context_kernel, iterations=1)
+        broad_ring_mask = (broad_outer > 0) & (outer == 0)
+        x0, y0, x1, y1 = crop_box
+        local_broad_ring = broad_ring_mask[y0:y1, x0:x1]
+        if not np.any(local_broad_ring):
+            continue
+        source_crop = source_rgb[y0:y1, x0:x1]
+        target_samples.append(
+            np.percentile(
+                source_crop[local_broad_ring].astype(np.float32),
+                TARGETED_FOOTER_LABEL_BROAD_TARGET_PERCENTILE,
+                axis=0,
+            )
+        )
+    if not target_samples:
+        return None
+    return np.mean(np.stack(target_samples, axis=0), axis=0).astype(np.float32)
 
 
 def _is_footer_label_color_correction_candidate(block: TextBlock, *, page_rect: fitz.Rect) -> bool:
@@ -650,24 +725,48 @@ def _is_footer_label_color_correction_candidate(block: TextBlock, *, page_rect: 
 
 
 def _blend_local_component_toward_ring(
-    source_crop: np.ndarray,
+    target_rgb: np.ndarray,
     repaired_crop: np.ndarray,
     local_component: np.ndarray,
-    local_ring: np.ndarray,
     *,
     blend_sigma: float,
     blend_gain: float,
 ) -> tuple[np.ndarray, tuple[float, float, float]]:
-    if not np.any(local_component) or not np.any(local_ring):
+    if not np.any(local_component):
         return repaired_crop, (0.0, 0.0, 0.0)
-    ring_mean = source_crop[local_ring].astype(np.float32).mean(axis=0)
     component_mean = repaired_crop[local_component].astype(np.float32).mean(axis=0)
     alpha = cv2.GaussianBlur(local_component.astype(np.float32), (0, 0), sigmaX=blend_sigma, sigmaY=blend_sigma)
     alpha = np.clip(alpha * blend_gain, 0.0, 1.0)[..., None]
     corrected = repaired_crop.astype(np.float32)
-    corrected = corrected * (1.0 - alpha) + ring_mean[None, None, :] * alpha
-    delta = tuple(float(ring_mean[index] - component_mean[index]) for index in range(3))
+    corrected = corrected * (1.0 - alpha) + target_rgb[None, None, :] * alpha
+    delta = tuple(float(target_rgb[index] - component_mean[index]) for index in range(3))
     return np.clip(corrected, 0.0, 255.0).astype(np.uint8), delta
+
+
+def _resolve_footer_label_target_rgb(
+    source_crop: np.ndarray,
+    local_ring: np.ndarray,
+    local_broad_ring: np.ndarray,
+    *,
+    max_broad_lift: float,
+) -> tuple[np.ndarray, float]:
+    near_mean = source_crop[local_ring].astype(np.float32).mean(axis=0)
+    if not np.any(local_broad_ring):
+        return near_mean, 0.0
+    broad_target = np.percentile(
+        source_crop[local_broad_ring].astype(np.float32),
+        TARGETED_FOOTER_LABEL_BROAD_TARGET_PERCENTILE,
+        axis=0,
+    )
+    near_luma = float(np.mean(near_mean))
+    broad_luma = float(np.mean(broad_target))
+    requested_lift = max(0.0, broad_luma - near_luma)
+    if requested_lift <= 0.0:
+        return near_mean, 0.0
+    applied_lift = min(requested_lift, max_broad_lift)
+    blend = applied_lift / requested_lift
+    target_rgb = near_mean + (broad_target - near_mean) * blend
+    return target_rgb.astype(np.float32), applied_lift
 
 
 def _align_local_luminance_and_chroma_to_ring(

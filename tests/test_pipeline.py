@@ -1423,10 +1423,18 @@ class OcrStyleOptimizationTests(unittest.TestCase):
     def test_apply_targeted_footer_label_color_correction_reduces_mask_ring_gap(self) -> None:
         width, height = 320, 180
         base = np.full((height, width, 3), 238, dtype=np.uint8)
-        repaired = base.copy().astype(np.float32)
-        repaired[136:176, 68:248] -= 26.0
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillConvexPoly(mask, np.array([[68, 138], [248, 136], [246, 176], [70, 174]], dtype=np.int32), 1)
+        inner = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+        near_outer = cv2.dilate(inner.astype(np.uint8), np.ones((17, 17), np.uint8), iterations=1).astype(bool)
+        near_ring = near_outer & (~inner)
+        base_with_halo = base.copy().astype(np.float32)
+        base_with_halo[near_ring] -= 14.0
+        base_with_halo = np.clip(base_with_halo, 0, 255).astype(np.uint8)
+        repaired = base_with_halo.copy().astype(np.float32)
+        repaired[mask.astype(bool)] -= 24.0
         repaired = np.clip(repaired, 0, 255).astype(np.uint8)
-        page_image = Image.fromarray(base, mode="RGB")
+        page_image = Image.fromarray(base_with_halo, mode="RGB")
         repaired_image = Image.fromarray(repaired, mode="RGB")
         block = TextBlock(
             id="ocr_footer_label",
@@ -1454,21 +1462,138 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             options=options,
         )
 
-        mask = np.zeros((height, width), dtype=np.uint8)
-        cv2.fillConvexPoly(mask, np.array([[68, 138], [248, 136], [246, 176], [70, 174]], dtype=np.int32), 1)
-        inner = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1).astype(bool)
         outer = cv2.dilate(inner.astype(np.uint8), np.ones((17, 17), np.uint8), iterations=1).astype(bool)
         ring = outer & (~inner)
+        broad_outer = cv2.dilate(inner.astype(np.uint8), np.ones((49, 49), np.uint8), iterations=1).astype(bool)
+        broad_ring = broad_outer & (~outer)
         repaired_arr = np.array(repaired_image, dtype=np.uint8)
         corrected_arr = np.array(corrected_image, dtype=np.uint8)
-        ring_mean = base[ring].astype(np.float32).mean(axis=0)
-        repaired_gap = np.abs(repaired_arr[mask.astype(bool)].astype(np.float32).mean(axis=0) - ring_mean).mean()
-        corrected_gap = np.abs(corrected_arr[mask.astype(bool)].astype(np.float32).mean(axis=0) - ring_mean).mean()
+        broad_mean = base_with_halo[broad_ring].astype(np.float32).mean(axis=0)
+        repaired_broad_gap = np.abs(repaired_arr[mask.astype(bool)].astype(np.float32).mean(axis=0) - broad_mean).mean()
+        corrected_broad_gap = np.abs(corrected_arr[mask.astype(bool)].astype(np.float32).mean(axis=0) - broad_mean).mean()
 
-        self.assertLess(corrected_gap, repaired_gap)
+        self.assertLess(corrected_broad_gap, repaired_broad_gap)
+        self.assertIn("broad lift", (note or "").lower())
         self.assertIn("footer label flat tone correction", (note or "").lower())
         self.assertIn("footer_label_01_corrected", debug_images)
         self.assertIn("footer_label_01_mask", debug_images)
+
+    def test_apply_targeted_footer_label_color_correction_uses_shared_footer_target(self) -> None:
+        width, height = 520, 180
+        base = np.full((height, width, 3), 238, dtype=np.uint8)
+        left_mask = np.zeros((height, width), dtype=np.uint8)
+        right_mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillConvexPoly(left_mask, np.array([[28, 138], [208, 136], [206, 176], [30, 174]], dtype=np.int32), 1)
+        cv2.fillConvexPoly(right_mask, np.array([[288, 138], [468, 136], [466, 176], [290, 174]], dtype=np.int32), 1)
+        union_mask = (left_mask | right_mask).astype(np.uint8)
+        inner = cv2.dilate(union_mask, np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+        near_outer = cv2.dilate(inner.astype(np.uint8), np.ones((17, 17), np.uint8), iterations=1).astype(bool)
+        base_with_halo = base.copy().astype(np.float32)
+        base_with_halo[:, :260] -= np.array([18.0, 18.0, 18.0], dtype=np.float32)
+        base_with_halo = np.clip(base_with_halo, 0, 255).astype(np.uint8)
+        repaired = base_with_halo.copy().astype(np.float32)
+        repaired[left_mask.astype(bool)] -= 18.0
+        repaired[right_mask.astype(bool)] -= 18.0
+        repaired = np.clip(repaired, 0, 255).astype(np.uint8)
+        page_image = Image.fromarray(base_with_halo, mode="RGB")
+        repaired_image = Image.fromarray(repaired, mode="RGB")
+        left_block = TextBlock(
+            id="ocr_footer_label_left",
+            source="ocr",
+            bbox=(28.0, 136.0, 208.0, 176.0),
+            text="高頻FAQ(98.8%)",
+            confidence=0.95,
+            block_role="body",
+            image_bbox=(28.0, 136.0, 208.0, 176.0),
+            image_polygon=((28.0, 138.0), (208.0, 136.0), (206.0, 176.0), (30.0, 174.0)),
+        )
+        right_block = TextBlock(
+            id="ocr_footer_label_right",
+            source="ocr",
+            bbox=(288.0, 136.0, 468.0, 176.0),
+            text="邊界題 (86.7%)",
+            confidence=0.95,
+            block_role="body",
+            image_bbox=(288.0, 136.0, 468.0, 176.0),
+            image_polygon=((288.0, 138.0), (468.0, 136.0), (466.0, 176.0), (290.0, 174.0)),
+        )
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="opencv-fast",
+            inpaint_padding_px=0,
+        )
+
+        corrected_image, _debug_images, note = _apply_targeted_footer_label_color_correction(
+            page_image,
+            repaired_image,
+            [left_block, right_block],
+            fitz.Rect(0, 0, width, height),
+            options=options,
+        )
+
+        corrected_arr = np.array(corrected_image, dtype=np.uint8)
+        left_mean = corrected_arr[left_mask.astype(bool)].astype(np.float32).mean(axis=0)
+        right_mean = corrected_arr[right_mask.astype(bool)].astype(np.float32).mean(axis=0)
+
+        self.assertLess(np.abs(left_mean - right_mean).mean(), 1.0)
+        self.assertIn("footer label flat tone correction", (note or "").lower())
+
+    def test_apply_targeted_footer_label_color_correction_prefers_bright_background_percentile(self) -> None:
+        width, height = 320, 180
+        base = np.full((height, width, 3), 238, dtype=np.uint8)
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillConvexPoly(mask, np.array([[68, 138], [248, 136], [246, 176], [70, 174]], dtype=np.int32), 1)
+        inner = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+        near_outer = cv2.dilate(inner.astype(np.uint8), np.ones((17, 17), np.uint8), iterations=1).astype(bool)
+        broad_outer = cv2.dilate(inner.astype(np.uint8), np.ones((49, 49), np.uint8), iterations=1).astype(bool)
+        broad_ring = broad_outer & (~near_outer)
+        page = base.copy().astype(np.float32)
+        page[near_outer & (~inner)] -= 16.0
+        bright_ring = broad_ring.copy()
+        bright_ring[:, :80] = False
+        page[broad_ring] = 228.0
+        page[bright_ring] = 242.0
+        page = np.clip(page, 0, 255).astype(np.uint8)
+        repaired = page.copy().astype(np.float32)
+        repaired[mask.astype(bool)] -= 20.0
+        repaired = np.clip(repaired, 0, 255).astype(np.uint8)
+
+        corrected_image, _debug_images, _note = _apply_targeted_footer_label_color_correction(
+            Image.fromarray(page, mode="RGB"),
+            Image.fromarray(repaired, mode="RGB"),
+            [
+                TextBlock(
+                    id="ocr_footer_label",
+                    source="ocr",
+                    bbox=(68.0, 136.0, 248.0, 176.0),
+                    text="同義改寫 (100%)",
+                    confidence=0.95,
+                    block_role="body",
+                    image_bbox=(68.0, 136.0, 248.0, 176.0),
+                    image_polygon=((68.0, 138.0), (248.0, 136.0), (246.0, 176.0), (70.0, 174.0)),
+                )
+            ],
+            fitz.Rect(0, 0, width, height),
+            options=ConversionOptions(
+                input_path=Path("input.pdf"),
+                output_path=Path("output.pptx"),
+                report_path=Path("output.report.json"),
+                inpaint_engine="opencv-fast",
+                inpaint_padding_px=0,
+            ),
+        )
+
+        corrected_arr = np.array(corrected_image, dtype=np.uint8)
+        corrected_mean = corrected_arr[mask.astype(bool)].astype(np.float32).mean(axis=0)
+        broad_mean = page[broad_ring].astype(np.float32).mean(axis=0)
+        broad_p85 = np.percentile(page[broad_ring].astype(np.float32), 85, axis=0)
+
+        self.assertLess(
+            np.abs(corrected_mean - broad_p85).mean(),
+            np.abs(corrected_mean - broad_mean).mean(),
+        )
 
 class AnalyzePagePerformanceTests(unittest.TestCase):
     @patch("pdf2ppt.pipeline.extract_image_elements", return_value=[])
