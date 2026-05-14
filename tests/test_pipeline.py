@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pptx.util import Pt
 
 import pdf2ppt.inpainting_engines as inpainting_engines
+import pdf2ppt.inpainting_masks as inpainting_masks
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line, main
 from pdf2ppt.inpainting_overlay import (
     _apply_targeted_file_back_color_correction,
@@ -351,19 +352,20 @@ class BackgroundModeTests(unittest.TestCase):
 
     def test_render_overlay_background_emits_mask_debug_images(self) -> None:
         image = Image.new("RGB", (80, 80), color=(255, 255, 255))
-        draw = ImageDraw.Draw(image)
-        draw.line((20, 20, 60, 20), fill=(90, 90, 90), width=2)
-        draw.line((20, 20, 20, 50), fill=(90, 90, 90), width=2)
         blocks = [
             TextBlock(
                 id="ocr_debug_masks",
                 source="ocr",
-                bbox=(20, 20, 60, 40),
+                bbox=(20, 20, 60, 60),
                 text="demo",
                 confidence=0.9,
-                image_bbox=(20, 20, 60, 40),
+                image_bbox=(20, 20, 60, 60),
             )
         ]
+        horizontal = np.zeros((80, 80), dtype=bool)
+        vertical = np.zeros((80, 80), dtype=bool)
+        horizontal[38:41, 12:68] = True
+        vertical[12:68, 38:41] = True
         options = ConversionOptions(
             input_path=Path("input.pdf"),
             output_path=Path("output.pptx"),
@@ -373,7 +375,8 @@ class BackgroundModeTests(unittest.TestCase):
             inpaint_max_area_ratio=0.2,
         )
 
-        result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 80, 80), options=options)
+        with patch.object(inpainting_masks, "_detect_table_line_orientation_masks", return_value=(horizontal, vertical)):
+            result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 80, 80), options=options)
 
         self.assertIn("raw_mask", result.debug_images)
         self.assertIn("refined_mask", result.debug_images)
@@ -406,6 +409,38 @@ class BackgroundModeTests(unittest.TestCase):
         )
 
         result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 80, 80), options=options)
+
+        self.assertIn("table_line_mask", result.debug_images)
+        self.assertIn("grid_line_mask", result.debug_images)
+        self.assertNotIn("protected_line_mask", result.debug_images)
+
+    def test_render_overlay_background_skips_protected_line_mask_for_text_overlapping_false_grid(self) -> None:
+        image = Image.new("RGB", (100, 100), color=(255, 255, 255))
+        blocks = [
+            TextBlock(
+                id="ocr_false_grid_guard",
+                source="ocr",
+                bbox=(20, 20, 80, 80),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 20, 80, 80),
+            )
+        ]
+        horizontal = np.zeros((100, 100), dtype=bool)
+        vertical = np.zeros((100, 100), dtype=bool)
+        horizontal[48:51, 22:79] = True
+        vertical[22:79, 48:51] = True
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="opencv-fast",
+            inpaint_padding_px=4,
+            inpaint_max_area_ratio=0.2,
+        )
+
+        with patch.object(inpainting_masks, "_detect_table_line_orientation_masks", return_value=(horizontal, vertical)):
+            result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 100, 100), options=options)
 
         self.assertIn("table_line_mask", result.debug_images)
         self.assertIn("grid_line_mask", result.debug_images)
@@ -467,17 +502,18 @@ class BackgroundModeTests(unittest.TestCase):
         width, height = 220, 140
         source = np.full((height, width, 3), 240, dtype=np.uint8)
         rendered = np.full((height, width, 3), 240, dtype=np.uint8)
-        source[102:106, 30:190] = 96
+        source[132:136, 30:190] = 96
         protected_line_mask = np.zeros((height, width), dtype=bool)
-        protected_line_mask[100:102, 104:114] = True
-        source[100:102, 104:114] = 72
-        rendered[102:106, 30:190] = 240
+        protected_line_mask[128:130, 104:114] = True
+        source[128:130, 104:114] = 72
+        rendered[132:136, 30:190] = 240
         block = TextBlock(
             id="ocr_footer_1",
             source="ocr",
-            bbox=(30.0, 60.0, 190.0, 100.0),
+            bbox=(30.0, 90.0, 190.0, 130.0),
             text="高頻FAQ(98.8%)",
             confidence=0.99,
+            block_role="body",
         )
 
         restored = _restore_protected_table_lines(
@@ -490,7 +526,65 @@ class BackgroundModeTests(unittest.TestCase):
 
         restored_array = np.array(restored, dtype=np.int16)
         source_array = source.astype(np.int16)
-        self.assertLess(np.abs(restored_array[102:106, 50:170] - source_array[102:106, 50:170]).mean(), 1.0)
+        self.assertLess(np.abs(restored_array[132:136, 50:170] - source_array[132:136, 50:170]).mean(), 1.0)
+
+    def test_restore_protected_table_lines_skips_non_footer_body_blocks_for_footer_border_restore(self) -> None:
+        width, height = 220, 140
+        source = np.full((height, width, 3), 240, dtype=np.uint8)
+        rendered = np.full((height, width, 3), 240, dtype=np.uint8)
+        source[108:112, 30:190] = 96
+        protected_line_mask = np.zeros((height, width), dtype=bool)
+        protected_line_mask[100:102, 104:114] = True
+        source[100:102, 104:114] = 72
+        rendered[108:112, 30:190] = 240
+        block = TextBlock(
+            id="ocr_body_midpage_guard_1",
+            source="ocr",
+            bbox=(30.0, 60.0, 190.0, 100.0),
+            text="Mid-page label",
+            confidence=0.99,
+            block_role="body",
+        )
+
+        restored = _restore_protected_table_lines(
+            Image.fromarray(source, mode="RGB"),
+            Image.fromarray(rendered, mode="RGB"),
+            protected_line_mask,
+            text_blocks=[block],
+            page_rect=fitz.Rect(0, 0, width, height),
+        )
+
+        restored_array = np.array(restored, dtype=np.int16)
+        self.assertGreater(restored_array[108:112, 50:170].mean(), 230.0)
+
+    def test_restore_protected_table_lines_skips_title_blocks_for_footer_border_restore(self) -> None:
+        width, height = 220, 140
+        source = np.full((height, width, 3), 240, dtype=np.uint8)
+        rendered = np.full((height, width, 3), 240, dtype=np.uint8)
+        source[52:56, 30:190] = 96
+        protected_line_mask = np.zeros((height, width), dtype=bool)
+        protected_line_mask[30:32, 104:114] = True
+        source[30:32, 104:114] = 72
+        rendered[52:56, 30:190] = 240
+        block = TextBlock(
+            id="ocr_title_footer_guard_1",
+            source="ocr",
+            bbox=(30.0, 10.0, 190.0, 50.0),
+            text="Main Title",
+            confidence=0.99,
+            block_role="title",
+        )
+
+        restored = _restore_protected_table_lines(
+            Image.fromarray(source, mode="RGB"),
+            Image.fromarray(rendered, mode="RGB"),
+            protected_line_mask,
+            text_blocks=[block],
+            page_rect=fitz.Rect(0, 0, width, height),
+        )
+
+        restored_array = np.array(restored, dtype=np.int16)
+        self.assertGreater(restored_array[52:56, 50:170].mean(), 230.0)
 
     def test_render_overlay_background_auto_falls_back_to_white_box_for_large_mask(self) -> None:
         grid_y, grid_x = np.indices((40, 60), dtype=np.uint8)

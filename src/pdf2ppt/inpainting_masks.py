@@ -18,6 +18,9 @@ DEFAULT_LOW_TEXTURE_MIN_CONTEXT_PIXELS = 64
 DEFAULT_TABLE_LINE_MIN_KERNEL_PX = 12
 DEFAULT_TABLE_LINE_SHRINK_KERNEL_PX = 3
 DEFAULT_TABLE_LINE_BOUNDARY_BAND_PX = 5
+DEFAULT_TABLE_LINE_MAX_TEXT_OVERLAP_RATIO = 0.85
+DEFAULT_TABLE_LINE_MIN_OUTSIDE_PIXELS = 12
+DEFAULT_TABLE_LINE_MIN_OUTSIDE_RATIO = 0.08
 
 
 @dataclass(slots=True)
@@ -103,7 +106,11 @@ def build_refined_text_mask_for_inpainting(
             grid_line_mask_image=None,
         )
 
+    ocr_base_mask_image = build_text_mask_image(ocr_blocks, image_size, page_rect, padding_px=0)
+    ocr_base_mask = np.array(ocr_base_mask_image, dtype=np.uint8) > 0
     horizontal_line_mask, vertical_line_mask = _detect_table_line_orientation_masks(page_image)
+    horizontal_line_mask = _filter_text_overlapping_line_components(horizontal_line_mask, ocr_base_mask)
+    vertical_line_mask = _filter_text_overlapping_line_components(vertical_line_mask, ocr_base_mask)
     table_line_mask = horizontal_line_mask | vertical_line_mask
     table_line_mask_image = Image.fromarray((table_line_mask.astype(np.uint8) * 255), mode="L")
     grid_line_mask = _build_grid_line_mask(horizontal_line_mask, vertical_line_mask)
@@ -125,8 +132,6 @@ def build_refined_text_mask_for_inpainting(
     )
     ocr_vicinity = np.array(ocr_vicinity_image, dtype=np.uint8) > 0
     padded_fringe = (refined_mask_array > 0) & ~(base_mask_array > 0)
-    ocr_base_mask_image = build_text_mask_image(ocr_blocks, image_size, page_rect, padding_px=0)
-    ocr_base_mask = np.array(ocr_base_mask_image, dtype=np.uint8) > 0
     ocr_boundary_band = _build_mask_boundary_band(ocr_base_mask, band_px=DEFAULT_TABLE_LINE_BOUNDARY_BAND_PX)
 
     line_vicinity = cv2.dilate(table_line_mask.astype(np.uint8), np.ones((3, 3), dtype=np.uint8), iterations=1) > 0
@@ -215,6 +220,38 @@ def _filter_line_components(line_mask: np.ndarray, *, orientation: str, min_span
             if height < min_span_px or height < width * 4:
                 continue
         filtered[component.astype(bool)] = 255
+    return filtered
+
+
+def _filter_text_overlapping_line_components(
+    line_mask: np.ndarray,
+    text_mask: np.ndarray,
+    *,
+    max_text_overlap_ratio: float = DEFAULT_TABLE_LINE_MAX_TEXT_OVERLAP_RATIO,
+    min_outside_pixels: int = DEFAULT_TABLE_LINE_MIN_OUTSIDE_PIXELS,
+    min_outside_ratio: float = DEFAULT_TABLE_LINE_MIN_OUTSIDE_RATIO,
+) -> np.ndarray:
+    if not np.any(line_mask) or not np.any(text_mask):
+        return line_mask
+
+    component_mask = (line_mask > 0).astype(np.uint8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    if component_count <= 1:
+        return line_mask
+
+    filtered = np.zeros_like(line_mask)
+    text_mask = text_mask.astype(bool)
+    for component_index, stat in enumerate(stats[1:], start=1):
+        area = int(stat[cv2.CC_STAT_AREA])
+        if area <= 0:
+            continue
+        component = labels == component_index
+        overlap = int(np.count_nonzero(component & text_mask))
+        outside = area - overlap
+        outside_floor = max(min_outside_pixels, int(np.ceil(area * min_outside_ratio)))
+        if overlap / float(area) > max_text_overlap_ratio and outside < outside_floor:
+            continue
+        filtered[component] = 255
     return filtered
 
 

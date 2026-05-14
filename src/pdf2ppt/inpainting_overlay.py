@@ -266,7 +266,7 @@ def _build_footer_bottom_border_restore_mask(
     scale_y = image_height / max(1.0, float(page_rect.height))
 
     for block in text_blocks:
-        if block.source != "ocr" or "\n" in block.text:
+        if not _is_footer_border_restore_candidate(block, page_rect=page_rect):
             continue
         width_pt = block.bbox[2] - block.bbox[0]
         height_pt = block.bbox[3] - block.bbox[1]
@@ -303,6 +303,14 @@ def _build_footer_bottom_border_restore_mask(
             restore_mask |= candidate_mask
 
     return restore_mask
+
+
+def _is_footer_border_restore_candidate(block: TextBlock, *, page_rect: fitz.Rect) -> bool:
+    if block.source != "ocr" or "\n" in block.text:
+        return False
+    if block.block_role != "body":
+        return False
+    return block.bbox[3] >= float(page_rect.height) * 0.85
 
 
 def _apply_targeted_file_back_color_correction(
