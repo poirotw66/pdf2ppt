@@ -58,6 +58,10 @@ class BackgroundInpaintingEngine:
     def last_debug_note(self) -> str | None:
         return None
 
+    @property
+    def last_debug_images(self) -> dict[str, Image.Image]:
+        return {}
+
 
 class WhiteBoxInpaintingEngine(BackgroundInpaintingEngine):
     name = "white-box"
@@ -118,10 +122,15 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         self.telea_group_proximity_max_scale = max(self.telea_group_proximity_min_scale, telea_group_proximity_max_scale)
         self._last_debug_note: str | None = None
         self._protected_line_mask: np.ndarray | None = None
+        self._last_debug_images: dict[str, Image.Image] = {}
 
     @property
     def last_debug_note(self) -> str | None:
         return self._last_debug_note
+
+    @property
+    def last_debug_images(self) -> dict[str, Image.Image]:
+        return self._last_debug_images
 
     def set_protected_line_mask(self, protected_line_mask: np.ndarray | None) -> None:
         if protected_line_mask is None:
@@ -131,14 +140,17 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
 
     def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
         self._last_debug_note = None
+        self._last_debug_images = {}
         mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
         if np.count_nonzero(mask_array) == 0:
             return page_image.convert("RGB").copy()
         source = cv2.cvtColor(np.array(page_image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        protected_prefill_ring_mask = np.zeros(mask_array.shape, dtype=np.uint8)
         prefilled_source, residual_mask = _prefill_low_texture_regions(
             source,
             mask_array,
             protected_line_mask=self._protected_line_mask,
+            protected_prefill_ring_mask=protected_prefill_ring_mask,
             flat_background_std_threshold=self.flat_background_std_threshold,
             flat_background_edge_threshold=self.flat_background_edge_threshold,
             context_dilate_px=self.context_dilate_px,
@@ -189,6 +201,8 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
         if restored_line_pixels > 0:
             line_note = f"Structural line restore pixels: {restored_line_pixels}."
             self._last_debug_note = f"{self._last_debug_note} {line_note}" if self._last_debug_note else line_note
+        if np.any(protected_prefill_ring_mask):
+            self._last_debug_images["protected_prefill_ring_mask"] = Image.fromarray(protected_prefill_ring_mask, mode="L")
         return Image.fromarray(cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB))
 
 
@@ -197,6 +211,7 @@ def _prefill_low_texture_regions(
     mask_array: np.ndarray,
     *,
     protected_line_mask: np.ndarray | None,
+    protected_prefill_ring_mask: np.ndarray | None,
     flat_background_std_threshold: float,
     flat_background_edge_threshold: float,
     context_dilate_px: int,
@@ -236,6 +251,7 @@ def _prefill_low_texture_regions(
             edges,
             component,
             protected_line_mask=protected_line_mask,
+            protected_prefill_ring_mask=protected_prefill_ring_mask,
             kernel=kernel,
             expand_kernel=expand_kernel,
             gap_kernel=gap_kernel,
@@ -794,6 +810,9 @@ def _restore_low_texture_regions(
     if context_gap_px > 0:
         gap_kernel = np.ones((context_gap_px * 2 + 1, context_gap_px * 2 + 1), dtype=np.uint8)
     blended = repaired.astype(np.float32)
+    protected_prefill_ring_mask = None
+    if protected_line_mask is not None:
+        protected_prefill_ring_mask = np.zeros(mask_array.shape, dtype=np.uint8)
 
     for component_index, stat in enumerate(stats[1:], start=1):
         _, _, _, _, area = stat
@@ -807,6 +826,7 @@ def _restore_low_texture_regions(
             edges,
             component,
             protected_line_mask=protected_line_mask,
+            protected_prefill_ring_mask=protected_prefill_ring_mask,
             kernel=kernel,
             expand_kernel=expand_kernel,
             gap_kernel=gap_kernel,
@@ -839,6 +859,7 @@ def _resolve_component_background_patch(
     component: np.ndarray,
     *,
     protected_line_mask: np.ndarray | None,
+    protected_prefill_ring_mask: np.ndarray | None,
     kernel: np.ndarray,
     expand_kernel: np.ndarray | None,
     gap_kernel: np.ndarray | None,
@@ -863,6 +884,8 @@ def _resolve_component_background_patch(
         protected_vicinity = cv2.dilate(component, np.ones((11, 11), dtype=np.uint8), iterations=1) > 0
         if np.any(protected_line_mask & protected_vicinity):
             ring_mask &= ~protected_line_mask
+            if protected_prefill_ring_mask is not None:
+                protected_prefill_ring_mask[ring_mask] = 255
     ring_pixel_count = int(np.count_nonzero(ring_mask))
     if ring_pixel_count < 64:
         return expanded_component, None

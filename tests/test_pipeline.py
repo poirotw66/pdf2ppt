@@ -12,6 +12,7 @@ import cv2
 import fitz
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from pptx.util import Pt
 
 import pdf2ppt.inpainting_engines as inpainting_engines
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line, main
@@ -55,6 +56,7 @@ from pdf2ppt.pipeline import (
     should_wrap_text_block,
     enrich_ocr_blocks,
 )
+from pdf2ppt.ppt_render import add_text_block, resolve_fallback_font_size_pt
 from pdf2ppt.text_style import estimate_text_style
 
 
@@ -378,6 +380,7 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("table_line_mask", result.debug_images)
         self.assertIn("grid_line_mask", result.debug_images)
         self.assertIn("protected_line_mask", result.debug_images)
+        self.assertIn("protected_prefill_ring_mask", result.debug_images)
 
     def test_render_overlay_background_skips_protected_line_mask_for_isolated_line(self) -> None:
         image = Image.new("RGB", (80, 80), color=(255, 255, 255))
@@ -1717,6 +1720,97 @@ class FontSizingTests(unittest.TestCase):
                 )
             )
         )
+
+    def test_resolve_fallback_font_size_pt_shrinks_single_line_text_to_fit_bbox(self) -> None:
+        block = TextBlock(
+            id="ocr_fallback_font_1",
+            source="ocr",
+            bbox=(0, 0, 90, 20),
+            text="VECTOR EMBEDDINGS",
+            confidence=0.9,
+            font_size=18,
+        )
+
+        resolved_size = resolve_fallback_font_size_pt(block, scale_x=1.0, scale_y=1.0)
+
+        self.assertLess(resolved_size, 18.0)
+        self.assertGreaterEqual(resolved_size, 6.0)
+
+    @patch("pdf2ppt.ppt_render.fit_text_frame", return_value=True)
+    @patch("pdf2ppt.ppt_render.resolve_fallback_font_size_pt", return_value=27.0)
+    def test_add_text_block_clamps_oversized_fit_text_for_single_line_ocr(
+        self,
+        _resolve_fallback_font_size_pt: unittest.mock.Mock,
+        _fit_text_frame: unittest.mock.Mock,
+    ) -> None:
+        class DummyFont:
+            def __init__(self) -> None:
+                self.name = None
+                self.size = Pt(68)
+                self.color = SimpleNamespace(rgb=None)
+                self.bold = None
+                self.italic = None
+
+        class DummyRun:
+            def __init__(self) -> None:
+                self.text = ""
+                self.font = DummyFont()
+
+        class DummyParagraph:
+            def __init__(self) -> None:
+                self.alignment = None
+                self._run = DummyRun()
+
+            def add_run(self) -> DummyRun:
+                return self._run
+
+        class DummyTextFrame:
+            def __init__(self) -> None:
+                self.word_wrap = None
+                self.vertical_anchor = None
+                self.margin_left = None
+                self.margin_right = None
+                self.margin_top = None
+                self.margin_bottom = None
+                self.auto_size = None
+                self.paragraphs = [DummyParagraph()]
+
+            def clear(self) -> None:
+                return None
+
+        class DummyTextBox:
+            def __init__(self) -> None:
+                self.text_frame = DummyTextFrame()
+
+        class DummyShapes:
+            def __init__(self) -> None:
+                self.last_textbox: DummyTextBox | None = None
+
+            def add_textbox(self, *_args: object, **_kwargs: object) -> DummyTextBox:
+                self.last_textbox = DummyTextBox()
+                return self.last_textbox
+
+        class DummySlide:
+            def __init__(self) -> None:
+                self.shapes = DummyShapes()
+
+        slide = DummySlide()
+        block = TextBlock(
+            id="ocr_fit_4",
+            source="ocr",
+            bbox=(0, 0, 207.5, 71.5),
+            text="97.5%",
+            confidence=0.99,
+            font_size=48.0,
+            bold=True,
+        )
+
+        add_text_block(slide, block, scale_x=1.0, scale_y=1.0)
+
+        textbox = slide.shapes.last_textbox
+        self.assertIsNotNone(textbox)
+        run = textbox.text_frame.paragraphs[0]._run
+        self.assertEqual(run.font.size.pt, 27.0)
 
     def test_resolve_vertical_anchor_uses_middle_for_single_line_ocr(self) -> None:
         anchor = resolve_vertical_anchor(

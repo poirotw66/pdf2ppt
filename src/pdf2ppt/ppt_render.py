@@ -80,8 +80,13 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
     font = run.font
     if block.font_family:
         font.name = block.font_family
+    if used_fit_text and block.source == "ocr" and "\n" not in block.text:
+        safe_font_size_pt = resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y)
+        current_font_size_pt = getattr(font.size, "pt", None) if font.size is not None else None
+        if current_font_size_pt is None or current_font_size_pt > safe_font_size_pt:
+            font.size = Pt(safe_font_size_pt)
     if block.font_size and not used_fit_text:
-        font.size = Pt(max(6.0, block.font_size * min(scale_x, scale_y)))
+        font.size = Pt(resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y))
     if block.font_color:
         font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
     font.bold = block.bold
@@ -122,6 +127,27 @@ def fit_text_frame(text_frame: Any, block: TextBlock, *, scale_x: float, scale_y
     except TypeError:
         logger.debug("python-pptx fit_text rejected OCR block %s", block.id)
         return False
+
+
+def resolve_fallback_font_size_pt(block: TextBlock, *, scale_x: float, scale_y: float) -> float:
+    base_size_pt = max(6.0, (block.font_size or 12.0) * min(scale_x, scale_y))
+    if not block.text.strip():
+        return base_size_pt
+
+    script = classify_text_script(block.text)
+    font_path = choose_measurement_font(script)
+    if font_path is None:
+        return base_size_pt
+
+    width_pt = max(1.0, (block.bbox[2] - block.bbox[0]) * scale_x)
+    height_pt = max(1.0, (block.bbox[3] - block.bbox[1]) * scale_y)
+    width_limit = width_pt if "\n" in block.text else width_pt * single_line_fit_width_ratio(script)
+    start_size = max(6, int(round(base_size_pt)))
+    for size in range(start_size, 5, -1):
+        measured_width, measured_height = measure_text_dimensions(block.text, size, font_path)
+        if measured_width <= width_limit and measured_height <= height_pt * 1.03:
+            return float(size)
+    return 6.0
 
 
 def should_wrap_text_block(block: TextBlock) -> bool:

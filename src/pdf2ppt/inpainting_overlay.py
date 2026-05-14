@@ -109,6 +109,7 @@ def render_overlay_background(
                 mode="L",
             )
         engine_debug_note = getattr(engine, "last_debug_note", None)
+        engine_debug_images = getattr(engine, "last_debug_images", {})
         if engine_debug_note:
             rendered_note = f"{rendered_note} {engine_debug_note}" if rendered_note else engine_debug_note
         if np.any(protected_line_mask):
@@ -130,6 +131,7 @@ def render_overlay_background(
             mask_image=mask_image,
             debug_images={
                 **mask_debug_images,
+                **engine_debug_images,
                 **correction_debug_images,
             },
         )
