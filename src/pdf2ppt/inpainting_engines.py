@@ -164,7 +164,7 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
             return page_image.convert("RGB").copy()
         source = cv2.cvtColor(np.array(page_image.convert("RGB")), cv2.COLOR_RGB2BGR)
         protected_prefill_ring_mask = np.zeros(mask_array.shape, dtype=np.uint8)
-        prefilled_source, residual_mask = _prefill_low_texture_regions(
+        prefill_result = _prefill_low_texture_regions(
             source,
             mask_array,
             protected_line_mask=self._protected_line_mask,
@@ -179,6 +179,11 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
             smooth_gradient_color_bias_max_delta=self.smooth_gradient_color_bias_max_delta,
             smooth_gradient_color_bias_residual_scale=self.smooth_gradient_color_bias_residual_scale,
         )
+        if len(prefill_result) == 2:
+            prefilled_source, residual_mask = prefill_result
+            prefilled_patches = []
+        else:
+            prefilled_source, residual_mask, prefilled_patches = prefill_result
         if np.count_nonzero(residual_mask) == 0:
             repaired = prefilled_source
             self._last_debug_note = "Residual Telea groups: 0 after surface prefill."
@@ -203,6 +208,7 @@ class OpenCvFastInpaintingEngine(BackgroundInpaintingEngine):
             source,
             repaired,
             mask_array,
+            prefilled_patches=prefilled_patches,
             protected_line_mask=self._protected_line_mask,
             flat_background_std_threshold=self.flat_background_std_threshold,
             flat_background_edge_threshold=self.flat_background_edge_threshold,
@@ -239,11 +245,11 @@ def _prefill_low_texture_regions(
     smooth_gradient_residual_threshold: float,
     smooth_gradient_color_bias_max_delta: float,
     smooth_gradient_color_bias_residual_scale: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, list[tuple[int, int, int, int, np.ndarray, np.ndarray]]]:
     component_mask = (mask_array > 0).astype(np.uint8)
     component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
     if component_count <= 1:
-        return source, mask_array
+        return source, mask_array, []
 
     gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 80, 160)
@@ -257,6 +263,7 @@ def _prefill_low_texture_regions(
 
     prefilled = source.astype(np.float32).copy()
     residual_mask = mask_array.copy()
+    prefilled_patches: list[tuple[int, int, int, int, np.ndarray, np.ndarray]] = []
     for component_index, stat in enumerate(stats[1:], start=1):
         _, _, _, _, area = stat
         if area <= 0:
@@ -290,8 +297,9 @@ def _prefill_low_texture_regions(
             continue
         prefilled[y0:y1, x0:x1][local_component] = patch_values[local_component]
         residual_mask[expanded_component.astype(bool)] = 0
+        prefilled_patches.append((x0, y0, x1, y1, local_component.copy(), patch_values.copy()))
 
-    return np.clip(prefilled, 0, 255).astype(np.uint8), residual_mask
+    return np.clip(prefilled, 0, 255).astype(np.uint8), residual_mask, prefilled_patches
 
 
 def _inpaint_residual_components(
@@ -976,6 +984,7 @@ def _restore_low_texture_regions(
     repaired: np.ndarray,
     mask_array: np.ndarray,
     *,
+    prefilled_patches: list[tuple[int, int, int, int, np.ndarray, np.ndarray]] | None,
     protected_line_mask: np.ndarray | None,
     flat_background_std_threshold: float,
     flat_background_edge_threshold: float,
@@ -988,6 +997,14 @@ def _restore_low_texture_regions(
     smooth_gradient_color_bias_residual_scale: float,
     blend_sigma: float,
 ) -> np.ndarray:
+    if prefilled_patches:
+        blended = repaired.astype(np.float32)
+        for x0, y0, x1, y1, local_component, patch_values in prefilled_patches:
+            alpha = cv2.GaussianBlur(local_component.astype(np.float32), (0, 0), sigmaX=blend_sigma, sigmaY=blend_sigma)
+            alpha = np.clip(alpha * 1.5, 0.0, 1.0)[..., None]
+            blended[y0:y1, x0:x1] = blended[y0:y1, x0:x1] * (1.0 - alpha) + patch_values * alpha
+        return np.clip(blended, 0, 255).astype(np.uint8)
+
     component_mask = (mask_array > 0).astype(np.uint8)
     component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
     if component_count <= 1:
