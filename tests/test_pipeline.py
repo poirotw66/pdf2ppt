@@ -2338,6 +2338,30 @@ class FontSizingTests(unittest.TestCase):
         self.assertLess(radius, 7.5)
         self.assertGreater(radius, 4.5)
 
+    def test_clamp_isolated_label_telea_radius_caps_wide_low_edge_group(self) -> None:
+        radius = inpainting_engines._clamp_isolated_label_telea_radius(
+            7.5,
+            width=217,
+            height=70,
+            edge_density=0.0155,
+            group_size=1,
+            proximity_px=0,
+        )
+
+        self.assertEqual(radius, 5.0)
+
+    def test_clamp_isolated_label_telea_radius_keeps_other_groups_unchanged(self) -> None:
+        radius = inpainting_engines._clamp_isolated_label_telea_radius(
+            7.5,
+            width=300,
+            height=70,
+            edge_density=0.0155,
+            group_size=2,
+            proximity_px=4,
+        )
+
+        self.assertEqual(radius, 7.5)
+
     def test_resolve_directional_inpaint_crop_bounds_prefers_vertical_context_for_compact_wide_component(self) -> None:
         gray = np.full((80, 120), 238, dtype=np.uint8)
         edges = np.zeros((80, 120), dtype=np.uint8)

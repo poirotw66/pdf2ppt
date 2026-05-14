@@ -40,6 +40,11 @@ DEFAULT_TELEA_COMPACT_WIDE_MAX_WIDTH_PX = 220
 DEFAULT_TELEA_COMPACT_WIDE_MAX_HEIGHT_PX = 64
 DEFAULT_TELEA_COMPACT_WIDE_MIN_ASPECT_RATIO = 2.0
 DEFAULT_TELEA_COMPACT_WIDE_EDGE_DENSITY_THRESHOLD = 0.05
+DEFAULT_TELEA_ISOLATED_LABEL_MAX_WIDTH_PX = 260
+DEFAULT_TELEA_ISOLATED_LABEL_MAX_HEIGHT_PX = 80
+DEFAULT_TELEA_ISOLATED_LABEL_MIN_ASPECT_RATIO = 2.5
+DEFAULT_TELEA_ISOLATED_LABEL_EDGE_DENSITY_THRESHOLD = 0.02
+DEFAULT_TELEA_ISOLATED_LABEL_RADIUS_CAP = 5.0
 DEFAULT_TELEA_DIRECTIONAL_SIDE_LUMA_MARGIN = 20.0
 DEFAULT_TELEA_DIRECTIONAL_SIDE_EDGE_MARGIN = 0.03
 DEFAULT_TELEA_DIRECTIONAL_SIDE_STRONG_LUMA_MARGIN = 40.0
@@ -352,6 +357,14 @@ def _inpaint_residual_components(
             edge_density_threshold=edge_density_threshold,
             edge_density_min_factor=edge_density_min_factor,
         )
+        component_radius = _clamp_isolated_label_telea_radius(
+            component_radius,
+            width=width,
+            height=height,
+            edge_density=edge_density,
+            group_size=int(group["group_size"]),
+            proximity_px=int(group["proximity_px"]),
+        )
         if protected_nearby:
             component_radius = max(min_radius, component_radius * 0.65)
             padding_scale = 1.1
@@ -564,6 +577,31 @@ def _is_compact_wide_residual_component(*, width: int, height: int, edge_density
         and aspect_ratio >= DEFAULT_TELEA_COMPACT_WIDE_MIN_ASPECT_RATIO
         and edge_density <= DEFAULT_TELEA_COMPACT_WIDE_EDGE_DENSITY_THRESHOLD
     )
+
+
+def _clamp_isolated_label_telea_radius(
+    radius: float,
+    *,
+    width: int,
+    height: int,
+    edge_density: float,
+    group_size: int,
+    proximity_px: int,
+) -> float:
+    if height <= 0:
+        return radius
+    aspect_ratio = float(width) / float(height)
+    if group_size != 1 or proximity_px != 0:
+        return radius
+    if width > DEFAULT_TELEA_ISOLATED_LABEL_MAX_WIDTH_PX:
+        return radius
+    if height > DEFAULT_TELEA_ISOLATED_LABEL_MAX_HEIGHT_PX:
+        return radius
+    if aspect_ratio < DEFAULT_TELEA_ISOLATED_LABEL_MIN_ASPECT_RATIO:
+        return radius
+    if edge_density > DEFAULT_TELEA_ISOLATED_LABEL_EDGE_DENSITY_THRESHOLD:
+        return radius
+    return min(radius, DEFAULT_TELEA_ISOLATED_LABEL_RADIUS_CAP)
 
 
 def _resolve_directional_inpaint_crop_bounds(
