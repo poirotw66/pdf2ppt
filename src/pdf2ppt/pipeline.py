@@ -280,29 +280,32 @@ def analyze_page(
     if background_mode == "elements":
         image_elements = extract_image_elements(page, image_boxes, options.render_dpi)
     else:
+        effective_background_render_dpi = render_dpi if background_mode == "overlay" else background_render_dpi
         has_ocr_reference_image = ocr_reference_image is not None
-        should_downscale_background = background_render_dpi < render_dpi
+        should_downscale_background = effective_background_render_dpi < render_dpi
         uses_original_page_geometry = not options.ocr_use_doc_orientation and not options.use_doc_unwarping
         can_reuse_ocr_raster_for_background = (
             has_ocr_reference_image and should_downscale_background and uses_original_page_geometry
         )
-        if page_image is None and background_render_dpi == render_dpi:
+        if page_image is None and effective_background_render_dpi == render_dpi:
             background_render_started_at = perf_counter()
             page_image = render_page_image(page, dpi=render_dpi)
             background_render_seconds += perf_counter() - background_render_started_at
-        if ocr_reference_image is not None and background_render_dpi == render_dpi:
+        if ocr_reference_image is not None and effective_background_render_dpi == render_dpi and uses_original_page_geometry:
             background_image = ocr_reference_image
+        elif page_image is not None and effective_background_render_dpi == render_dpi:
+            background_image = page_image
         elif can_reuse_ocr_raster_for_background:
             background_render_started_at = perf_counter()
             background_image = resize_rendered_page_image(
                 ocr_reference_image,
                 source_dpi=render_dpi,
-                target_dpi=background_render_dpi,
+                target_dpi=effective_background_render_dpi,
             )
             background_render_seconds += perf_counter() - background_render_started_at
         else:
             background_render_started_at = perf_counter()
-            background_image = render_page_image(page, dpi=background_render_dpi)
+            background_image = render_page_image(page, dpi=effective_background_render_dpi)
             background_render_seconds += perf_counter() - background_render_started_at
         if background_mode == "overlay" and text_blocks:
             mask_blocks = [block for block in text_blocks if block.source == "ocr"] or text_blocks
