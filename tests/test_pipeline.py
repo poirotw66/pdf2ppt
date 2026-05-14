@@ -12,6 +12,7 @@ import cv2
 import fitz
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from pptx import Presentation
 from pptx.util import Pt
 
 import pdf2ppt.inpainting_engines as inpainting_engines
@@ -2127,6 +2128,24 @@ class FontSizingTests(unittest.TestCase):
         run = textbox.text_frame.paragraphs[0]._run
         self.assertEqual(run.font.size.pt, 27.0)
 
+    def test_add_text_block_sets_east_asian_typeface_for_mixed_ocr_text(self) -> None:
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        block = TextBlock(
+            id="ocr_typeface_1",
+            source="ocr",
+            bbox=(0, 0, 102, 28.5),
+            text="可營運AI",
+            confidence=0.9,
+            font_size=25.5,
+        )
+
+        add_text_block(slide, block, scale_x=1.0, scale_y=1.0)
+
+        textbox = slide.shapes[-1]
+        run_xml = textbox.text_frame.paragraphs[0].runs[0]._r.xml
+        self.assertIn('a:ea typeface="Noto Sans CJK TC"', run_xml)
+
     def test_resolve_vertical_anchor_uses_middle_for_single_line_ocr(self) -> None:
         anchor = resolve_vertical_anchor(
             TextBlock(
@@ -2173,6 +2192,41 @@ class FontSizingTests(unittest.TestCase):
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         )
         self.assertLessEqual(measured_width, 120 * 0.96)
+
+    def test_resolve_component_telea_radius_uses_smaller_span_for_compact_wide_component(self) -> None:
+        radius = inpainting_engines._resolve_component_telea_radius(
+            width=169,
+            height=57,
+            base_radius=3.0,
+            min_radius=1.8,
+            max_radius=7.5,
+            reference_span_px=48.0,
+            edge_density=0.0317,
+            edge_density_threshold=0.08,
+            edge_density_min_factor=0.7,
+        )
+
+        self.assertLess(radius, 7.5)
+        self.assertGreater(radius, 4.5)
+
+    def test_resolve_directional_inpaint_crop_bounds_prefers_vertical_context_for_compact_wide_component(self) -> None:
+        gray = np.full((80, 120), 238, dtype=np.uint8)
+        edges = np.zeros((80, 120), dtype=np.uint8)
+        gray[20:50, 28:40] = 105
+        gray[20:50, 80:92] = 118
+        edges[20:50, 28:40] = 255
+        edges[20:50, 80:92] = 255
+
+        x0, y0, x1, y1 = inpainting_engines._resolve_directional_inpaint_crop_bounds(
+            gray,
+            edges,
+            component_bbox=(40, 20, 40, 30),
+            image_shape=gray.shape,
+            base_padding=10,
+        )
+
+        self.assertEqual((y0, y1), (8, 62))
+        self.assertEqual((x0, x1), (40, 80))
 
     def test_resolve_ocr_fit_max_size_uses_tighter_limit_for_bracketed_label(self) -> None:
         size = resolve_ocr_fit_max_size(

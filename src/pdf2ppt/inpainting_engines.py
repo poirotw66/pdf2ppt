@@ -36,6 +36,14 @@ DEFAULT_TELEA_SMALL_COMPONENT_MAX_SPAN_PX = 36
 DEFAULT_TELEA_GROUP_PROXIMITY_PX = 12
 DEFAULT_TELEA_GROUP_PROXIMITY_MIN_SCALE = 0.75
 DEFAULT_TELEA_GROUP_PROXIMITY_MAX_SCALE = 2.0
+DEFAULT_TELEA_COMPACT_WIDE_MAX_WIDTH_PX = 220
+DEFAULT_TELEA_COMPACT_WIDE_MAX_HEIGHT_PX = 64
+DEFAULT_TELEA_COMPACT_WIDE_MIN_ASPECT_RATIO = 2.0
+DEFAULT_TELEA_COMPACT_WIDE_EDGE_DENSITY_THRESHOLD = 0.05
+DEFAULT_TELEA_DIRECTIONAL_SIDE_LUMA_MARGIN = 20.0
+DEFAULT_TELEA_DIRECTIONAL_SIDE_EDGE_MARGIN = 0.03
+DEFAULT_TELEA_DIRECTIONAL_SIDE_STRONG_LUMA_MARGIN = 40.0
+DEFAULT_TELEA_DIRECTIONAL_SIDE_STRONG_EDGE_MARGIN = 0.05
 DEFAULT_STRUCTURAL_LINE_PADDING_PX = 4
 DEFAULT_STRUCTURAL_LINE_MIN_KERNEL_PX = 12
 
@@ -357,6 +365,14 @@ def _inpaint_residual_components(
                 image_shape=source.shape[:2],
                 base_padding=padding,
             )
+        elif _is_compact_wide_residual_component(width=width, height=height, edge_density=edge_density):
+            x0, y0, x1, y1 = _resolve_directional_inpaint_crop_bounds(
+                gray,
+                edges,
+                component_bbox=(x, y, width, height),
+                image_shape=source.shape[:2],
+                base_padding=padding,
+            )
         else:
             x0 = max(0, x - padding)
             y0 = max(0, y - padding)
@@ -518,11 +534,145 @@ def _resolve_component_telea_radius(
     edge_density_threshold: float,
     edge_density_min_factor: float,
 ) -> float:
-    component_span = float(max(width, height))
+    component_span = _resolve_component_telea_effective_span(
+        width=width,
+        height=height,
+        edge_density=edge_density,
+    )
     size_scale = component_span / reference_span_px
     density_ratio = min(1.0, max(0.0, edge_density) / edge_density_threshold)
     edge_scale = 1.0 - density_ratio * (1.0 - edge_density_min_factor)
     return float(np.clip(base_radius * size_scale * edge_scale, min_radius, max_radius))
+
+
+def _resolve_component_telea_effective_span(*, width: int, height: int, edge_density: float) -> float:
+    span = float(max(width, height))
+    if height <= 0:
+        return span
+    if _is_compact_wide_residual_component(width=width, height=height, edge_density=edge_density):
+        return float(math.sqrt(float(width) * float(height)))
+    return span
+
+
+def _is_compact_wide_residual_component(*, width: int, height: int, edge_density: float) -> bool:
+    if height <= 0:
+        return False
+    aspect_ratio = float(width) / float(height)
+    return (
+        width <= DEFAULT_TELEA_COMPACT_WIDE_MAX_WIDTH_PX
+        and height <= DEFAULT_TELEA_COMPACT_WIDE_MAX_HEIGHT_PX
+        and aspect_ratio >= DEFAULT_TELEA_COMPACT_WIDE_MIN_ASPECT_RATIO
+        and edge_density <= DEFAULT_TELEA_COMPACT_WIDE_EDGE_DENSITY_THRESHOLD
+    )
+
+
+def _resolve_directional_inpaint_crop_bounds(
+    gray: np.ndarray,
+    edges: np.ndarray,
+    *,
+    component_bbox: tuple[int, int, int, int],
+    image_shape: tuple[int, int],
+    base_padding: int,
+) -> tuple[int, int, int, int]:
+    x, y, width, height = component_bbox
+    image_height, image_width = image_shape
+    x0 = max(0, x - base_padding)
+    y0 = max(0, y - base_padding)
+    x1 = min(image_width, x + width + base_padding)
+    y1 = min(image_height, y + height + base_padding)
+
+    left_region = gray[y:y + height, x0:x]
+    right_region = gray[y:y + height, x + width:x1]
+    top_region = gray[y0:y, x:x + width]
+    bottom_region = gray[y + height:y1, x:x + width]
+    left_edges = edges[y:y + height, x0:x]
+    right_edges = edges[y:y + height, x + width:x1]
+    top_edges = edges[y0:y, x:x + width]
+    bottom_edges = edges[y + height:y1, x:x + width]
+
+    vertical_luma = _region_percentile_mean(top_region, bottom_region, percentile=10.0)
+    vertical_edge = _region_edge_density_mean(top_edges, bottom_edges)
+    ultra_near_padding = 0
+    very_near_padding = max(1, int(math.ceil(base_padding * 0.18)))
+    near_padding = max(2, int(math.ceil(base_padding * 0.45)))
+    far_padding = max(base_padding, int(math.ceil(base_padding * 1.15)))
+
+    left_padding = _resolve_directional_side_padding(
+        left_region,
+        left_edges,
+        vertical_luma=vertical_luma,
+        vertical_edge=vertical_edge,
+        ultra_near_padding=ultra_near_padding,
+        very_near_padding=very_near_padding,
+        near_padding=near_padding,
+        far_padding=far_padding,
+    )
+    right_padding = _resolve_directional_side_padding(
+        right_region,
+        right_edges,
+        vertical_luma=vertical_luma,
+        vertical_edge=vertical_edge,
+        ultra_near_padding=ultra_near_padding,
+        very_near_padding=very_near_padding,
+        near_padding=near_padding,
+        far_padding=far_padding,
+    )
+    top_padding = far_padding
+    bottom_padding = far_padding
+
+    return (
+        max(0, x - left_padding),
+        max(0, y - top_padding),
+        min(image_width, x + width + right_padding),
+        min(image_height, y + height + bottom_padding),
+    )
+
+
+def _resolve_directional_side_padding(
+    region: np.ndarray,
+    edge_region: np.ndarray,
+    *,
+    vertical_luma: float,
+    vertical_edge: float,
+    ultra_near_padding: int,
+    very_near_padding: int,
+    near_padding: int,
+    far_padding: int,
+) -> int:
+    if region.size == 0:
+        return very_near_padding
+    side_luma = float(np.percentile(region, 10))
+    side_edge = float(np.count_nonzero(edge_region)) / float(max(1, region.size))
+    if side_luma + DEFAULT_TELEA_DIRECTIONAL_SIDE_STRONG_LUMA_MARGIN < vertical_luma:
+        return ultra_near_padding
+    if side_edge > vertical_edge + DEFAULT_TELEA_DIRECTIONAL_SIDE_STRONG_EDGE_MARGIN:
+        return ultra_near_padding
+    if side_luma + DEFAULT_TELEA_DIRECTIONAL_SIDE_LUMA_MARGIN < vertical_luma:
+        return near_padding
+    if side_edge > vertical_edge + DEFAULT_TELEA_DIRECTIONAL_SIDE_EDGE_MARGIN:
+        return near_padding
+    return far_padding
+
+
+def _region_percentile_mean(first: np.ndarray, second: np.ndarray, *, percentile: float) -> float:
+    values: list[float] = []
+    if first.size > 0:
+        values.append(float(np.percentile(first, percentile)))
+    if second.size > 0:
+        values.append(float(np.percentile(second, percentile)))
+    if not values:
+        return 255.0
+    return float(np.mean(values))
+
+
+def _region_edge_density_mean(first: np.ndarray, second: np.ndarray) -> float:
+    values: list[float] = []
+    for region in (first, second):
+        if region.size > 0:
+            values.append(float(np.count_nonzero(region)) / float(region.size))
+    if not values:
+        return 0.0
+    return float(np.mean(values))
 
 
 def _resolve_protected_inpaint_crop_bounds(

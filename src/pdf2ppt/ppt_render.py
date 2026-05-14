@@ -6,6 +6,8 @@ from typing import Any
 
 from pptx.dml.color import RGBColor
 from pptx.enum.text import MSO_AUTO_SIZE, MSO_VERTICAL_ANCHOR, PP_ALIGN
+from pptx.oxml.ns import qn
+from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Emu, Pt
 
 from .models import TextBlock
@@ -59,6 +61,8 @@ def render_page_to_slide(
 
 
 def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> None:
+    script = classify_text_script(block.text)
+    resolved_font_family = block.font_family or default_font_family(script)
     left, top, width, height = bbox_to_shape_geometry(block.bbox, scale_x, scale_y)
     textbox = slide.shapes.add_textbox(left, top, max(width, Emu(1)), max(height, Emu(1)))
     text_frame = textbox.text_frame
@@ -78,8 +82,8 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
     used_fit_text = fit_text_frame(text_frame, block, scale_x=scale_x, scale_y=scale_y)
 
     font = run.font
-    if block.font_family:
-        font.name = block.font_family
+    font.name = resolved_font_family
+    _set_run_typefaces(run, resolved_font_family)
     if used_fit_text and block.source == "ocr" and "\n" not in block.text:
         safe_font_size_pt = resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y)
         current_font_size_pt = getattr(font.size, "pt", None) if font.size is not None else None
@@ -262,6 +266,20 @@ def bbox_to_shape_geometry(
     width = pt_to_emu(max(1.0, (x1 - x0) * scale_x))
     height = pt_to_emu(max(1.0, (y1 - y0) * scale_y))
     return left, top, width, height
+
+
+def _set_run_typefaces(run: Any, font_family: str) -> None:
+    if not hasattr(run, "_r"):
+        return
+    r_pr = run._r.get_or_add_rPr()
+    for child_tag in (qn("a:latin"), qn("a:ea"), qn("a:cs")):
+        for child in list(r_pr):
+            if child.tag == child_tag:
+                r_pr.remove(child)
+    for tag_name in ("a:latin", "a:ea", "a:cs"):
+        typeface = OxmlElement(tag_name)
+        typeface.set("typeface", font_family)
+        r_pr.append(typeface)
 
 
 def pt_to_emu(value: float) -> Emu:
