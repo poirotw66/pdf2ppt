@@ -22,6 +22,7 @@ DEFAULT_SMOOTH_GRADIENT_EDGE_THRESHOLD = 0.015
 DEFAULT_SMOOTH_GRADIENT_QUADRATIC_RESIDUAL_THRESHOLD = 16.0
 DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_MAX_DELTA = 0.0
 DEFAULT_SMOOTH_GRADIENT_COLOR_BIAS_RESIDUAL_SCALE = 4.0
+DEFAULT_RELAXED_QUADRATIC_COLOR_BIAS_MAX_DELTA = 36.0
 DEFAULT_RELAXED_QUADRATIC_EDGE_THRESHOLD = 0.03
 DEFAULT_RELAXED_QUADRATIC_MIN_WIDTH_PX = 120
 DEFAULT_RELAXED_QUADRATIC_MAX_HEIGHT_PX = 72
@@ -945,11 +946,15 @@ def _resolve_component_background_patch(
         return expanded_component, None
 
     x0, y0, x1, y1, patch_values, patch_residual = patch
-    if patch_model in {"quadratic", "quadratic-relaxed"} and smooth_gradient_color_bias_max_delta > 0.0:
+    color_bias_max_delta = smooth_gradient_color_bias_max_delta
+    if patch_model == "quadratic-relaxed" and color_bias_max_delta <= 0.0:
+        color_bias_max_delta = DEFAULT_RELAXED_QUADRATIC_COLOR_BIAS_MAX_DELTA
+
+    if patch_model in {"quadratic", "quadratic-relaxed"} and color_bias_max_delta > 0.0:
         local_ring = ring_mask[y0:y1, x0:x1]
         source_patch = source[y0:y1, x0:x1]
         local_component_mask = expanded_component[y0:y1, x0:x1].astype(bool)
-        effective_max_delta = smooth_gradient_color_bias_max_delta * min(
+        effective_max_delta = color_bias_max_delta * min(
             1.0,
             patch_residual / smooth_gradient_color_bias_residual_scale,
         )
