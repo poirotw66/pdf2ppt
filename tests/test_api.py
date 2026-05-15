@@ -259,6 +259,52 @@ class ApiTests(unittest.TestCase):
         options = convert_pdf_mock.call_args.args[0]
         self.assertEqual(options.ocr_batch_size, 6)
 
+    @patch("pdf2ppt.api.convert_pdf")
+    def test_convert_passes_lama_inpaint_options(
+        self,
+        convert_pdf_mock: unittest.mock.Mock,
+    ) -> None:
+        convert_pdf_mock.return_value = SimpleNamespace(pages=[object()])
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        self.client.put(
+            f"/jobs/{job_id}/boxes",
+            json={
+                "pages": [
+                    {
+                        "page": 1,
+                        "width": 320,
+                        "height": 240,
+                        "boxes": [],
+                    }
+                ]
+            },
+        )
+
+        response = self.client.post(
+            f"/jobs/{job_id}/convert",
+            json={
+                "write_debug_artifacts": False,
+                "inpaint_engine": "lama-onnx-cuda",
+                "inpaint_model_root": "custom-lama",
+                "inpaint_onnx_cuda_provider": "CUDAExecutionProvider",
+                "inpaint_onnx_execution_mode": "parallel",
+                "inpaint_max_side_px": 1024,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        options = convert_pdf_mock.call_args.args[0]
+        self.assertEqual(options.inpaint_engine, "lama-onnx-cuda")
+        self.assertEqual(options.inpaint_model_root, Path("custom-lama"))
+        self.assertEqual(options.inpaint_onnx_cuda_provider, "CUDAExecutionProvider")
+        self.assertEqual(options.inpaint_onnx_execution_mode, "parallel")
+        self.assertEqual(options.inpaint_max_side_px, 1024)
+
     @patch("pdf2ppt.api.OcrEngine.extract_text_blocks_batch")
     def test_detect_returns_ocr_initialization_error(
         self,

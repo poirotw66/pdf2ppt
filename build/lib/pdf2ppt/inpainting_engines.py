@@ -285,16 +285,9 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
             mask_array,
             max_side_px=self.max_side_px,
         )
-        fixed_input_size = _resolve_lama_fixed_input_size(session)
-        model_rgb, model_mask, fit_to_fixed_size = _fit_lama_inputs_to_model(
-            resized_rgb,
-            resized_mask,
-            fixed_input_size,
-        )
-        if fixed_input_size is None:
-            model_rgb, model_mask = _pad_lama_inputs(model_rgb, model_mask)
-        image_tensor = np.transpose(model_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None, ...]
-        mask_tensor = (model_mask > 0).astype(np.float32)[None, None, ...]
+        padded_rgb, padded_mask = _pad_lama_inputs(resized_rgb, resized_mask)
+        image_tensor = np.transpose(padded_rgb.astype(np.float32) / 255.0, (2, 0, 1))[None, ...]
+        mask_tensor = (padded_mask > 0).astype(np.float32)[None, None, ...]
 
         model_inputs = _build_lama_model_inputs(session, image_tensor, mask_tensor)
         try:
@@ -305,15 +298,8 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
             raise BackgroundInpaintingError("LaMa ONNX inference returned no outputs.")
 
         restored_rgb = _normalize_lama_output(outputs[0])
-        restored_rgb = restored_rgb[: model_rgb.shape[0], : model_rgb.shape[1], :]
-        if fit_to_fixed_size:
-            restored_rgb = cv2.resize(
-                restored_rgb,
-                (resized_rgb.shape[1], resized_rgb.shape[0]),
-                interpolation=cv2.INTER_CUBIC,
-            )
-        else:
-            restored_rgb = restored_rgb[: resized_rgb.shape[0], : resized_rgb.shape[1], :]
+        restored_rgb = restored_rgb[: padded_rgb.shape[0], : padded_rgb.shape[1], :]
+        restored_rgb = restored_rgb[: resized_rgb.shape[0], : resized_rgb.shape[1], :]
         if resized:
             restored_rgb = cv2.resize(
                 restored_rgb,
@@ -324,14 +310,9 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
         result = source_rgb.copy()
         result[mask_array > 0] = restored_rgb[mask_array > 0]
         resize_note = f" resized-to-max-side={self.max_side_px}" if resized else ""
-        fixed_input_note = (
-            f" model_input={fixed_input_size[1]}x{fixed_input_size[0]}"
-            if fixed_input_size is not None
-            else ""
-        )
         self._last_debug_note = (
             f"LaMa ONNX CUDA provider={self.cuda_provider} execution_mode={self.execution_mode} "
-            f"model={model_path.name}{resize_note}{fixed_input_note}."
+            f"model={model_path.name}{resize_note}."
         )
         return Image.fromarray(result, mode="RGB")
 
@@ -438,60 +419,6 @@ def _pad_lama_inputs(source_rgb: np.ndarray, mask_array: np.ndarray, *, stride: 
         mode="constant",
     )
     return padded_rgb, padded_mask
-
-
-def _resolve_lama_fixed_input_size(session: Any) -> tuple[int, int] | None:
-    session_inputs = list(session.get_inputs())
-    resolved_shapes: dict[str, tuple[int, int]] = {}
-    for model_input in session_inputs:
-        shape = getattr(model_input, "shape", None)
-        if not isinstance(shape, (list, tuple)) or len(shape) < 4:
-            continue
-        input_height = _coerce_lama_dimension(shape[-2])
-        input_width = _coerce_lama_dimension(shape[-1])
-        if input_height is None or input_width is None:
-            continue
-        lowered_name = model_input.name.lower()
-        if "image" in lowered_name:
-            resolved_shapes["image"] = (input_height, input_width)
-        elif "mask" in lowered_name:
-            resolved_shapes["mask"] = (input_height, input_width)
-
-    image_shape = resolved_shapes.get("image")
-    mask_shape = resolved_shapes.get("mask")
-    if image_shape is not None and mask_shape is not None and image_shape != mask_shape:
-        raise BackgroundInpaintingError(
-            "LaMa ONNX model exposes incompatible fixed image/mask input sizes."
-        )
-    return image_shape or mask_shape
-
-
-def _coerce_lama_dimension(value: Any) -> int | None:
-    if isinstance(value, (int, np.integer)):
-        return int(value) if int(value) > 0 else None
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isdigit():
-            parsed = int(stripped)
-            return parsed if parsed > 0 else None
-    return None
-
-
-def _fit_lama_inputs_to_model(
-    source_rgb: np.ndarray,
-    mask_array: np.ndarray,
-    fixed_input_size: tuple[int, int] | None,
-) -> tuple[np.ndarray, np.ndarray, bool]:
-    if fixed_input_size is None:
-        return source_rgb, mask_array, False
-    target_height, target_width = fixed_input_size
-    height, width = source_rgb.shape[:2]
-    if height == target_height and width == target_width:
-        return source_rgb, mask_array, False
-    interpolation = cv2.INTER_AREA if target_height <= height and target_width <= width else cv2.INTER_LINEAR
-    resized_rgb = cv2.resize(source_rgb, (target_width, target_height), interpolation=interpolation)
-    resized_mask = cv2.resize(mask_array, (target_width, target_height), interpolation=cv2.INTER_NEAREST)
-    return resized_rgb, resized_mask, True
 
 
 def _build_lama_model_inputs(session: Any, image_tensor: np.ndarray, mask_tensor: np.ndarray) -> dict[str, np.ndarray]:

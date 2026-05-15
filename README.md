@@ -15,6 +15,7 @@ Core pipeline:
 ## Project Status
 
 - Recommended default background engine: `opencv-fast`
+- Optional GPU background engine: `lama-onnx-cuda` for explicit high-quality overlay repair when ONNX Runtime CUDA and a local LaMa model are available
 - `diffusion-local` has been removed because local diffusion inpainting was too slow and inconsistent
 - For most documents, start with `opencv-fast` first and let the pipeline fall back to `white-box` when masking is too large
 
@@ -35,6 +36,7 @@ Core pipeline:
 - Support multiple background reconstruction engines:
   - `white-box`
   - `opencv-fast` (recommended)
+  - `lama-onnx-cuda` (optional GPU path, explicit opt-in)
   - `auto` routing
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
@@ -126,6 +128,16 @@ pdf2ppt input.pdf output.pptx \
 
 `opencv-fast` is the lightweight local background reconstruction path used for overlay pages.
 
+### Optional GPU engine: `lama-onnx-cuda`
+
+`lama-onnx-cuda` is an explicit opt-in engine for overlay background reconstruction. Phase 1 keeps it out of `auto`, so the default route remains stable and CPU-safe.
+
+- Install the optional runtime with `pip install .[gpu]`
+- Place a local ONNX model under `model/lama/` or point `--inpaint-model-root` at a specific `.onnx` file
+- This path requires `CUDAExecutionProvider` from ONNX Runtime GPU
+- When `--inpaint-engine lama-onnx-cuda` is selected, missing runtime, missing provider, or missing model is a hard error; it does not silently fall back to `opencv-fast`
+- Large overlay images are proportionally downscaled to `--inpaint-max-side-px` before inference to reduce VRAM pressure
+
 It is designed for speed and low setup cost:
 
 - No model download is required.
@@ -183,8 +195,13 @@ How it interacts with `auto` routing:
 Relevant knobs:
 
 - `--inpaint-engine opencv-fast`: force this engine explicitly
+- `--inpaint-engine lama-onnx-cuda`: force the optional GPU engine explicitly
 - `--inpaint-padding-px`: enlarge the text mask before inpainting
 - `--inpaint-max-area-ratio`: avoid using local repair when too much of the page is masked
+- `--inpaint-model-root`: directory or `.onnx` file used by `lama-onnx-cuda`
+- `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for `lama-onnx-cuda`
+- `--inpaint-onnx-execution-mode`: `sequential` or `parallel` ONNX Runtime execution mode
+- `--inpaint-max-side-px`: maximum image side sent into `lama-onnx-cuda` before proportional downscaling
 - `--debug-dir`: inspect generated masks and background decisions
 
 Practical guidance:
@@ -218,9 +235,13 @@ Main arguments:
 
 Background reconstruction:
 
-- `--inpaint-engine`: `auto`, `white-box`, or `opencv-fast`
+- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, or `lama-onnx-cuda`
 - `--inpaint-padding-px`: expand text masks before inpainting
 - `--inpaint-max-area-ratio`: force white-box fallback when the masked area is too large
+- `--inpaint-model-root`: local directory or `.onnx` file for the optional LaMa model
+- `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for the LaMa engine
+- `--inpaint-onnx-execution-mode`: ONNX Runtime execution mode for the LaMa engine
+- `--inpaint-max-side-px`: proportional resize guard before LaMa GPU inference
 
 Diagnostics:
 

@@ -15,6 +15,7 @@
 ## 專案狀態
 
 - 目前建議優先使用的背景引擎：`opencv-fast`
+- 可選的 GPU 背景引擎：`lama-onnx-cuda`，適合在本機已有 ONNX Runtime CUDA 與 LaMa 模型時做較高品質的 overlay 修補
 - `diffusion-local` 已移除，因為地端 diffusion inpainting 速度慢且效果不穩定
 - 大多數文件建議先從 `opencv-fast` 開始，遮罩過大時再回退到 `white-box`
 
@@ -35,6 +36,7 @@
 - 支援多種背景重建引擎：
   - `white-box`
   - `opencv-fast`（建議優先使用）
+  - `lama-onnx-cuda`（可選 GPU 路徑，需明確指定）
   - `auto` 自動路由
 - 每次轉換都可輸出 JSON 報告。
 - 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
@@ -120,6 +122,16 @@ pdf2ppt input.pdf output.pptx \
 
 `opencv-fast` 是本專案在 `overlay` 頁面上使用的輕量級背景重建路徑。
 
+### 可選 GPU 引擎：`lama-onnx-cuda`
+
+`lama-onnx-cuda` 是額外提供的顯式選用引擎，只用在 `overlay` 背景重建。第一階段不放進 `auto`，因此預設流程仍維持現在的 CPU 路徑與穩定行為。
+
+- 先安裝選用相依：`pip install .[gpu]`
+- 將本地 ONNX 模型放在 `model/lama/`，或用 `--inpaint-model-root` 直接指向某個 `.onnx` 檔
+- 這條路徑需要 ONNX Runtime GPU 的 `CUDAExecutionProvider`
+- 當你明確指定 `--inpaint-engine lama-onnx-cuda` 時，如果 runtime / provider / model 缺失，會直接報錯，不會默默回退到 `opencv-fast`
+- 為了降低顯存壓力，過大的 overlay 影像會先依 `--inpaint-max-side-px` 等比例縮小再做推論
+
 它的設計目標是：
 
 - 不需要下載模型
@@ -177,8 +189,13 @@ pdf2ppt input.pdf output.pptx \
 常用參數：
 
 - `--inpaint-engine opencv-fast`：強制指定使用此引擎
+- `--inpaint-engine lama-onnx-cuda`：強制指定使用可選 GPU 引擎
 - `--inpaint-padding-px`：先擴張文字遮罩再修補
 - `--inpaint-max-area-ratio`：當遮罩過大時避免使用局部修補
+- `--inpaint-model-root`：`lama-onnx-cuda` 使用的目錄或 `.onnx` 模型檔
+- `--inpaint-onnx-cuda-provider`：`lama-onnx-cuda` 使用的 ONNX Runtime provider 名稱
+- `--inpaint-onnx-execution-mode`：`lama-onnx-cuda` 使用的 ONNX Runtime execution mode
+- `--inpaint-max-side-px`：送進 `lama-onnx-cuda` 前允許的最大邊長
 - `--debug-dir`：輸出 mask 與背景決策結果方便檢查
 
 實務建議：
@@ -208,9 +225,13 @@ pdf2ppt input.pdf output.pptx \
 
 背景重建相關：
 
-- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`
+- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`lama-onnx-cuda`
 - `--inpaint-padding-px`：在 inpainting 前擴張文字遮罩
 - `--inpaint-max-area-ratio`：當遮罩面積太大時，強制改用 white-box
+- `--inpaint-model-root`：可選 LaMa 模型所在的本地目錄或 `.onnx` 檔案
+- `--inpaint-onnx-cuda-provider`：LaMa 引擎使用的 ONNX Runtime provider 名稱
+- `--inpaint-onnx-execution-mode`：LaMa 引擎使用的 ONNX Runtime execution mode
+- `--inpaint-max-side-px`：LaMa GPU 推論前的等比例縮圖保護上限
 
 診斷相關：
 

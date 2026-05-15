@@ -22,6 +22,11 @@ dependencies = [
   "python-multipart>=0.0.12",
 ]
 
+[project.optional-dependencies]
+gpu = [
+  "onnxruntime-gpu>=1.18.0,<2.0",
+]
+
 [project.scripts]
 pdf2ppt = "pdf2ppt.cli:main"
 pdf2ppt-api = "pdf2ppt.api:run"

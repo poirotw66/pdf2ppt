@@ -23,6 +23,7 @@ from pdf2ppt.inpainting_overlay import (
     _apply_targeted_file_back_color_correction,
     _neutralize_protected_table_lines,
     _restore_protected_table_lines,
+    resolve_background_inpainting_engine,
 )
 from pdf2ppt.inpainting_masks import refine_text_mask_for_inpainting
 from pdf2ppt.models import QualityScore, TextBlock
@@ -351,6 +352,115 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("opencv-fast", result.note or "")
         pixel = result.image.getpixel((25, 18))
         self.assertTrue(all(abs(channel - expected) <= 4 for channel, expected in zip(pixel, (35, 45, 55))))
+
+    def test_resolve_background_inpainting_engine_returns_lama_for_explicit_request(self) -> None:
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        mask_image = Image.new("L", (60, 40), color=0)
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="lama-onnx-cuda",
+            inpaint_model_root=Path("model/lama"),
+            inpaint_onnx_cuda_provider="CUDAExecutionProvider",
+            inpaint_onnx_execution_mode="parallel",
+            inpaint_max_side_px=1024,
+        )
+
+        engine, note = resolve_background_inpainting_engine(image, mask_image, options)
+
+        self.assertIsInstance(engine, inpainting_engines.LamaOnnxCudaInpaintingEngine)
+        self.assertIn("lama-onnx-cuda", note)
+        self.assertEqual(engine.max_side_px, 1024)
+
+    def test_render_overlay_background_explicit_lama_is_strict(self) -> None:
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        blocks = [
+            TextBlock(
+                id="ocr_lama_strict",
+                source="ocr",
+                bbox=(20, 12, 35, 24),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 12, 35, 24),
+            )
+        ]
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="lama-onnx-cuda",
+            inpaint_model_root=Path("model/lama"),
+        )
+
+        with patch.object(
+            inpainting_engines.LamaOnnxCudaInpaintingEngine,
+            "inpaint",
+            side_effect=BackgroundInpaintingError("missing model"),
+        ), patch.object(inpainting_engines.WhiteBoxInpaintingEngine, "inpaint") as white_box_mock:
+            with self.assertRaisesRegex(BackgroundInpaintingError, "missing model"):
+                render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=options)
+
+        white_box_mock.assert_not_called()
+
+    def test_lama_engine_requires_existing_model_root(self) -> None:
+        engine = inpainting_engines.LamaOnnxCudaInpaintingEngine(model_root=Path("missing-lama-model"))
+
+        with self.assertRaisesRegex(BackgroundInpaintingError, "does not exist"):
+            engine.inpaint(Image.new("RGB", (20, 20), color=(10, 20, 30)), Image.new("L", (20, 20), color=255))
+
+    def test_lama_engine_reports_missing_onnxruntime_gpu_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path = Path(temp_dir) / "lama_fp16.onnx"
+            model_path.write_bytes(b"fake-onnx")
+            engine = inpainting_engines.LamaOnnxCudaInpaintingEngine(model_root=model_path)
+
+            with patch("pdf2ppt.inpainting_engines.importlib.import_module", side_effect=ImportError("missing ort")):
+                with self.assertRaisesRegex(BackgroundInpaintingError, "onnxruntime-gpu"):
+                    engine.inpaint(Image.new("RGB", (20, 20), color=(10, 20, 30)), Image.new("L", (20, 20), color=255))
+
+    def test_lama_model_input_mapping_prefers_named_inputs(self) -> None:
+        fake_session = SimpleNamespace(
+            get_inputs=lambda: [
+                SimpleNamespace(name="image"),
+                SimpleNamespace(name="mask"),
+            ]
+        )
+        image_tensor = np.zeros((1, 3, 8, 8), dtype=np.float32)
+        mask_tensor = np.ones((1, 1, 8, 8), dtype=np.float32)
+
+        resolved = inpainting_engines._build_lama_model_inputs(fake_session, image_tensor, mask_tensor)
+
+        self.assertIs(resolved["image"], image_tensor)
+        self.assertIs(resolved["mask"], mask_tensor)
+
+    def test_lama_fixed_input_size_detects_official_opencv_shape(self) -> None:
+        fake_session = SimpleNamespace(
+            get_inputs=lambda: [
+                SimpleNamespace(name="image", shape=["batch", 3, 512, 512]),
+                SimpleNamespace(name="mask", shape=["batch", 1, 512, 512]),
+            ]
+        )
+
+        fixed_input_size = inpainting_engines._resolve_lama_fixed_input_size(fake_session)
+
+        self.assertEqual(fixed_input_size, (512, 512))
+
+    def test_lama_fixed_input_adapter_resizes_to_model_shape(self) -> None:
+        source_rgb = np.zeros((864, 1536, 3), dtype=np.uint8)
+        mask_array = np.zeros((864, 1536), dtype=np.uint8)
+        mask_array[120:240, 300:520] = 255
+
+        resized_rgb, resized_mask, adapted = inpainting_engines._fit_lama_inputs_to_model(
+            source_rgb,
+            mask_array,
+            (512, 512),
+        )
+
+        self.assertTrue(adapted)
+        self.assertEqual(resized_rgb.shape, (512, 512, 3))
+        self.assertEqual(resized_mask.shape, (512, 512))
+        self.assertGreater(np.count_nonzero(resized_mask), 0)
 
     def test_render_overlay_background_emits_mask_debug_images(self) -> None:
         image = Image.new("RGB", (80, 80), color=(255, 255, 255))
@@ -2159,6 +2269,14 @@ class CliTests(unittest.TestCase):
                 "10",
                 "--inpaint-max-area-ratio",
                 "0.2",
+                "--inpaint-model-root",
+                "custom-lama",
+                "--inpaint-onnx-cuda-provider",
+                "CUDAExecutionProvider",
+                "--inpaint-onnx-execution-mode",
+                "parallel",
+                "--inpaint-max-side-px",
+                "1024",
                 "--background-dpi",
                 "96",
                 "--background-format",
@@ -2176,6 +2294,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.inpaint_engine, "opencv-fast")
         self.assertEqual(args.inpaint_padding_px, 10)
         self.assertAlmostEqual(args.inpaint_max_area_ratio, 0.2)
+        self.assertEqual(args.inpaint_model_root, Path("custom-lama"))
+        self.assertEqual(args.inpaint_onnx_cuda_provider, "CUDAExecutionProvider")
+        self.assertEqual(args.inpaint_onnx_execution_mode, "parallel")
+        self.assertEqual(args.inpaint_max_side_px, 1024)
         self.assertEqual(args.background_dpi, 96)
         self.assertEqual(args.background_format, "png")
         self.assertEqual(args.background_jpeg_quality, 70)
