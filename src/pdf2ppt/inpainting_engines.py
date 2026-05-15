@@ -62,6 +62,9 @@ DEFAULT_TELEA_DIRECTIONAL_SIDE_STRONG_EDGE_MARGIN = 0.05
 DEFAULT_STRUCTURAL_LINE_PADDING_PX = 4
 DEFAULT_STRUCTURAL_LINE_MIN_KERNEL_PX = 12
 DEFAULT_LAMA_ONNX_MAX_SIDE_PX = 1536
+DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX = 3
+DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA = 1.4
+DEFAULT_LAMA_COMPOSITE_ALPHA_GAIN = 1.5
 DEFAULT_LAMA_ONNX_MODEL_FILENAMES = (
     "lama_fp16.onnx",
     "big-lama-fp16.onnx",
@@ -286,9 +289,14 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
             execution_mode=self.execution_mode,
         )
 
+        composite_mask = mask_array
+        inference_mask = _expand_lama_inference_mask(
+            mask_array,
+            dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
+        )
         resized_rgb, resized_mask, resized = _resize_lama_inputs(
             source_rgb,
-            mask_array,
+            inference_mask,
             max_side_px=self.max_side_px,
         )
         fixed_input_size = _resolve_lama_fixed_input_size(session)
@@ -327,17 +335,25 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
                 interpolation=cv2.INTER_CUBIC,
             )
 
-        result = source_rgb.copy()
-        result[mask_array > 0] = restored_rgb[mask_array > 0]
+        result = _composite_lama_restoration(
+            source_rgb,
+            restored_rgb,
+            composite_mask,
+            blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+        )
         resize_note = f" resized-to-max-side={self.max_side_px}" if resized else ""
         fixed_input_note = (
             f" model_input={fixed_input_size[1]}x{fixed_input_size[0]}"
             if fixed_input_size is not None
             else ""
         )
+        composite_note = _lama_composite_debug_suffix(
+            dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
+            blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+        )
         self._last_debug_note = (
             f"LaMa ONNX CUDA provider={self.cuda_provider} execution_mode={self.execution_mode} "
-            f"model={model_path.name}{resize_note}{fixed_input_note}."
+            f"model={model_path.name}{resize_note}{fixed_input_note}{composite_note}."
         )
         return Image.fromarray(result, mode="RGB")
 
@@ -405,13 +421,18 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
         python_executable = _resolve_lama_python_executable(self.python_executable)
         _validate_lama_pytorch_runtime(python_executable=python_executable, repo_root=repo_root)
 
-        resized_rgb, resized_mask, resized = _resize_lama_inputs(
-            source_rgb,
+        composite_mask = mask_array
+        inference_mask = _expand_lama_inference_mask(
             mask_array,
+            dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
+        )
+        resized_rgb, resized_inference_mask, resized = _resize_lama_inputs(
+            source_rgb,
+            inference_mask,
             max_side_px=self.max_side_px,
         )
         resized_page = Image.fromarray(resized_rgb, mode="RGB")
-        resized_mask_image = Image.fromarray((resized_mask > 0).astype(np.uint8) * 255, mode="L")
+        resized_mask_image = Image.fromarray((resized_inference_mask > 0).astype(np.uint8) * 255, mode="L")
 
         with tempfile.TemporaryDirectory(prefix="pdf2ppt-lama-") as temp_dir_str:
             temp_dir = Path(temp_dir_str)
@@ -455,12 +476,20 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
                     (source_rgb.shape[1], source_rgb.shape[0]),
                     interpolation=cv2.INTER_CUBIC,
                 )
-            result = source_rgb.copy()
-            result[mask_array > 0] = restored_rgb[mask_array > 0]
+            result = _composite_lama_restoration(
+                source_rgb,
+                restored_rgb,
+                composite_mask,
+                blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+            )
             resize_note = f" resized-to-max-side={self.max_side_px}" if resized else ""
+            composite_note = _lama_composite_debug_suffix(
+                dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
+                blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+            )
             self._last_debug_note = (
                 f"Official LaMa repo={repo_root.name} device={self.device} model={model_path.name} "
-                f"python={Path(python_executable).name} persistent-worker{resize_note}."
+                f"python={Path(python_executable).name} persistent-worker{resize_note}{composite_note}."
             )
             return Image.fromarray(result, mode="RGB")
 
@@ -756,6 +785,36 @@ def _get_lama_session(*, model_path: Path, cuda_provider: str, execution_mode: s
     with _LAMA_SESSION_CACHE_LOCK:
         _LAMA_SESSION_CACHE.setdefault(cache_key, session)
         return _LAMA_SESSION_CACHE[cache_key]
+
+
+def _expand_lama_inference_mask(mask_array: np.ndarray, *, dilate_px: int) -> np.ndarray:
+    binary_mask = (mask_array > 0).astype(np.uint8)
+    if dilate_px <= 0 or not np.any(binary_mask):
+        return mask_array
+    kernel_size = dilate_px * 2 + 1
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+    return cv2.dilate(binary_mask, kernel, iterations=1) * 255
+
+
+def _composite_lama_restoration(
+    source_rgb: np.ndarray,
+    restored_rgb: np.ndarray,
+    composite_mask: np.ndarray,
+    *,
+    blend_sigma: float,
+    alpha_gain: float = DEFAULT_LAMA_COMPOSITE_ALPHA_GAIN,
+) -> np.ndarray:
+    component = (composite_mask > 0).astype(np.float32)
+    if not np.any(component):
+        return source_rgb
+    alpha = cv2.GaussianBlur(component, (0, 0), sigmaX=blend_sigma, sigmaY=blend_sigma)
+    alpha = np.clip(alpha * alpha_gain, 0.0, 1.0)[..., None]
+    blended = source_rgb.astype(np.float32) * (1.0 - alpha) + restored_rgb.astype(np.float32) * alpha
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _lama_composite_debug_suffix(*, dilate_px: int, blend_sigma: float) -> str:
+    return f" inference-mask-dilate={dilate_px} composite-feather-sigma={blend_sigma:.1f}"
 
 
 def _resize_lama_inputs(

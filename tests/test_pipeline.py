@@ -589,6 +589,78 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertEqual(resized_mask.shape, (512, 512))
         self.assertGreater(np.count_nonzero(resized_mask), 0)
 
+    def test_expand_lama_inference_mask_dilates_beyond_original(self) -> None:
+        mask_array = np.zeros((40, 40), dtype=np.uint8)
+        mask_array[15:25, 15:25] = 255
+        original_pixels = int(np.count_nonzero(mask_array))
+
+        expanded = inpainting_engines._expand_lama_inference_mask(
+            mask_array,
+            dilate_px=inpainting_engines.DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
+        )
+
+        self.assertGreater(int(np.count_nonzero(expanded)), original_pixels)
+
+    def test_composite_lama_restoration_feathers_mask_edges(self) -> None:
+        source_rgb = np.full((20, 20, 3), 10, dtype=np.uint8)
+        restored_rgb = np.full((20, 20, 3), 200, dtype=np.uint8)
+        mask_array = np.zeros((20, 20), dtype=np.uint8)
+        mask_array[6:14, 6:14] = 255
+
+        result = inpainting_engines._composite_lama_restoration(
+            source_rgb,
+            restored_rgb,
+            mask_array,
+            blend_sigma=inpainting_engines.DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+        )
+
+        self.assertEqual(tuple(result[10, 10]), (200, 200, 200))
+        edge_value = int(result[6, 10, 0])
+        self.assertGreater(edge_value, 10)
+        self.assertLess(edge_value, 200)
+
+    def test_lama_pytorch_engine_uses_expanded_inference_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            model_dir = temp_root / "big-lama"
+            model_dir.mkdir()
+            (model_dir / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+            (model_dir / "models").mkdir()
+            repo_root = temp_root / "lama"
+            (repo_root / "bin").mkdir(parents=True)
+            (repo_root / "bin" / "predict.py").write_text("# placeholder\n", encoding="utf-8")
+
+            saved_masks: list[np.ndarray] = []
+
+            def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+                if len(command) >= 3 and command[1] == "-c":
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            def fake_predict(**kwargs: object) -> None:
+                indir = kwargs["indir"]
+                outdir = kwargs["outdir"]
+                assert isinstance(indir, Path)
+                assert isinstance(outdir, Path)
+                saved_masks.append(np.array(Image.open(indir / "page_mask001.png").convert("L"), dtype=np.uint8))
+                Image.new("RGB", (20, 20), color=(120, 130, 140)).save(outdir / "page_mask001.png")
+
+            engine = inpainting_engines.LamaPytorchInpaintingEngine(
+                model_root=model_dir,
+                repo_root=repo_root,
+            )
+            mask_array = np.zeros((20, 20), dtype=np.uint8)
+            mask_array[8:12, 8:12] = 255
+
+            with (
+                patch("pdf2ppt.inpainting_engines.subprocess.run", side_effect=fake_run),
+                patch("pdf2ppt.inpainting_engines._run_lama_pytorch_prediction", side_effect=fake_predict),
+            ):
+                engine.inpaint(Image.new("RGB", (20, 20), color=(10, 20, 30)), Image.fromarray(mask_array, mode="L"))
+
+            self.assertEqual(len(saved_masks), 1)
+            self.assertGreater(int(np.count_nonzero(saved_masks[0])), int(np.count_nonzero(mask_array)))
+
     def test_render_overlay_background_emits_mask_debug_images(self) -> None:
         image = Image.new("RGB", (80, 80), color=(255, 255, 255))
         blocks = [
