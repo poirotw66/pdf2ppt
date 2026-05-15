@@ -39,6 +39,11 @@ button {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100vh;
+  overflow: auto;
 }
 
 .panel {
@@ -52,6 +57,64 @@ button {
 .panel h1,
 .panel h2 {
   margin: 0 0 8px;
+}
+
+.workflow-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.workflow-step {
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(19, 33, 47, 0.1);
+  background: rgba(248, 250, 252, 0.88);
+}
+
+.workflow-step.active {
+  border-color: rgba(13, 103, 112, 0.35);
+  background: linear-gradient(180deg, rgba(233, 247, 245, 0.95) 0%, rgba(248, 250, 252, 0.9) 100%);
+}
+
+.workflow-step.complete {
+  border-color: rgba(43, 109, 115, 0.24);
+}
+
+.workflow-step-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.workflow-step-header p {
+  margin: 4px 0 0;
+}
+
+.workflow-step-index {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #183a56;
+  color: #fff;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.workflow-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.step-hint {
+  display: block;
+  margin-top: 10px;
+  line-height: 1.4;
 }
 
 .preview-toolbar {
@@ -96,7 +159,8 @@ button {
 .panel input[type="file"],
 .panel button,
 .panel textarea,
-.panel input {
+.panel input,
+.panel select {
   width: 100%;
   margin-top: 10px;
 }
@@ -153,6 +217,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  max-height: 40vh;
+  overflow: auto;
 }
 
 .page-chip {
@@ -316,6 +382,13 @@ button {
   color: #687786;
   border: 1px dashed rgba(19, 33, 47, 0.18);
   border-radius: 18px;
+}
+
+.compact-empty-state {
+  min-height: 120px;
+  padding: 20px;
+  font-size: 14px;
+  text-align: center;
 }
 
 .inspector-fields {
@@ -542,11 +615,58 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .sidebar {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid rgba(19, 33, 47, 0.1);
+  }
+
   .workspace {
     grid-template-columns: 1fr;
   }
 
   .editor-scroll {
     min-height: 50vh;
+  }
+}
+
+@media (max-width: 720px) {
+  .sidebar,
+  .workspace {
+    padding: 14px;
+  }
+
+  .panel,
+  .editor-panel,
+  .inspector-panel {
+    padding: 14px;
+    border-radius: 18px;
+  }
+
+  .preview-toolbar {
+    justify-content: flex-start;
+  }
+
+  .workflow-actions,
+  .list-controls,
+  .bbox-grid,
+  .nudge-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .zoom-control {
+    width: 100%;
+  }
+
+  .zoom-control input {
+    flex: 1 1 auto;
+    width: auto;
+  }
+
+  .editor-scroll {
+    padding: 12px;
+    min-height: 42vh;
   }
 }
