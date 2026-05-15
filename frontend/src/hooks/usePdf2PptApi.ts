@@ -1,6 +1,10 @@
 import { useState } from "react";
 
-import { detectConfidenceThreshold } from "../config";
+import {
+  buildConvertRequestPayload,
+  detectConfidenceThreshold,
+  type InpaintEngine,
+} from "../config";
 import type { ApiErrorResponse, ConvertResponse, DetectResponse, JobResponse, PagePayload } from "../types";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -101,7 +105,7 @@ export function usePdf2PptApi() {
     }
   }
 
-  async function convertJob(jobId: string): Promise<ConvertResponse | null> {
+  async function convertJob(jobId: string, inpaintEngine: InpaintEngine): Promise<ConvertResponse | null> {
     setIsBusy(true);
     setBusyAction("Converting PPTX...");
     setStatusText(`Converting job ${jobId} into PPTX...`);
@@ -109,7 +113,7 @@ export function usePdf2PptApi() {
       const response = await fetch(`${apiBase}/jobs/${jobId}/convert`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ write_debug_artifacts: false }),
+        body: JSON.stringify(buildConvertRequestPayload(inpaintEngine)),
       });
       if (!response.ok) {
         throw new Error(await readError(response));

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from .core import DEFAULT_OCR_BATCH_SIZE
@@ -110,13 +112,15 @@ class ConvertRequest(BaseModel):
     background_dpi: int = Field(default=110, ge=72, le=300)
     background_format: str = "jpeg"
     background_jpeg_quality: int = Field(default=82, ge=1, le=95)
-    inpaint_engine: str = "opencv-fast"
+    inpaint_engine: Literal["auto", "white-box", "opencv-fast", "lama-onnx-cuda", "lama-pytorch"] = "opencv-fast"
     inpaint_padding_px: int = Field(default=6, ge=0, le=128)
     inpaint_max_area_ratio: float = Field(default=0.12, ge=0.0, le=1.0)
     inpaint_model_root: str | None = "model/lama"
     inpaint_onnx_cuda_provider: str = "CUDAExecutionProvider"
-    inpaint_onnx_execution_mode: str = "sequential"
+    inpaint_onnx_execution_mode: Literal["sequential", "parallel"] = "sequential"
     inpaint_max_side_px: int = Field(default=1536, ge=256, le=8192)
+    inpaint_lama_repo_root: str | None = "lama"
+    inpaint_lama_device: str = "cuda"
     write_debug_artifacts: bool = False
 
 

@@ -1,15 +1,18 @@
+import { INPAINT_ENGINE_OPTIONS, type InpaintEngine } from "../config";
 import type { JobResponse, PagePayload } from "../types";
 
 type JobSidebarProps = {
   busyAction: string | null;
   convertResult: { page_count: number } | null;
   detectConfidenceThreshold: number;
+  inpaintEngine: InpaintEngine;
   file: File | null;
   isBusy: boolean;
   job: JobResponse | null;
   onConvert: () => void;
   onCreateJob: () => void;
   onDetectConfidenceThresholdChange: (value: number) => void;
+  onInpaintEngineChange: (value: InpaintEngine) => void;
   onFileChange: (file: File | null) => void;
   onRunDetect: () => void;
   onSaveBoxes: () => void;
@@ -25,12 +28,14 @@ export function JobSidebar({
   busyAction,
   convertResult,
   detectConfidenceThreshold,
+  inpaintEngine,
   file,
   isBusy,
   job,
   onConvert,
   onCreateJob,
   onDetectConfidenceThresholdChange,
+  onInpaintEngineChange,
   onFileChange,
   onRunDetect,
   onSaveBoxes,
@@ -56,9 +61,24 @@ export function JobSidebar({
             min="0"
             max="1"
             step="0.01"
+            aria-label="Detect Confidence Threshold"
             value={detectConfidenceThreshold.toFixed(2)}
             onChange={(event) => onDetectConfidenceThresholdChange(Number.parseFloat(event.target.value))}
           />
+        </label>
+        <label className="control-field">
+          <span>Inpaint Engine</span>
+          <select
+            data-testid="inpaint-engine-select"
+            value={inpaintEngine}
+            onChange={(event) => onInpaintEngineChange(event.target.value as InpaintEngine)}
+          >
+            {INPAINT_ENGINE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </label>
         <button onClick={onCreateJob} disabled={isBusy || !file}>{busyAction === "Creating job..." ? "Creating Job..." : "Create Job"}</button>
         <button onClick={onRunDetect} disabled={isBusy || !job}>{busyAction === "Running OCR detect..." ? "Running OCR Detect..." : "Run OCR Detect"}</button>

@@ -15,7 +15,9 @@
 ## 專案狀態
 
 - 目前建議優先使用的背景引擎：`opencv-fast`
-- 可選的 GPU 背景引擎：`lama-onnx-cuda`，適合在本機已有 ONNX Runtime CUDA 與 LaMa 模型時做較高品質的 overlay 修補
+- 可選的 GPU 背景引擎：
+  - `lama-onnx-cuda`：適合在本機已有 ONNX Runtime CUDA 與 LaMa ONNX 模型時做較高品質的 overlay 修補
+  - `lama-pytorch`：透過官方 [advimman/lama](https://github.com/advimman/lama) PyTorch checkpoint（`big-lama`）做較高品質的 overlay 修補
 - `diffusion-local` 已移除，因為地端 diffusion inpainting 速度慢且效果不穩定
 - 大多數文件建議先從 `opencv-fast` 開始，遮罩過大時再回退到 `white-box`
 
@@ -37,6 +39,7 @@
   - `white-box`
   - `opencv-fast`（建議優先使用）
   - `lama-onnx-cuda`（可選 GPU 路徑，需明確指定）
+  - `lama-pytorch`（可選 GPU 路徑，透過官方 LaMa repo 與 PyTorch checkpoint，需明確指定）
   - `auto` 自動路由
 - 每次轉換都可輸出 JSON 報告。
 - 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
@@ -132,6 +135,57 @@ pdf2ppt input.pdf output.pptx \
 - 當你明確指定 `--inpaint-engine lama-onnx-cuda` 時，如果 runtime / provider / model 缺失，會直接報錯，不會默默回退到 `opencv-fast`
 - 為了降低顯存壓力，過大的 overlay 影像會先依 `--inpaint-max-side-px` 等比例縮小再做推論
 
+### 可選 GPU 引擎：`lama-pytorch`
+
+`lama-pytorch` 是額外提供的顯式選用引擎，透過獨立的 Python 環境執行官方 LaMa PyTorch checkpoint。與 `lama-onnx-cuda` 一樣，目前不納入 `auto` 路由。
+
+前置需求：
+
+- 將官方 LaMa 原始碼放在 `./lama`
+- 將 `big-lama` checkpoint 解壓到 `./lama/big-lama`，並包含 `config.yaml` 與 `models/best.ckpt`
+- 建立專用的 LaMa Conda 環境（與執行 pdf2ppt 的 `ppocr` 環境分開）
+
+建議的 LaMa 環境安裝方式：
+
+```bash
+bash scripts/setup_lama_env.sh
+conda activate lama
+```
+
+安裝腳本會建立名為 `lama` 的 Conda 環境，安裝 PyTorch CUDA、固定 `numpy<2`，並安裝 LaMa repo 所需相依套件。可用 `LAMA_CONDA_ENV=my-lama-env` 覆寫環境名稱。
+
+典型轉換指令：
+
+```bash
+conda activate ppocr
+pdf2ppt input.pdf output.pptx \
+  --inpaint-engine lama-pytorch \
+  --inpaint-model-root lama/big-lama \
+  --inpaint-lama-repo-root lama \
+  --inpaint-lama-device cuda
+```
+
+Python 解譯器選擇：
+
+- 預設會尋找 `~/miniconda3/envs/lama/bin/python`，或讀取環境變數 `PDF2PPT_LAMA_PYTHON`
+- 也可用 `--inpaint-lama-python /path/to/python` 明確指定
+- `ppocr` 環境負責執行 pdf2ppt；`lama` 環境只負責 LaMa 推論
+
+效能特性：
+
+- pdf2ppt 會啟動常駐 LaMa worker（`lama/bin/pdf2ppt_predict_server.py`），在同一個轉換流程中只載入一次 checkpoint
+- 第一個 overlay 頁面需要負擔模型載入成本（GPU 上常見約 10 秒）
+- 後續頁面會重用已載入的模型，速度明顯更快（常見約 1 到 2 秒）
+- 過大的頁面會先依 `--inpaint-max-side-px` 等比例縮小推論，再放大回原頁尺寸
+
+注意事項：
+
+- `lama-pytorch` 與 `lama-onnx-cuda` 使用的模型格式不同：
+  - `lama-pytorch` 需要解壓後的 PyTorch checkpoint 目錄（`lama/big-lama`）
+  - `lama-onnx-cuda` 需要 `model/lama/` 底下的 `.onnx` 檔
+- 明確指定 `--inpaint-engine lama-pytorch` 時，若 repo、checkpoint 或 LaMa 執行環境缺失，會直接報錯
+- 若你已有本地 ONNX 匯出且更重視速度，可優先考慮 `lama-onnx-cuda`
+
 它的設計目標是：
 
 - 不需要下載模型
@@ -189,13 +243,17 @@ pdf2ppt input.pdf output.pptx \
 常用參數：
 
 - `--inpaint-engine opencv-fast`：強制指定使用此引擎
-- `--inpaint-engine lama-onnx-cuda`：強制指定使用可選 GPU 引擎
+- `--inpaint-engine lama-onnx-cuda`：強制指定使用可選 ONNX GPU 引擎
+- `--inpaint-engine lama-pytorch`：強制指定使用可選 PyTorch GPU 引擎
 - `--inpaint-padding-px`：先擴張文字遮罩再修補
 - `--inpaint-max-area-ratio`：當遮罩過大時避免使用局部修補
-- `--inpaint-model-root`：`lama-onnx-cuda` 使用的目錄或 `.onnx` 模型檔
+- `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx-cuda` 的目錄 / `.onnx` 模型檔
+- `--inpaint-lama-repo-root`：`lama-pytorch` 使用的官方 LaMa repo 根目錄，預設 `./lama`
+- `--inpaint-lama-device`：傳給 LaMa PyTorch 推論的裝置，預設 `cuda`
+- `--inpaint-lama-python`：`lama-pytorch` 使用的 Python 解譯器；預設讀取 `PDF2PPT_LAMA_PYTHON` 或現有的 `lama` Conda 環境
 - `--inpaint-onnx-cuda-provider`：`lama-onnx-cuda` 使用的 ONNX Runtime provider 名稱
 - `--inpaint-onnx-execution-mode`：`lama-onnx-cuda` 使用的 ONNX Runtime execution mode
-- `--inpaint-max-side-px`：送進 `lama-onnx-cuda` 前允許的最大邊長
+- `--inpaint-max-side-px`：送進 LaMa GPU 引擎前允許的最大邊長
 - `--debug-dir`：輸出 mask 與背景決策結果方便檢查
 
 實務建議：
@@ -225,12 +283,15 @@ pdf2ppt input.pdf output.pptx \
 
 背景重建相關：
 
-- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`lama-onnx-cuda`
+- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`lama-onnx-cuda`、`lama-pytorch`
 - `--inpaint-padding-px`：在 inpainting 前擴張文字遮罩
 - `--inpaint-max-area-ratio`：當遮罩面積太大時，強制改用 white-box
-- `--inpaint-model-root`：可選 LaMa 模型所在的本地目錄或 `.onnx` 檔案
-- `--inpaint-onnx-cuda-provider`：LaMa 引擎使用的 ONNX Runtime provider 名稱
-- `--inpaint-onnx-execution-mode`：LaMa 引擎使用的 ONNX Runtime execution mode
+- `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx-cuda` 的本地目錄 / `.onnx` 檔案
+- `--inpaint-lama-repo-root`：`lama-pytorch` 使用的官方 LaMa repo 根目錄
+- `--inpaint-lama-device`：`lama-pytorch` 使用的裝置，預設 `cuda`
+- `--inpaint-lama-python`：`lama-pytorch` 使用的 Python 解譯器
+- `--inpaint-onnx-cuda-provider`：`lama-onnx-cuda` 使用的 ONNX Runtime provider 名稱
+- `--inpaint-onnx-execution-mode`：`lama-onnx-cuda` 使用的 ONNX Runtime execution mode
 - `--inpaint-max-side-px`：LaMa GPU 推論前的等比例縮圖保護上限
 
 診斷相關：

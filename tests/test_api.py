@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from pdf2ppt.api import app
 from pdf2ppt.core import OcrInitializationError, PageConversionError
 from pdf2ppt.job_store import JobStore
+from pdf2ppt.paths import get_repo_root
 
 
 class ApiTests(unittest.TestCase):
@@ -300,10 +301,54 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         options = convert_pdf_mock.call_args.args[0]
         self.assertEqual(options.inpaint_engine, "lama-onnx-cuda")
-        self.assertEqual(options.inpaint_model_root, Path("custom-lama"))
+        self.assertEqual(options.inpaint_model_root, get_repo_root() / "custom-lama")
         self.assertEqual(options.inpaint_onnx_cuda_provider, "CUDAExecutionProvider")
         self.assertEqual(options.inpaint_onnx_execution_mode, "parallel")
         self.assertEqual(options.inpaint_max_side_px, 1024)
+
+    @patch("pdf2ppt.api.convert_pdf")
+    def test_convert_passes_lama_pytorch_inpaint_options(
+        self,
+        convert_pdf_mock: unittest.mock.Mock,
+    ) -> None:
+        convert_pdf_mock.return_value = SimpleNamespace(pages=[object()])
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        self.client.put(
+            f"/jobs/{job_id}/boxes",
+            json={
+                "pages": [
+                    {
+                        "page": 1,
+                        "width": 320,
+                        "height": 240,
+                        "boxes": [],
+                    }
+                ]
+            },
+        )
+
+        response = self.client.post(
+            f"/jobs/{job_id}/convert",
+            json={
+                "write_debug_artifacts": False,
+                "inpaint_engine": "lama-pytorch",
+                "inpaint_model_root": "lama/big-lama",
+                "inpaint_lama_repo_root": "lama",
+                "inpaint_lama_device": "cuda",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        options = convert_pdf_mock.call_args.args[0]
+        self.assertEqual(options.inpaint_engine, "lama-pytorch")
+        self.assertEqual(options.inpaint_model_root, get_repo_root() / "lama" / "big-lama")
+        self.assertEqual(options.inpaint_lama_repo_root, get_repo_root() / "lama")
+        self.assertEqual(options.inpaint_lama_device, "cuda")
 
     @patch("pdf2ppt.api.OcrEngine.extract_text_blocks_batch")
     def test_detect_returns_ocr_initialization_error(

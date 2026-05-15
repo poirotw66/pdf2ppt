@@ -29,6 +29,7 @@ from .core import InputValidationError, OcrInitializationError, OcrProcessingErr
 from .job_store import JobRecord, JobStore
 from .models import TextBlock
 from .ocr import OcrEngine
+from .paths import resolve_repo_relative_path
 from .pipeline import convert_pdf
 
 app = FastAPI(title="pdf2ppt API", version="0.1.0")
@@ -97,7 +98,7 @@ def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
 
     ocr_engine = OcrEngine(
         lang=request.lang,
-        model_root=Path(request.ocr_model_root) if request.ocr_model_root is not None else None,
+        model_root=resolve_repo_relative_path(request.ocr_model_root),
         use_doc_orientation=request.use_doc_orientation,
         use_textline_orientation=request.use_textline_orientation,
         use_doc_unwarping=request.use_doc_unwarping,
@@ -190,7 +191,7 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         report_path=report_path,
         mode=request.mode,
         lang=request.lang,
-        ocr_model_root=Path(request.ocr_model_root) if request.ocr_model_root is not None else None,
+        ocr_model_root=resolve_repo_relative_path(request.ocr_model_root),
         ocr_use_doc_orientation=request.use_doc_orientation,
         ocr_use_textline_orientation=request.use_textline_orientation,
         ocr_det_thresh=request.det_thresh,
@@ -206,10 +207,12 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         inpaint_engine=request.inpaint_engine,
         inpaint_padding_px=request.inpaint_padding_px,
         inpaint_max_area_ratio=request.inpaint_max_area_ratio,
-        inpaint_model_root=Path(request.inpaint_model_root) if request.inpaint_model_root is not None else None,
+        inpaint_model_root=resolve_repo_relative_path(request.inpaint_model_root),
         inpaint_onnx_cuda_provider=request.inpaint_onnx_cuda_provider,
         inpaint_onnx_execution_mode=request.inpaint_onnx_execution_mode,
         inpaint_max_side_px=request.inpaint_max_side_px,
+        inpaint_lama_repo_root=resolve_repo_relative_path(request.inpaint_lama_repo_root),
+        inpaint_lama_device=request.inpaint_lama_device,
         approved_ocr_blocks_by_page=approved_boxes_by_page,
         approved_ocr_image_size_by_page=approved_image_sizes_by_page,
     )

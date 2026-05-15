@@ -1,6 +1,10 @@
 import { useState } from "react";
 
-import { detectConfidenceThreshold as defaultDetectConfidenceThreshold } from "./config";
+import {
+  defaultInpaintEngine,
+  detectConfidenceThreshold as defaultDetectConfidenceThreshold,
+  type InpaintEngine,
+} from "./config";
 import { InspectorPanel } from "./components/InspectorPanel";
 import { JobSidebar } from "./components/JobSidebar";
 import { PreviewEditor } from "./components/PreviewEditor";
@@ -9,6 +13,7 @@ import { usePdf2PptApi } from "./hooks/usePdf2PptApi";
 
 export default function App() {
   const [detectConfidenceThreshold, setDetectConfidenceThreshold] = useState(defaultDetectConfidenceThreshold);
+  const [inpaintEngine, setInpaintEngine] = useState<InpaintEngine>(defaultInpaintEngine);
   const [file, setFile] = useState<File | null>(null);
   const api = usePdf2PptApi();
   const editor = useBoxEditorState({ setStatusText: api.setStatusText });
@@ -52,7 +57,7 @@ export default function App() {
     if (!saved) {
       return;
     }
-    await api.convertJob(api.job.job_id);
+    await api.convertJob(api.job.job_id, inpaintEngine);
   }
 
   return (
@@ -62,6 +67,7 @@ export default function App() {
         busyAction={api.busyAction}
         convertResult={api.convertResult}
         detectConfidenceThreshold={detectConfidenceThreshold}
+        inpaintEngine={inpaintEngine}
         file={file}
         isBusy={api.isBusy}
         job={api.job}
@@ -73,6 +79,7 @@ export default function App() {
           }
           setDetectConfidenceThreshold(Math.min(1, Math.max(0, value)));
         }}
+        onInpaintEngineChange={setInpaintEngine}
         onFileChange={setFile}
         onRunDetect={handleRunDetect}
         onSaveBoxes={() => {

@@ -15,7 +15,9 @@ Core pipeline:
 ## Project Status
 
 - Recommended default background engine: `opencv-fast`
-- Optional GPU background engine: `lama-onnx-cuda` for explicit high-quality overlay repair when ONNX Runtime CUDA and a local LaMa model are available
+- Optional GPU background engines:
+  - `lama-onnx-cuda` for explicit high-quality overlay repair when ONNX Runtime CUDA and a local LaMa ONNX model are available
+  - `lama-pytorch` for explicit high-quality overlay repair through the official [advimman/lama](https://github.com/advimman/lama) PyTorch checkpoint (`big-lama`)
 - `diffusion-local` has been removed because local diffusion inpainting was too slow and inconsistent
 - For most documents, start with `opencv-fast` first and let the pipeline fall back to `white-box` when masking is too large
 
@@ -37,6 +39,7 @@ Core pipeline:
   - `white-box`
   - `opencv-fast` (recommended)
   - `lama-onnx-cuda` (optional GPU path, explicit opt-in)
+  - `lama-pytorch` (optional GPU path via official LaMa repo + PyTorch checkpoint, explicit opt-in)
   - `auto` routing
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
@@ -138,6 +141,57 @@ pdf2ppt input.pdf output.pptx \
 - When `--inpaint-engine lama-onnx-cuda` is selected, missing runtime, missing provider, or missing model is a hard error; it does not silently fall back to `opencv-fast`
 - Large overlay images are proportionally downscaled to `--inpaint-max-side-px` before inference to reduce VRAM pressure
 
+### Optional GPU engine: `lama-pytorch`
+
+`lama-pytorch` is an explicit opt-in engine that runs the official LaMa PyTorch checkpoint through a separate Python environment. Like `lama-onnx-cuda`, it is not part of `auto` routing.
+
+What you need:
+
+- Clone the official LaMa repository into `./lama`
+- Extract the `big-lama` checkpoint under `./lama/big-lama` with `config.yaml` and `models/best.ckpt`
+- Create a dedicated Conda environment for LaMa inference (separate from the `ppocr` runtime)
+
+Recommended LaMa environment setup:
+
+```bash
+bash scripts/setup_lama_env.sh
+conda activate lama
+```
+
+The setup script creates a `lama` Conda env with PyTorch CUDA, pins `numpy<2`, and installs the LaMa repo dependencies. You can override the env name with `LAMA_CONDA_ENV=my-lama-env`.
+
+Typical conversion command:
+
+```bash
+conda activate ppocr
+pdf2ppt input.pdf output.pptx \
+  --inpaint-engine lama-pytorch \
+  --inpaint-model-root lama/big-lama \
+  --inpaint-lama-repo-root lama \
+  --inpaint-lama-device cuda
+```
+
+Python interpreter selection:
+
+- By default, pdf2ppt looks for `~/miniconda3/envs/lama/bin/python` (or `PDF2PPT_LAMA_PYTHON`)
+- Override explicitly with `--inpaint-lama-python /path/to/python`
+- The `ppocr` environment runs pdf2ppt; the `lama` environment only runs LaMa inference
+
+Performance characteristics:
+
+- pdf2ppt starts a persistent LaMa worker (`lama/bin/pdf2ppt_predict_server.py`) that loads the checkpoint once per conversion process
+- The first overlay page pays the model-load cost (often around 10 seconds on GPU)
+- Later pages reuse the loaded model and are much faster (often around 1 to 2 seconds)
+- Large pages are proportionally downscaled to `--inpaint-max-side-px` before inference, then resized back to the original page size
+
+Important notes:
+
+- `lama-pytorch` and `lama-onnx-cuda` use different model layouts:
+  - `lama-pytorch` expects the extracted PyTorch checkpoint directory (`lama/big-lama`)
+  - `lama-onnx-cuda` expects an `.onnx` file under `model/lama/`
+- When `--inpaint-engine lama-pytorch` is selected, missing repo, missing checkpoint, or missing LaMa runtime dependencies is a hard error
+- If you need the fastest GPU path and already have a local ONNX export, prefer `lama-onnx-cuda`
+
 It is designed for speed and low setup cost:
 
 - No model download is required.
@@ -195,13 +249,17 @@ How it interacts with `auto` routing:
 Relevant knobs:
 
 - `--inpaint-engine opencv-fast`: force this engine explicitly
-- `--inpaint-engine lama-onnx-cuda`: force the optional GPU engine explicitly
+- `--inpaint-engine lama-onnx-cuda`: force the optional ONNX GPU engine explicitly
+- `--inpaint-engine lama-pytorch`: force the optional PyTorch GPU engine explicitly
 - `--inpaint-padding-px`: enlarge the text mask before inpainting
 - `--inpaint-max-area-ratio`: avoid using local repair when too much of the page is masked
-- `--inpaint-model-root`: directory or `.onnx` file used by `lama-onnx-cuda`
+- `--inpaint-model-root`: checkpoint directory for `lama-pytorch`, or directory / `.onnx` file for `lama-onnx-cuda`
+- `--inpaint-lama-repo-root`: official LaMa repository root for `lama-pytorch`, default `./lama`
+- `--inpaint-lama-device`: device passed to LaMa PyTorch inference, default `cuda`
+- `--inpaint-lama-python`: Python executable used for `lama-pytorch`; defaults to `PDF2PPT_LAMA_PYTHON` or the `lama` Conda env when present
 - `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for `lama-onnx-cuda`
 - `--inpaint-onnx-execution-mode`: `sequential` or `parallel` ONNX Runtime execution mode
-- `--inpaint-max-side-px`: maximum image side sent into `lama-onnx-cuda` before proportional downscaling
+- `--inpaint-max-side-px`: maximum image side sent into LaMa GPU engines before proportional downscaling
 - `--debug-dir`: inspect generated masks and background decisions
 
 Practical guidance:
@@ -235,12 +293,15 @@ Main arguments:
 
 Background reconstruction:
 
-- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, or `lama-onnx-cuda`
+- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, `lama-onnx-cuda`, or `lama-pytorch`
 - `--inpaint-padding-px`: expand text masks before inpainting
 - `--inpaint-max-area-ratio`: force white-box fallback when the masked area is too large
-- `--inpaint-model-root`: local directory or `.onnx` file for the optional LaMa model
-- `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for the LaMa engine
-- `--inpaint-onnx-execution-mode`: ONNX Runtime execution mode for the LaMa engine
+- `--inpaint-model-root`: checkpoint directory for `lama-pytorch`, or local directory / `.onnx` file for `lama-onnx-cuda`
+- `--inpaint-lama-repo-root`: official LaMa repository root for `lama-pytorch`
+- `--inpaint-lama-device`: device for `lama-pytorch`, default `cuda`
+- `--inpaint-lama-python`: Python executable for `lama-pytorch`
+- `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for `lama-onnx-cuda`
+- `--inpaint-onnx-execution-mode`: ONNX Runtime execution mode for `lama-onnx-cuda`
 - `--inpaint-max-side-px`: proportional resize guard before LaMa GPU inference
 
 Diagnostics:
