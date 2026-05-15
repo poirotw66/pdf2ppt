@@ -1,5 +1,0 @@
-- model.path=lama/big-lama
-- indir=/tmp/lama-test-in
-- outdir=/tmp/lama-test-out-predict
-- dataset.img_suffix=.png
-- device=cuda

@@ -27,6 +27,12 @@ LAMA_PY="$("$CONDA" info --base)/envs/${ENV_NAME}/bin/python"
   hydra-core==1.1.0 omegaconf pytorch-lightning==1.2.9 \
   kornia==0.5.0 albumentations==0.5.2 webdataset
 
+if [[ -d "${REPO_ROOT}/lama/.git" ]]; then
+  bash "${REPO_ROOT}/scripts/apply_lama_patches.sh"
+else
+  echo "Skipping LaMa patches: clone https://github.com/advimman/lama into ${REPO_ROOT}/lama first." >&2
+fi
+
 export PYTHONPATH="${REPO_ROOT}/lama${PYTHONPATH:+:$PYTHONPATH}"
 export TORCH_HOME="${REPO_ROOT}/lama"
 "$LAMA_PY" -c "import saicinpainting.evaluation.utils; import torch; print('lama env ready:', torch.__version__, 'cuda=', torch.cuda.is_available())"

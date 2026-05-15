@@ -16,3 +16,7 @@ tests/artifacts/
 !tests/fixtures/
 !tests/fixtures/**
 lama/
+output.pptx
+output.report.json
+wget-log
+outputs/
