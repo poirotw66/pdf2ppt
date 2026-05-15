@@ -64,6 +64,9 @@ class ConversionOptions:
     inpaint_onnx_cuda_provider: str = "CUDAExecutionProvider"
     inpaint_onnx_execution_mode: str = "sequential"
     inpaint_max_side_px: int = 1536
+    inpaint_lama_repo_root: Path | None = Path("lama")
+    inpaint_lama_device: str = "cuda"
+    inpaint_lama_python_executable: Path | None = None
     approved_ocr_blocks_by_page: dict[int, list[Any]] = field(default_factory=dict)
     approved_ocr_image_size_by_page: dict[int, tuple[int, int]] = field(default_factory=dict)
 

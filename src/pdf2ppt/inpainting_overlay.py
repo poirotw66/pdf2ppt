@@ -14,6 +14,7 @@ from .inpainting_engines import (
     BackgroundInpaintingError,
     BackgroundRenderResult,
     LamaOnnxCudaInpaintingEngine,
+    LamaPytorchInpaintingEngine,
     OpenCvFastInpaintingEngine,
     WhiteBoxInpaintingEngine,
 )
@@ -172,7 +173,7 @@ def render_overlay_background(
 
     logger.info("Using background engine %s", engine.name)
     logger.debug("Background engine note: %s", note)
-    if options.inpaint_engine == "lama-onnx-cuda":
+    if options.inpaint_engine in {"lama-onnx-cuda", "lama-pytorch"}:
         return finalize_result(
             engine.inpaint(prepared_page_image, mask_image),
             rendered_engine_name=engine.name,
@@ -911,6 +912,17 @@ def resolve_background_inpainting_engine(
         ), (
             f"Selected lama-onnx-cuda engine explicitly (mask area ratio {mask_ratio:.4f}, "
             f"provider {options.inpaint_onnx_cuda_provider}, execution_mode {options.inpaint_onnx_execution_mode})."
+        )
+    if requested_engine == "lama-pytorch":
+        return LamaPytorchInpaintingEngine(
+            model_root=options.inpaint_model_root,
+            repo_root=options.inpaint_lama_repo_root,
+            device=options.inpaint_lama_device,
+            python_executable=options.inpaint_lama_python_executable,
+            max_side_px=options.inpaint_max_side_px,
+        ), (
+            f"Selected lama-pytorch engine explicitly (mask area ratio {mask_ratio:.4f}, "
+            f"repo_root {options.inpaint_lama_repo_root}, device {options.inpaint_lama_device})."
         )
 
     if mask_ratio > options.inpaint_max_area_ratio:

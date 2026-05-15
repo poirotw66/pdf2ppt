@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import atexit
 import importlib
+import json
 import logging
 import math
+import os
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
@@ -336,6 +342,129 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
         return Image.fromarray(result, mode="RGB")
 
 
+@dataclass(slots=True)
+class _LamaPytorchWorkerHandle:
+    process: subprocess.Popen[str]
+    lock: Lock
+
+
+_LAMA_PYTORCH_WORKERS: dict[tuple[str, str, str], _LamaPytorchWorkerHandle] = {}
+_LAMA_PYTORCH_WORKERS_LOCK = Lock()
+
+
+def _shutdown_lama_pytorch_workers() -> None:
+    with _LAMA_PYTORCH_WORKERS_LOCK:
+        handles = list(_LAMA_PYTORCH_WORKERS.values())
+        _LAMA_PYTORCH_WORKERS.clear()
+    for handle in handles:
+        with handle.lock:
+            if handle.process.poll() is None:
+                try:
+                    handle.process.stdin.write("shutdown\n")
+                    handle.process.stdin.flush()
+                except OSError:
+                    pass
+                handle.process.terminate()
+
+
+atexit.register(_shutdown_lama_pytorch_workers)
+
+
+class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
+    name = "lama-pytorch"
+
+    def __init__(
+        self,
+        *,
+        model_root: Path | None,
+        repo_root: Path | None,
+        device: str = "cuda",
+        python_executable: Path | None = None,
+        max_side_px: int = DEFAULT_LAMA_ONNX_MAX_SIDE_PX,
+    ) -> None:
+        self.model_root = model_root
+        self.repo_root = repo_root
+        self.device = device.strip() or "cuda"
+        self.python_executable = python_executable
+        self.max_side_px = max(256, int(max_side_px))
+        self._last_debug_note: str | None = None
+
+    @property
+    def last_debug_note(self) -> str | None:
+        return self._last_debug_note
+
+    def inpaint(self, page_image: Image.Image, mask_image: Image.Image) -> Image.Image:
+        self._last_debug_note = None
+        source_rgb = np.array(page_image.convert("RGB"), dtype=np.uint8)
+        mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
+        if np.count_nonzero(mask_array) == 0:
+            return Image.fromarray(source_rgb, mode="RGB")
+
+        model_path = _resolve_lama_pytorch_model_path(self.model_root)
+        repo_root = _resolve_lama_repo_root(self.repo_root)
+        python_executable = _resolve_lama_python_executable(self.python_executable)
+        _validate_lama_pytorch_runtime(python_executable=python_executable, repo_root=repo_root)
+
+        resized_rgb, resized_mask, resized = _resize_lama_inputs(
+            source_rgb,
+            mask_array,
+            max_side_px=self.max_side_px,
+        )
+        resized_page = Image.fromarray(resized_rgb, mode="RGB")
+        resized_mask_image = Image.fromarray((resized_mask > 0).astype(np.uint8) * 255, mode="L")
+
+        with tempfile.TemporaryDirectory(prefix="pdf2ppt-lama-") as temp_dir_str:
+            temp_dir = Path(temp_dir_str)
+            indir = temp_dir / "inputs"
+            outdir = temp_dir / "outputs"
+            indir.mkdir(parents=True, exist_ok=True)
+            outdir.mkdir(parents=True, exist_ok=True)
+
+            image_path = indir / "page.png"
+            mask_path = indir / "page_mask001.png"
+            resized_page.save(image_path)
+            resized_mask_image.save(mask_path)
+
+            _run_lama_pytorch_prediction(
+                python_executable=python_executable,
+                repo_root=repo_root,
+                model_path=model_path,
+                device=self.device,
+                indir=indir,
+                outdir=outdir,
+            )
+
+            output_path = outdir / "page_mask001.png"
+            if not output_path.exists():
+                output_candidates = sorted(outdir.rglob("*.png"))
+                if len(output_candidates) == 1:
+                    output_path = output_candidates[0]
+                else:
+                    raise BackgroundInpaintingError(
+                        f"Official LaMa prediction did not produce the expected output under {outdir}."
+                    )
+
+            restored_rgb = np.array(Image.open(output_path).convert("RGB"), dtype=np.uint8)
+            if restored_rgb.shape[:2] != resized_rgb.shape[:2]:
+                raise BackgroundInpaintingError(
+                    f"Official LaMa output shape {restored_rgb.shape[:2]} did not match input shape {resized_rgb.shape[:2]}."
+                )
+            if resized:
+                restored_rgb = cv2.resize(
+                    restored_rgb,
+                    (source_rgb.shape[1], source_rgb.shape[0]),
+                    interpolation=cv2.INTER_CUBIC,
+                )
+            result = source_rgb.copy()
+            result[mask_array > 0] = restored_rgb[mask_array > 0]
+            resize_note = f" resized-to-max-side={self.max_side_px}" if resized else ""
+            self._last_debug_note = (
+                f"Official LaMa repo={repo_root.name} device={self.device} model={model_path.name} "
+                f"python={Path(python_executable).name} persistent-worker{resize_note}."
+            )
+            return Image.fromarray(result, mode="RGB")
+
+
 def _resolve_lama_model_path(model_root: Path | None) -> Path:
     if model_root is None:
         raise BackgroundInpaintingError("LaMa ONNX model path is not configured. Set inpaint_model_root.")
@@ -357,6 +486,232 @@ def _resolve_lama_model_path(model_root: Path | None) -> Path:
         f"No LaMa ONNX model was found under {resolved_root}. Expected one of: "
         f"{', '.join(DEFAULT_LAMA_ONNX_MODEL_FILENAMES)}"
     )
+
+
+def _resolve_lama_repo_root(repo_root: Path | None) -> Path:
+    if repo_root is None:
+        raise BackgroundInpaintingError("Official LaMa repo path is not configured. Set inpaint_lama_repo_root.")
+    resolved_root = repo_root.expanduser().resolve()
+    predict_script = resolved_root / "bin" / "predict.py"
+    if not predict_script.exists():
+        raise BackgroundInpaintingError(
+            f"Official LaMa repo root is invalid: {resolved_root}. Expected bin/predict.py to exist."
+        )
+    return resolved_root
+
+
+def _resolve_lama_pytorch_model_path(model_root: Path | None) -> Path:
+    if model_root is None:
+        raise BackgroundInpaintingError("Official LaMa model path is not configured. Set inpaint_model_root.")
+    resolved_root = model_root.expanduser().resolve()
+    if not resolved_root.is_dir():
+        raise BackgroundInpaintingError(
+            f"Official LaMa model path must point to the extracted checkpoint directory: {resolved_root}"
+        )
+    if not (resolved_root / "config.yaml").exists() or not (resolved_root / "models").is_dir():
+        raise BackgroundInpaintingError(
+            f"Official LaMa model directory is missing config.yaml or models/: {resolved_root}"
+        )
+    return resolved_root
+
+
+def _resolve_lama_python_executable(python_executable: Path | None) -> Path:
+    if python_executable is not None:
+        resolved_python = python_executable.expanduser().resolve()
+        if not resolved_python.exists():
+            raise BackgroundInpaintingError(f"Official LaMa python executable does not exist: {resolved_python}")
+        return resolved_python
+
+    env_override = os.environ.get("PDF2PPT_LAMA_PYTHON")
+    if env_override:
+        resolved_python = Path(env_override).expanduser().resolve()
+        if resolved_python.exists():
+            return resolved_python
+
+    for candidate in _default_lama_python_candidates():
+        if candidate.exists():
+            return candidate
+
+    return Path(sys.executable)
+
+
+_LAMA_PYTORCH_VALIDATED: set[tuple[str, str]] = set()
+_LAMA_PYTORCH_VALIDATE_LOCK = Lock()
+
+
+def _default_lama_python_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix and Path(conda_prefix).name == "lama":
+        candidates.append(Path(conda_prefix) / "bin" / "python")
+    home = Path.home()
+    for conda_root in (home / "miniconda3", home / "anaconda3", home / "mambaforge", home / "miniforge3"):
+        candidates.append(conda_root / "envs" / "lama" / "bin" / "python")
+    return candidates
+
+
+def _validate_lama_pytorch_runtime(*, python_executable: Path, repo_root: Path) -> None:
+    cache_key = (str(python_executable), str(repo_root))
+    with _LAMA_PYTORCH_VALIDATE_LOCK:
+        if cache_key in _LAMA_PYTORCH_VALIDATED:
+            return
+
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(repo_root) if not existing_pythonpath else f"{repo_root}:{existing_pythonpath}"
+    probe = (
+        "import saicinpainting.evaluation.utils; "
+        "import saicinpainting.training.data.datasets; "
+        "import torch"
+    )
+    completed = subprocess.run(
+        [str(python_executable), "-c", probe],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "import probe failed").strip()
+        lines = detail.splitlines()
+        concise = "\n".join(lines[-8:]) if len(lines) > 8 else detail
+        raise BackgroundInpaintingError(
+            f"LaMa PyTorch runtime is not ready in {python_executable}. "
+            "The official advimman/lama repo needs its own Python environment "
+            "(see lama/requirements.txt or: conda env create -f lama/conda_env.yml). "
+            "Pass --inpaint-lama-python or set PDF2PPT_LAMA_PYTHON to a compatible interpreter. "
+            f"Import error: {concise}"
+        )
+
+    with _LAMA_PYTORCH_VALIDATE_LOCK:
+        _LAMA_PYTORCH_VALIDATED.add(cache_key)
+
+
+def _build_lama_subprocess_env(*, repo_root: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["TORCH_HOME"] = str(repo_root)
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(repo_root) if not existing_pythonpath else f"{repo_root}:{existing_pythonpath}"
+    return env
+
+
+def _read_lama_pytorch_response(process: subprocess.Popen[str]) -> dict[str, object]:
+    if process.stdout is None:
+        raise BackgroundInpaintingError("LaMa PyTorch worker did not expose stdout.")
+    while True:
+        response_line = process.stdout.readline()
+        if not response_line:
+            stderr_tail = ""
+            if process.stderr is not None:
+                stderr_tail = process.stderr.read()[-2000:]
+            raise BackgroundInpaintingError(
+                f"LaMa PyTorch worker exited unexpectedly while waiting for a response. {stderr_tail}".strip()
+            )
+        stripped = response_line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            payload = json.loads(stripped)
+            break
+        except json.JSONDecodeError as error:
+            raise BackgroundInpaintingError(f"LaMa PyTorch worker returned invalid JSON: {response_line!r}") from error
+    if not isinstance(payload, dict):
+        raise BackgroundInpaintingError(f"LaMa PyTorch worker returned an unexpected payload: {payload!r}")
+    return payload
+
+
+def _get_lama_pytorch_worker(
+    *,
+    python_executable: Path,
+    repo_root: Path,
+    model_path: Path,
+    device: str,
+) -> _LamaPytorchWorkerHandle:
+    cache_key = (str(python_executable), str(model_path), device)
+    env = _build_lama_subprocess_env(repo_root=repo_root)
+    with _LAMA_PYTORCH_WORKERS_LOCK:
+        cached = _LAMA_PYTORCH_WORKERS.get(cache_key)
+        if cached is not None and cached.process.poll() is None:
+            return cached
+        if cached is not None:
+            cached.process.kill()
+
+        process = subprocess.Popen(
+            [
+                str(python_executable),
+                "bin/pdf2ppt_predict_server.py",
+                f"--model-path={model_path}",
+                f"--device={device}",
+            ],
+            cwd=repo_root,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        handle = _LamaPytorchWorkerHandle(process=process, lock=Lock())
+        _LAMA_PYTORCH_WORKERS[cache_key] = handle
+
+    with handle.lock:
+        payload = _read_lama_pytorch_response(handle.process)
+        if not payload.get("ok"):
+            message = str(payload.get("message", "failed to start LaMa PyTorch worker"))
+            raise BackgroundInpaintingError(f"LaMa PyTorch worker failed to start: {message}")
+    return handle
+
+
+def _run_lama_pytorch_prediction(
+    *,
+    python_executable: Path,
+    repo_root: Path,
+    model_path: Path,
+    device: str,
+    indir: Path,
+    outdir: Path,
+) -> None:
+    try:
+        worker = _get_lama_pytorch_worker(
+            python_executable=python_executable,
+            repo_root=repo_root,
+            model_path=model_path,
+            device=device,
+        )
+        with worker.lock:
+            if worker.process.stdin is None:
+                raise BackgroundInpaintingError("LaMa PyTorch worker did not expose stdin.")
+            job = {"indir": str(indir), "outdir": str(outdir), "img_suffix": ".png"}
+            worker.process.stdin.write(json.dumps(job) + "\n")
+            worker.process.stdin.flush()
+            payload = _read_lama_pytorch_response(worker.process)
+        if not payload.get("ok"):
+            message = str(payload.get("message", "official LaMa prediction failed"))
+            raise BackgroundInpaintingError(f"Official LaMa prediction failed: {message}")
+        return
+    except BackgroundInpaintingError:
+        raise
+    except Exception as error:
+        logger.warning("LaMa PyTorch persistent worker failed; falling back to one-shot predict.py: %s", error)
+
+    command = [
+        str(python_executable),
+        "bin/predict.py",
+        f"model.path={model_path}",
+        f"indir={indir}",
+        f"outdir={outdir}",
+        "dataset.img_suffix=.png",
+        f"device={device}",
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=repo_root,
+        env=_build_lama_subprocess_env(repo_root=repo_root),
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "official LaMa prediction failed").strip()
+        raise BackgroundInpaintingError(f"Official LaMa prediction failed: {detail}")
 
 
 def _import_onnxruntime() -> Any:
@@ -1599,6 +1954,7 @@ __all__ = [
     "BackgroundInpaintingError",
     "BackgroundRenderResult",
     "LamaOnnxCudaInpaintingEngine",
+    "LamaPytorchInpaintingEngine",
     "OpenCvFastInpaintingEngine",
     "WhiteBoxInpaintingEngine",
 ]

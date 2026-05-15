@@ -4,6 +4,7 @@ from .inpainting import (
     BackgroundInpaintingError,
     BackgroundRenderResult,
     LamaOnnxCudaInpaintingEngine,
+    LamaPytorchInpaintingEngine,
     OpenCvFastInpaintingEngine,
     WhiteBoxInpaintingEngine,
     build_text_mask_image,

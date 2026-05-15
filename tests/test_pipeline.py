@@ -373,6 +373,55 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("lama-onnx-cuda", note)
         self.assertEqual(engine.max_side_px, 1024)
 
+    def test_resolve_background_inpainting_engine_returns_lama_pytorch_for_explicit_request(self) -> None:
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        mask_image = Image.new("L", (60, 40), color=0)
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="lama-pytorch",
+            inpaint_model_root=Path("model/big-lama"),
+            inpaint_lama_repo_root=Path("lama"),
+            inpaint_lama_device="cuda",
+        )
+
+        engine, note = resolve_background_inpainting_engine(image, mask_image, options)
+
+        self.assertIsInstance(engine, inpainting_engines.LamaPytorchInpaintingEngine)
+        self.assertIn("lama-pytorch", note)
+
+    def test_render_overlay_background_explicit_lama_pytorch_is_strict(self) -> None:
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        blocks = [
+            TextBlock(
+                id="ocr_lama_pytorch_strict",
+                source="ocr",
+                bbox=(20, 12, 35, 24),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 12, 35, 24),
+            )
+        ]
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="lama-pytorch",
+            inpaint_model_root=Path("model/big-lama"),
+            inpaint_lama_repo_root=Path("lama"),
+        )
+
+        with patch.object(
+            inpainting_engines.LamaPytorchInpaintingEngine,
+            "inpaint",
+            side_effect=BackgroundInpaintingError("lama repo failed"),
+        ), patch.object(inpainting_engines.WhiteBoxInpaintingEngine, "inpaint") as white_box_mock:
+            with self.assertRaisesRegex(BackgroundInpaintingError, "lama repo failed"):
+                render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=options)
+
+        white_box_mock.assert_not_called()
+
     def test_render_overlay_background_explicit_lama_is_strict(self) -> None:
         image = Image.new("RGB", (60, 40), color=(35, 45, 55))
         blocks = [
@@ -418,6 +467,84 @@ class BackgroundModeTests(unittest.TestCase):
             with patch("pdf2ppt.inpainting_engines.importlib.import_module", side_effect=ImportError("missing ort")):
                 with self.assertRaisesRegex(BackgroundInpaintingError, "onnxruntime-gpu"):
                     engine.inpaint(Image.new("RGB", (20, 20), color=(10, 20, 30)), Image.new("L", (20, 20), color=255))
+
+    def test_lama_pytorch_engine_requires_repo_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_dir = Path(temp_dir) / "big-lama"
+            model_dir.mkdir()
+            (model_dir / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+            (model_dir / "models").mkdir()
+            engine = inpainting_engines.LamaPytorchInpaintingEngine(
+                model_root=model_dir,
+                repo_root=Path(temp_dir) / "missing-lama-repo",
+            )
+
+            with self.assertRaisesRegex(BackgroundInpaintingError, "bin/predict.py"):
+                engine.inpaint(Image.new("RGB", (20, 20), color=(10, 20, 30)), Image.new("L", (20, 20), color=255))
+
+    def test_lama_pytorch_engine_reports_missing_runtime_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            model_dir = temp_root / "big-lama"
+            model_dir.mkdir()
+            (model_dir / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+            (model_dir / "models").mkdir()
+            repo_root = temp_root / "lama"
+            (repo_root / "bin").mkdir(parents=True)
+            (repo_root / "bin" / "predict.py").write_text("# placeholder\n", encoding="utf-8")
+            engine = inpainting_engines.LamaPytorchInpaintingEngine(
+                model_root=model_dir,
+                repo_root=repo_root,
+            )
+
+            def failing_probe(command: list[str], **kwargs: object) -> SimpleNamespace:
+                return SimpleNamespace(returncode=1, stdout="", stderr="ModuleNotFoundError: No module named 'sklearn'")
+
+            with patch("pdf2ppt.inpainting_engines.subprocess.run", side_effect=failing_probe):
+                with self.assertRaisesRegex(BackgroundInpaintingError, "LaMa PyTorch runtime is not ready"):
+                    engine.inpaint(
+                        Image.new("RGB", (20, 20), color=(10, 20, 30)),
+                        Image.new("L", (20, 20), color=255),
+                    )
+
+    def test_lama_pytorch_engine_runs_official_repo_predictor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            model_dir = temp_root / "big-lama"
+            model_dir.mkdir()
+            (model_dir / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+            (model_dir / "models").mkdir()
+            repo_root = temp_root / "lama"
+            (repo_root / "bin").mkdir(parents=True)
+            (repo_root / "bin" / "predict.py").write_text("# placeholder\n", encoding="utf-8")
+
+            def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+                if len(command) >= 3 and command[1] == "-c":
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            def fake_predict(**kwargs: object) -> None:
+                outdir = kwargs["outdir"]
+                assert isinstance(outdir, Path)
+                Image.new("RGB", (20, 20), color=(120, 130, 140)).save(outdir / "page_mask001.png")
+
+            engine = inpainting_engines.LamaPytorchInpaintingEngine(
+                model_root=model_dir,
+                repo_root=repo_root,
+            )
+
+            with (
+                patch("pdf2ppt.inpainting_engines.subprocess.run", side_effect=fake_run),
+                patch("pdf2ppt.inpainting_engines._run_lama_pytorch_prediction", side_effect=fake_predict) as predict_mock,
+            ):
+                result = engine.inpaint(
+                    Image.new("RGB", (20, 20), color=(10, 20, 30)),
+                    Image.new("L", (20, 20), color=255),
+                )
+
+            self.assertEqual(result.getpixel((10, 10)), (120, 130, 140))
+            self.assertIn("Official LaMa", engine.last_debug_note or "")
+            predict_mock.assert_called_once()
 
     def test_lama_model_input_mapping_prefers_named_inputs(self) -> None:
         fake_session = SimpleNamespace(
@@ -2277,6 +2404,12 @@ class CliTests(unittest.TestCase):
                 "parallel",
                 "--inpaint-max-side-px",
                 "1024",
+                "--inpaint-lama-repo-root",
+                "official-lama",
+                "--inpaint-lama-device",
+                "cpu",
+                "--inpaint-lama-python",
+                "/usr/bin/python3",
                 "--background-dpi",
                 "96",
                 "--background-format",
@@ -2298,6 +2431,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.inpaint_onnx_cuda_provider, "CUDAExecutionProvider")
         self.assertEqual(args.inpaint_onnx_execution_mode, "parallel")
         self.assertEqual(args.inpaint_max_side_px, 1024)
+        self.assertEqual(args.inpaint_lama_repo_root, Path("official-lama"))
+        self.assertEqual(args.inpaint_lama_device, "cpu")
+        self.assertEqual(args.inpaint_lama_python, Path("/usr/bin/python3"))
         self.assertEqual(args.background_dpi, 96)
         self.assertEqual(args.background_format, "png")
         self.assertEqual(args.background_jpeg_quality, 70)

@@ -3,6 +3,7 @@ from .inpainting_engines import (
     BackgroundInpaintingError,
     BackgroundRenderResult,
     LamaOnnxCudaInpaintingEngine,
+    LamaPytorchInpaintingEngine,
     OpenCvFastInpaintingEngine,
     WhiteBoxInpaintingEngine,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "BackgroundInpaintingError",
     "BackgroundRenderResult",
     "LamaOnnxCudaInpaintingEngine",
+    "LamaPytorchInpaintingEngine",
     "OpenCvFastInpaintingEngine",
     "WhiteBoxInpaintingEngine",
     "build_text_mask_image",

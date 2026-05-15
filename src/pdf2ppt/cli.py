@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--inpaint-engine",
-        choices=("auto", "white-box", "opencv-fast", "lama-onnx-cuda"),
+        choices=("auto", "white-box", "opencv-fast", "lama-onnx-cuda", "lama-pytorch"),
         default="opencv-fast",
         help="Background reconstruction engine for overlay pages.",
     )
@@ -181,6 +181,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_int,
         default=1536,
         help="Maximum image side passed into lama-onnx-cuda before proportional downscaling.",
+    )
+    parser.add_argument(
+        "--inpaint-lama-repo-root",
+        type=Path,
+        default=Path("lama"),
+        help="Path to the official advimman/lama repository root used by --inpaint-engine lama-pytorch.",
+    )
+    parser.add_argument(
+        "--inpaint-lama-device",
+        default="cuda",
+        help="Device override passed to the official advimman/lama predictor when --inpaint-engine lama-pytorch.",
+    )
+    parser.add_argument(
+        "--inpaint-lama-python",
+        type=Path,
+        help=(
+            "Python executable for the official advimman/lama repo when using --inpaint-engine lama-pytorch. "
+            "Defaults to PDF2PPT_LAMA_PYTHON, a conda env named lama, or the current interpreter."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -226,6 +245,9 @@ def main(argv: list[str] | None = None) -> int:
         inpaint_onnx_cuda_provider=args.inpaint_onnx_cuda_provider,
         inpaint_onnx_execution_mode=args.inpaint_onnx_execution_mode,
         inpaint_max_side_px=args.inpaint_max_side_px,
+        inpaint_lama_repo_root=args.inpaint_lama_repo_root,
+        inpaint_lama_device=args.inpaint_lama_device,
+        inpaint_lama_python_executable=args.inpaint_lama_python,
     )
     report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
     print(
