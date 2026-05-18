@@ -2,11 +2,22 @@
 
 ## 1. 產品定位
 
-本系統為一套 **PDF 轉可編輯 PPTX** 的轉換工具，採用 **原生 PDF 解析優先、PP-OCRv5 補強、版面分析、條件式去字與多級回退** 的混合式轉換架構，以在「保留視覺相似度」與「提升可編輯性」之間取得平衡。PP-OCRv5 官方支援繁中、英文等主要文字類型，適合用於你的繁中簡報場景。([paddleocr.ai][1])
+本系統為一套 **PDF 轉可編輯 PPTX** 的轉換工具，採用 **原生 PDF 解析優先、PP-OCRv5 補強、OCR 後處理合併、條件式去字與多級回退** 的混合式轉換架構，以在「保留視覺相似度」與「提升可編輯性」之間取得平衡。PP-OCRv5 官方支援繁中、英文等主要文字類型，適合用於你的繁中簡報場景。([paddleocr.ai][1])
+
+### 實作現況（與本 repo 對齊）
+
+| 能力 | 現況 | 備註 |
+|------|------|------|
+| 原生 PDF 抽取 | 已實作 | PyMuPDF blocks / spans |
+| PP-OCRv5 det + rec | 已實作 | CLI、pipeline、API detect |
+| 同行 OCR 框合併 | 已實作 | `merge_adjacent_ocr_line_blocks`，預設啟用 |
+| Paddle Layout Analysis | **尚未實作** | 規劃於 v1.5；見 §4.3 |
+| 審框前端 + approved boxes | 已實作 | Detect → 人工調整 → Convert |
+| 條件式 inpainting | 已實作 | `opencv-fast` / `white-box` / 可選 LaMa |
 
 ## 2. 核心設計原則
 
-第一原則是 **能不用 OCR 就不用 OCR**。對可抽取文字的 PDF，優先使用 PDF 原生文字物件、字型與座標資訊；對掃描頁或圖片型頁面，再使用 PP-OCRv5。第二原則是 **版面先分區，再重建**，避免文字、表格、圖片互相干擾。第三原則是 **分級輸出**，當某頁無法完整還原時，仍能產出可用結果。這些做法與 PyMuPDF 的文字抽取能力、PaddleOCR 的 layout/document preprocessing 模組能力相符。([pymupdf.readthedocs.io][3])
+第一原則是 **能不用 OCR 就不用 OCR**。對可抽取文字的 PDF，優先使用 PDF 原生文字物件、字型與座標資訊；對掃描頁或圖片型頁面，再使用 PP-OCRv5。第二原則是 **先取得文字區塊，再重建**：v1 以原生 block 與 OCR det 框為主，並以啟發式**行合併**減少碎框；v1.5 再引入 Paddle Layout Analysis 做標題／段落／表格分區。第三原則是 **分級輸出**，當某頁無法完整還原時，仍能產出可用結果。這些做法與 PyMuPDF 的文字抽取能力、PaddleOCR 偵測／辨識及（規劃中的）layout 模組能力相符。([pymupdf.readthedocs.io][3])
 
 ## 3. 系統處理流程（修正版）
 
@@ -15,13 +26,12 @@
 1. 上傳 PDF / 建立任務
 2. **PDF 類型判斷**（Digital / Scanned / Hybrid）
 3. 頁面預覽與頁面渲染
-4. **版面分析**（標題、段落、圖片、表格、頁眉頁尾等）
-5. 文字取得
+4. **文字區塊取得**（Digital：原生抽取；Scanned / Hybrid：PP-OCRv5 偵測 + 辨識 + **同行框合併**）
+5. （v1.5 規劃）**版面分析**（標題、段落、圖片、表格、頁眉頁尾等）
+6. 文字取得與樣式恢復
 
    * Digital PDF：原生抽取優先
-   * Scanned / Hybrid：PP-OCRv5 偵測 + 辨識
-6. 樣式恢復
-
+   * Scanned / Hybrid：PP-OCRv5 偵測 + 辨識 + 行合併後處理
    * 原生 span 樣式優先
    * OCR 頁面走估算與 fallback
 7. 背景生成
@@ -32,7 +42,7 @@
 9. 品質檢查與回退
 10. 完成 / 下載結果
 
-這個流程比原版更穩，因為它把「去字」從固定步驟改成條件式步驟，也加入了 PDF 類型判斷與版面分析。PaddleOCR 的 document orientation、text image unwarping 與 layout analysis 都可以插入這個流程。([paddleocr.ai][6])
+這個流程比原版更穩，因為它把「去字」從固定步驟改成條件式步驟，也加入了 PDF 類型判斷。v1 以 OCR det + **行合併** 改善可編輯框品質；PaddleOCR 的 document orientation、text image unwarping 與（規劃中的）layout analysis 可再插入後續版本。([paddleocr.ai][6])
 
 ## 4. 模型與引擎規格
 
@@ -40,6 +50,10 @@
 
 * 文字偵測：**PP-OCRv5 Detection**
 * 文字辨識：**PP-OCRv5 Recognition**
+* **行合併後處理（已實作）**：`merge_adjacent_ocr_line_blocks`
+  * 在 det 產生多個碎框後，依垂直重疊、中心線距離、水平間距與欄位 x 重疊規則，將同一文字行的框合併為單一 `TextBlock`。
+  * 預設啟用於 CLI、pipeline 整頁 OCR、API `POST /jobs/{id}/detect`。
+  * CLI 參數 `--ocr-return-word-box`（API：`return_word_box`）可改回 Paddle 字級框，僅建議除錯使用。
 * 適用頁型：掃描頁、圖片頁、原生抽取失敗區塊
 * 支援語系：繁中、英文、日文等主要類型。([paddleocr.ai][1])
 
@@ -51,8 +65,16 @@
 
 ### 4.3 版面分析
 
+**v1 現況（本 repo）**
+
+* **未**接入 PaddleOCR Layout Analysis / Layout Detection 模型。
+* 文字區塊來源：PyMuPDF 原生 blocks，或 PP-OCRv5 det + rec + **啟發式行合併**。
+* 多欄、表格、頁眉頁尾等仍依 bbox 幾何與頁面分類 heuristic 處理；複雜版面可能需要審框前端人工修正。
+
+**v1.5 規劃**
+
 * 模組：PaddleOCR Layout Analysis / Layout Detection
-* 目標：辨識標題、內文、圖片、表格等區塊，建立閱讀順序。([paddleocr.ai][4])
+* 目標：在 OCR 前先辨識標題、內文、圖片、表格等區塊，建立閱讀順序，再於各區塊內做 det / rec（可與現有行合併並用）。([paddleocr.ai][4])
 
 ### 4.4 PDF 原生解析
 
@@ -95,6 +117,7 @@
 
 * 啟用方向校正與去扭曲
 * 使用 PP-OCRv5 做 detection + recognition
+* 套用同行框合併，再輸出候選 `TextBlock`
 * 必要時做去字與背景重建。([paddleocr.ai][6])
 
 ### 5.3 Hybrid PDF
@@ -130,7 +153,7 @@
 規格應拆成兩條管線：
 
 * **原生解析管線**：抽取 blocks / words / spans / images / drawing cues
-* **影像渲染管線**：頁面轉圖供 OCR、版面分析、預覽使用
+* **影像渲染管線**：頁面轉圖供 OCR、（規劃中的）版面分析、預覽使用
 
 不要只寫「轉成圖片」。因為只轉圖會直接損失原生字型與向量資訊。PyMuPDF 本身就擅長文件抽取與轉換。([pymupdf.readthedocs.io][8])
 
@@ -292,7 +315,7 @@ v1 不強求圖表語意重建，先以圖片保真為主。因為 python-pptx �
 
 1. **把所有 PDF 都視為 OCR 問題**，會讓 digital PDF 的品質與速度都吃虧。([paddleocr.ai][2])
 2. **把去字當成必要步驟**，其實應改為條件式步驟。([OpenCV][9])
-3. **沒有 layout analysis 層**，會影響閱讀順序、表格/圖片區分與最終可編輯性。([paddleocr.ai][4])
+3. **尚未接入 Paddle layout analysis 層**（v1 以 det + 行合併代替），複雜閱讀順序、表格/圖片區分仍有限。([paddleocr.ai][4])
 4. **沒有品質分級與回退設計**，實作後會很難穩定交付。這是從現有工具能力與 PDF 多樣性推導出的高風險缺口。([pymupdf.readthedocs.io][3])
 
 如果你要往可落地版本推進，我建議你的 **v1 規格** 應該改成：
@@ -300,11 +323,11 @@ v1 不強求圖表語意重建，先以圖片保真為主。因為 python-pptx �
 * **v1**
 
   * Digital PDF：原生文字抽取 + 基本圖片保留 + PPT 重建
-  * Scanned PDF：PP-OCRv5 + 底圖 + 可編輯文字覆蓋
+  * Scanned PDF：PP-OCRv5 + **同行框合併** + 底圖 + 可編輯文字覆蓋 + 審框前端
   * 回退：整頁圖片模式
 * **v1.5**
 
-  * 加入 layout analysis
+  * 加入 Paddle layout analysis（取代或輔助純幾何分欄）
   * 改善段落合併、標題判斷、頁眉頁尾過濾
   * 改善字型/顏色估計
 * **v2**

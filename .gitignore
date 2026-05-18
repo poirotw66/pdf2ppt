@@ -11,6 +11,7 @@ frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
 src/*.egg-info/
+build/
 tests/__pycache__/
 tests/artifacts/
 !tests/fixtures/

@@ -8,6 +8,7 @@
 
 - 能直接從 PDF 抽文字與版面的情況，優先使用原生解析。
 - 掃描頁或圖片型頁面，再交給 PaddleOCR。
+- OCR 偵測後會自動做**同行文字框合併**，減少標題被拆成多個碎框，同時避免多欄版面被併成單一大框。
 - 先判斷頁面類型（`digital`、`scanned`、`hybrid`），再決定最合適的輸出方式。
 - 只有在需要時才做背景重建，而不是一律整頁抹字。
 - OCR 文字會額外估算字級、字色與粗體。
@@ -43,6 +44,7 @@
   - `auto` 自動路由
 - 每次轉換都可輸出 JSON 報告。
 - 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
+- OCR 後處理：預設合併同一文字行的相鄰偵測框；可選 `--ocr-return-word-box` 改回 PaddleOCR 字級框（除錯用）。
 - CLI 會顯示逐頁轉換進度條。
 
 ## 環境需求
@@ -75,6 +77,8 @@ python -m pip install -e .
 python -m pip install "numpy<2"
 python -m pip install -e .
 ```
+
+開發與執行時請一律使用 **`pip install -e .` 安裝的 `src/pdf2ppt`**，不要手動把 `PYTHONPATH` 指到 repo 內的 `build/lib/`。`build/lib/` 只是舊的 setuptools 建置殘留，可能缺少最新程式碼，且已列入 `.gitignore`、不應納入版控。
 
 如果你要執行測試，請另外安裝：
 
@@ -274,12 +278,21 @@ Python 解譯器選擇：
 - `--ocr-det-thresh`：PaddleOCR 文字偵測門檻，可選；省略時使用 PaddleOCR 官方預設
 - `--ocr-det-box-thresh`：PaddleOCR 偵測框門檻，可選；省略時使用 PaddleOCR 官方預設
 - `--ocr-drop-score`：PaddleOCR 辨識分數門檻，可選；省略時使用 PaddleOCR 官方預設
+- `--ocr-return-word-box`：啟用 PaddleOCR 字級框；預設關閉，改由 pdf2ppt 在偵測後合併同一文字行的框
+- `--ocr-batch-size`：整頁 OCR 時一次處理的頁數，預設 `3`
 - `--dpi`：OCR 主要使用的頁面渲染 DPI
 - `--background-dpi`：嵌入到 PPTX 的整頁背景與 overlay 背景 DPI
 - `--background-format`：背景圖輸出格式，`jpeg` 或 `png`；`jpeg` 體積較小
 - `--background-jpeg-quality`：當 `--background-format=jpeg` 時使用的 JPEG 品質
 - `--debug-dir`：逐頁 debug 圖與分析檔輸出資料夾
 - `--enable-doc-unwarping`：啟用 PaddleOCR UVDoc 去扭曲
+
+OCR 行合併（預設啟用，無需額外參數）：
+
+- 在 PP-OCRv5 `det` 產生多個碎框後，依垂直對齊、水平間距與欄位間 x 重疊規則，把同一文字行的框合併成一個 `TextBlock`。
+- 適用於 CLI、API `detect`、整頁 OCR 與審框前端顯示的候選框。
+- 多欄簡報（例如三欄並排）會盡量維持分欄，不會只因垂直位置接近就橫向併成整頁大框。
+- 除錯時若需查看 Paddle 原始字級框，可加上 `--ocr-return-word-box`；一般不建議在正式轉換時開啟。
 
 背景重建相關：
 
@@ -465,11 +478,15 @@ detect 請求參數補充：
 
 - `confidence_threshold` 會在回應前先過濾掉低於指定信心分數的 OCR 框。
 - 預設值：`0.75`
+- `return_word_box`：對應 CLI 的 `--ocr-return-word-box`，預設 `false`。
+- 後端在回傳 boxes 前會套用與 CLI 相同的**行合併**後處理；修改程式後請重啟 API 並重新執行 detect，舊 job 的 detection payload 不會自動更新。
 
 主要檔案：
 
 - CLI：`src/pdf2ppt/cli.py`
 - 核心流程：`src/pdf2ppt/pipeline.py`
+- OCR 與行合併：`src/pdf2ppt/ocr.py`
+- API / 審框後端：`src/pdf2ppt/api.py`
 - 資料模型：`src/pdf2ppt/models.py`
 
 ## 文件語言版本

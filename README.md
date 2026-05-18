@@ -8,6 +8,7 @@ Core pipeline:
 
 - Native PDF extraction first when text and layout can be recovered directly.
 - PaddleOCR fallback for scanned or image-heavy pages.
+- Post-detection **line box merging** to reduce fragmented title boxes without collapsing multi-column layouts into one giant box.
 - Page classification (`digital`, `scanned`, `hybrid`) to choose the safest rendering path.
 - Conditional background reconstruction for OCR/overlay pages.
 - Style recovery for OCR text, including font size fitting, color estimation, and basic bold detection.
@@ -43,6 +44,7 @@ Core pipeline:
   - `auto` routing
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
+- OCR post-processing: merge adjacent boxes on the same text line by default; opt in to PaddleOCR word-level boxes with `--ocr-return-word-box` for debugging.
 - Show page-level conversion progress in the CLI.
 
 ## Requirements
@@ -75,6 +77,8 @@ If you already have an environment, make sure it satisfies the NumPy constraint 
 python -m pip install "numpy<2"
 python -m pip install -e .
 ```
+
+For development and runtime, always use the editable install from `src/pdf2ppt` (`pip install -e .`). Do not point `PYTHONPATH` at `build/lib/` in the repository. That directory is a stale setuptools build artifact, may lag behind the source tree, is listed in `.gitignore`, and must not be treated as the installed package.
 
 Optional development dependency for running tests:
 
@@ -283,6 +287,7 @@ Main arguments:
 - `--ocr-det-thresh`: PaddleOCR text detection threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-det-box-thresh`: PaddleOCR detection box threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-drop-score`: PaddleOCR recognition score threshold, optional, uses the PaddleOCR default when omitted
+- `--ocr-return-word-box`: return PaddleOCR word-level boxes; disabled by default so pdf2ppt merges same-line detection boxes after OCR
 - `--ocr-batch-size`: number of pages processed together for full-page OCR, default `3`
 - `--dpi`: render DPI for OCR-oriented page rasterization
 - `--background-dpi`: render DPI for embedded full-page and overlay backgrounds
@@ -290,6 +295,13 @@ Main arguments:
 - `--background-jpeg-quality`: JPEG quality used when `--background-format=jpeg`
 - `--debug-dir`: directory for per-page debug images and analysis files
 - `--enable-doc-unwarping`: enable PaddleOCR UVDoc unwarping
+
+OCR line merging (enabled by default, no extra flag required):
+
+- After PP-OCRv5 detection, pdf2ppt merges adjacent boxes on the same text line using vertical alignment, horizontal gap limits, and column-aware x-overlap rules.
+- Applies to the CLI, API `detect`, full-page OCR, and boxes shown in the review UI.
+- Multi-column slides stay separated when columns do not horizontally overlap, even if their baselines are close.
+- Use `--ocr-return-word-box` only for debugging raw PaddleOCR word boxes; keep it off for normal conversions.
 
 Background reconstruction:
 
@@ -475,6 +487,8 @@ Detect request options:
 
 - `confidence_threshold` filters out OCR boxes below the given confidence before the response is returned.
 - Default: `0.75`
+- `return_word_box`: mirrors CLI `--ocr-return-word-box`, default `false`.
+- The API applies the same line-merge post-processing as the CLI before returning boxes. Restart the API after code changes and rerun detect; existing job detection payloads are not refreshed automatically.
 
 Error response model:
 
