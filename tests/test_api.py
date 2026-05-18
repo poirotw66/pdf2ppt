@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import fitz
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from pdf2ppt.api import app
 from pdf2ppt.core import OcrInitializationError, PageConversionError
@@ -60,10 +61,12 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(get_response.status_code, 404)
         self.assertEqual(get_response.json()["detail"]["code"], "not-found")
 
+    @patch("pdf2ppt.api._clean_preview_watermark", side_effect=lambda image, _page_rect: image)
     @patch("pdf2ppt.api.OcrEngine.extract_text_blocks_batch")
     def test_detect_generates_preview_payload(
         self,
         extract_text_blocks_batch_mock: unittest.mock.Mock,
+        clean_preview_watermark_mock: unittest.mock.Mock,
     ) -> None:
         extract_text_blocks_batch_mock.return_value = [
             SimpleNamespace(
@@ -101,7 +104,17 @@ class ApiTests(unittest.TestCase):
         preview_response = self.client.get(first_page["image_url"])
         self.assertEqual(preview_response.status_code, 200)
         self.assertEqual(preview_response.headers["content-type"], "image/jpeg")
+        self.assertEqual(clean_preview_watermark_mock.call_count, 2)
         self.assertFalse((self.job_store.job_dir(job_id) / "previews").exists())
+
+    def test_preview_cleanup_helper_uses_inpainting_and_preserves_image_size(self) -> None:
+        from pdf2ppt.api import _clean_preview_watermark
+
+        image = Image.new("RGB", (320, 240), (250, 250, 250))
+
+        cleaned = _clean_preview_watermark(image, fitz.Rect(0, 0, 320, 240))
+
+        self.assertEqual(cleaned.size, image.size)
 
     def test_preview_endpoint_returns_not_found_for_missing_page(self) -> None:
         pdf_bytes = build_sample_pdf_bytes()

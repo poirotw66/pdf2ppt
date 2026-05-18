@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -26,11 +27,14 @@ from .api_models import (
 )
 from .core import ConversionOptions, DEFAULT_OCR_BATCH_SIZE
 from .core import InputValidationError, OcrInitializationError, OcrProcessingError, PageConversionError, Pdf2PptError
+from .background import OpenCvFastInpaintingEngine, build_text_mask_image
 from .job_store import JobRecord, JobStore
 from .models import TextBlock
 from .ocr import OcrEngine
 from .paths import resolve_repo_relative_path
-from .pipeline import convert_pdf
+from .pipeline import build_notebooklm_watermark_mask_block, convert_pdf
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="pdf2ppt API", version="0.1.0")
 app.add_middleware(
@@ -318,7 +322,18 @@ def _job_to_response(record: JobRecord) -> JobResponse:
 
 def _render_page_preview(page: fitz.Page, *, dpi: int) -> Image.Image:
     pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-    return Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+    preview_image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+    return _clean_preview_watermark(preview_image, page.rect)
+
+
+def _clean_preview_watermark(preview_image: Image.Image, page_rect: fitz.Rect) -> Image.Image:
+    watermark_block = build_notebooklm_watermark_mask_block(page_rect)
+    mask_image = build_text_mask_image([watermark_block], preview_image.size, page_rect, padding_px=2)
+    try:
+        return OpenCvFastInpaintingEngine().inpaint(preview_image, mask_image)
+    except Exception as error:
+        logger.warning("Preview watermark cleanup failed; returning original preview: %s", error)
+        return preview_image
 
 
 def _text_block_to_box_response(block: Any) -> OcrBoxResponse:

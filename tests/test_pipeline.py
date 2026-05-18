@@ -37,9 +37,11 @@ from pdf2ppt.ocr import (
 from pdf2ppt.pipeline import (
     BackgroundInpaintingError,
     analyze_page,
+    append_notebooklm_watermark_mask_blocks,
     build_text_fit_debug_entry,
     build_mask_shapes,
     build_text_mask_image,
+    build_notebooklm_watermark_mask_block,
     classify_text_script,
     ConversionOptions,
     default_font_family,
@@ -62,6 +64,7 @@ from pdf2ppt.pipeline import (
     intersection_ratio,
     mask_text_regions_with_white_boxes,
     render_overlay_background,
+    split_notebooklm_watermark_blocks,
     select_text_blocks,
     should_wrap_text_block,
     enrich_ocr_blocks,
@@ -165,6 +168,56 @@ class BlockSelectionTests(unittest.TestCase):
         ]
         filtered = filter_suspicious_ocr_blocks(blocks, fitz.Rect(0, 0, 1376, 768))
         self.assertEqual([block.id for block in filtered], ["ocr_small"])
+
+    def test_split_notebooklm_watermark_blocks_excludes_bottom_right_footer_label(self) -> None:
+        blocks = [
+            TextBlock(
+                id="ocr_body_1",
+                source="ocr",
+                bbox=(120.0, 120.0, 320.0, 180.0),
+                text="Main content",
+                confidence=0.96,
+            ),
+            TextBlock(
+                id="ocr_footer_notebooklm",
+                source="ocr",
+                bbox=(700.0, 550.0, 776.0, 568.0),
+                text="NotebookLM",
+                confidence=0.99,
+            ),
+        ]
+
+        kept_blocks, watermark_blocks = split_notebooklm_watermark_blocks(blocks, fitz.Rect(0, 0, 800, 600))
+
+        self.assertEqual([block.id for block in kept_blocks], ["ocr_body_1"])
+        self.assertEqual([block.id for block in watermark_blocks], ["ocr_footer_notebooklm"])
+
+    def test_append_notebooklm_watermark_mask_blocks_adds_synthetic_fallback(self) -> None:
+        mask_blocks = [
+            TextBlock(
+                id="ocr_body_1",
+                source="ocr",
+                bbox=(100.0, 100.0, 320.0, 180.0),
+                text="Main content",
+                confidence=0.95,
+            )
+        ]
+
+        combined_blocks = append_notebooklm_watermark_mask_blocks(mask_blocks, [], page_rect=fitz.Rect(0, 0, 800, 600))
+
+        self.assertEqual(len(combined_blocks), 2)
+        self.assertEqual(combined_blocks[-1].id, "synthetic_notebooklm_watermark")
+        self.assertGreater(combined_blocks[-1].bbox[0], 720.0)
+        self.assertGreater(combined_blocks[-1].bbox[1], 570.0)
+
+    def test_build_notebooklm_watermark_mask_block_places_block_in_bottom_right_corner(self) -> None:
+        block = build_notebooklm_watermark_mask_block(fitz.Rect(0, 0, 960, 540))
+
+        self.assertEqual(block.text, "NotebookLM")
+        self.assertGreater(block.bbox[0], 870.0)
+        self.assertGreater(block.bbox[1], 515.0)
+        self.assertLessEqual(block.bbox[2], 960.0)
+        self.assertLessEqual(block.bbox[3], 540.0)
 
 
 class BackgroundModeTests(unittest.TestCase):

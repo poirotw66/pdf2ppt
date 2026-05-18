@@ -94,6 +94,16 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
 
+NOTEBOOKLM_WATERMARK_TOKEN = "notebooklm"
+NOTEBOOKLM_WATERMARK_RIGHT_MIN_RATIO = 0.72
+NOTEBOOKLM_WATERMARK_TOP_MIN_RATIO = 0.9
+NOTEBOOKLM_WATERMARK_MAX_WIDTH_RATIO = 0.2
+NOTEBOOKLM_WATERMARK_MAX_HEIGHT_RATIO = 0.06
+NOTEBOOKLM_WATERMARK_FALLBACK_WIDTH_RATIO = 0.075
+NOTEBOOKLM_WATERMARK_FALLBACK_HEIGHT_RATIO = 0.028
+NOTEBOOKLM_WATERMARK_FALLBACK_RIGHT_MARGIN_RATIO = 0.008
+NOTEBOOKLM_WATERMARK_FALLBACK_BOTTOM_MARGIN_RATIO = 0.008
+
 
 def convert_pdf(
     options: ConversionOptions,
@@ -214,6 +224,7 @@ def analyze_page(
     has_approved_ocr_blocks = page_number in options.approved_ocr_blocks_by_page
     need_ocr = page_kind in {"scanned", "hybrid"} or not native_blocks
     ocr_blocks: list[TextBlock] = []
+    notebooklm_watermark_blocks: list[TextBlock] = []
     page_image: Any | None = None
     ocr_reference_image: Any | None = None
     if has_approved_ocr_blocks:
@@ -255,6 +266,8 @@ def analyze_page(
             )
         ocr_blocks = filtered_ocr_blocks
         ocr_enrich_seconds = perf_counter() - ocr_enrich_started_at
+
+    ocr_blocks, notebooklm_watermark_blocks = split_notebooklm_watermark_blocks(ocr_blocks, page.rect)
 
     page_mode_started_at = perf_counter()
     text_blocks = select_text_blocks(page_kind, native_blocks, ocr_blocks)
@@ -310,6 +323,11 @@ def analyze_page(
             background_render_seconds += perf_counter() - background_render_started_at
         if background_mode == "overlay" and text_blocks:
             mask_blocks = [block for block in text_blocks if block.source == "ocr"] or text_blocks
+            mask_blocks = append_notebooklm_watermark_mask_blocks(
+                mask_blocks,
+                notebooklm_watermark_blocks,
+                page_rect=page.rect,
+            )
             background_process_started_at = perf_counter()
             background_result = render_overlay_background(
                 background_image,
@@ -438,6 +456,70 @@ def resolve_approved_ocr_blocks(
         return []
     enriched_blocks = enrich_ocr_blocks(resolved_blocks, page_image)
     return map_blocks_to_page_coordinates(enriched_blocks, page_image.size, page_rect)
+
+
+def split_notebooklm_watermark_blocks(
+    blocks: list[TextBlock],
+    page_rect: fitz.Rect,
+) -> tuple[list[TextBlock], list[TextBlock]]:
+    kept_blocks: list[TextBlock] = []
+    watermark_blocks: list[TextBlock] = []
+    for block in blocks:
+        if is_notebooklm_watermark_block(block, page_rect=page_rect):
+            watermark_blocks.append(block)
+            continue
+        kept_blocks.append(block)
+    return kept_blocks, watermark_blocks
+
+
+def append_notebooklm_watermark_mask_blocks(
+    mask_blocks: list[TextBlock],
+    detected_watermark_blocks: list[TextBlock],
+    *,
+    page_rect: fitz.Rect,
+) -> list[TextBlock]:
+    if detected_watermark_blocks:
+        return [*mask_blocks, *detected_watermark_blocks]
+    return [*mask_blocks, build_notebooklm_watermark_mask_block(page_rect)]
+
+
+def is_notebooklm_watermark_block(block: TextBlock, *, page_rect: fitz.Rect) -> bool:
+    normalized_text = "".join(character.lower() for character in block.text if character.isalnum())
+    if NOTEBOOKLM_WATERMARK_TOKEN not in normalized_text:
+        return False
+
+    page_width = max(float(page_rect.width), 1.0)
+    page_height = max(float(page_rect.height), 1.0)
+    x0, y0, x1, y1 = block.bbox
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    return (
+        x0 >= page_width * NOTEBOOKLM_WATERMARK_RIGHT_MIN_RATIO
+        and y0 >= page_height * NOTEBOOKLM_WATERMARK_TOP_MIN_RATIO
+        and width <= page_width * NOTEBOOKLM_WATERMARK_MAX_WIDTH_RATIO
+        and height <= page_height * NOTEBOOKLM_WATERMARK_MAX_HEIGHT_RATIO
+    )
+
+
+def build_notebooklm_watermark_mask_block(page_rect: fitz.Rect) -> TextBlock:
+    page_width = float(page_rect.width)
+    page_height = float(page_rect.height)
+    right_margin = max(4.0, page_width * NOTEBOOKLM_WATERMARK_FALLBACK_RIGHT_MARGIN_RATIO)
+    bottom_margin = max(4.0, page_height * NOTEBOOKLM_WATERMARK_FALLBACK_BOTTOM_MARGIN_RATIO)
+    block_width = max(48.0, page_width * NOTEBOOKLM_WATERMARK_FALLBACK_WIDTH_RATIO)
+    block_height = max(12.0, page_height * NOTEBOOKLM_WATERMARK_FALLBACK_HEIGHT_RATIO)
+    x1 = max(block_width, page_width - right_margin)
+    y1 = max(block_height, page_height - bottom_margin)
+    x0 = max(0.0, x1 - block_width)
+    y0 = max(0.0, y1 - block_height)
+    return TextBlock(
+        id="synthetic_notebooklm_watermark",
+        source="ocr",
+        bbox=(x0, y0, x1, y1),
+        text="NotebookLM",
+        confidence=1.0,
+        block_role="watermark",
+    )
 
 
 def recognize_missing_approved_block_texts(
