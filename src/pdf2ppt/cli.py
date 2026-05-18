@@ -102,6 +102,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="PaddleOCR recognition score threshold. Omit to use the PaddleOCR default.",
     )
     parser.add_argument(
+        "--ocr-return-word-box",
+        action="store_true",
+        help=(
+            "Return PaddleOCR word-level boxes. Disabled by default so each detected text line "
+            "stays a single OCR block after line merging."
+        ),
+    )
+    parser.add_argument(
         "--ocr-batch-size",
         type=positive_int,
         default=DEFAULT_OCR_BATCH_SIZE,
@@ -231,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
         ocr_det_thresh=args.ocr_det_thresh,
         ocr_det_box_thresh=args.ocr_det_box_thresh,
         ocr_drop_score=args.ocr_drop_score,
+        ocr_return_word_box=args.ocr_return_word_box,
         ocr_batch_size=args.ocr_batch_size,
         render_dpi=args.dpi,
         background_dpi=args.background_dpi,

@@ -44,6 +44,7 @@ class DetectRequest(BaseModel):
     det_thresh: float | None = None
     det_box_thresh: float | None = None
     drop_score: float | None = None
+    return_word_box: bool = False
     ocr_batch_size: int = Field(default=DEFAULT_OCR_BATCH_SIZE, ge=1, le=32)
 
 
@@ -107,6 +108,7 @@ class ConvertRequest(BaseModel):
     det_thresh: float | None = None
     det_box_thresh: float | None = None
     drop_score: float | None = None
+    return_word_box: bool = False
     ocr_batch_size: int = Field(default=DEFAULT_OCR_BATCH_SIZE, ge=1, le=32)
     dpi: int = Field(default=144, ge=72, le=300)
     background_dpi: int = Field(default=110, ge=72, le=300)

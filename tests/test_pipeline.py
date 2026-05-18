@@ -27,7 +27,13 @@ from pdf2ppt.inpainting_overlay import (
 )
 from pdf2ppt.inpainting_masks import refine_text_mask_for_inpainting
 from pdf2ppt.models import QualityScore, TextBlock
-from pdf2ppt.ocr import build_local_ocr_model_kwargs, ensure_local_model_dir, suppress_known_paddle_runtime_warnings
+from pdf2ppt.ocr import (
+    OcrEngine,
+    build_local_ocr_model_kwargs,
+    ensure_local_model_dir,
+    merge_adjacent_ocr_line_blocks,
+    suppress_known_paddle_runtime_warnings,
+)
 from pdf2ppt.pipeline import (
     BackgroundInpaintingError,
     analyze_page,
@@ -2393,6 +2399,110 @@ class OcrModelConfigTests(unittest.TestCase):
             self.assertTrue((local_model_dir / "inference.json").exists())
 
 
+class OcrLineMergeTests(unittest.TestCase):
+    def _block(
+        self,
+        *,
+        block_id: str,
+        bbox: tuple[float, float, float, float],
+        text: str,
+        order: int,
+    ) -> TextBlock:
+        return TextBlock(
+            id=block_id,
+            source="ocr",
+            bbox=bbox,
+            text=text,
+            confidence=0.95,
+            reading_order=order,
+            image_bbox=bbox,
+        )
+
+    def test_merge_adjacent_ocr_line_blocks_combines_title_words_per_line(self) -> None:
+        blocks = [
+            self._block(block_id="ocr_1_1", bbox=(20, 20, 140, 70), text="Accuracy", order=1),
+            self._block(block_id="ocr_1_2", bbox=(155, 24, 190, 66), text="is", order=2),
+            self._block(block_id="ocr_1_3", bbox=(205, 20, 260, 70), text="not", order=3),
+            self._block(block_id="ocr_1_4", bbox=(275, 22, 300, 68), text="a", order=4),
+            self._block(block_id="ocr_1_5", bbox=(315, 20, 420, 70), text="model", order=5),
+            self._block(block_id="ocr_1_6", bbox=(435, 20, 540, 70), text="feature.", order=6),
+            self._block(block_id="ocr_1_7", bbox=(20, 120, 90, 170), text="It", order=7),
+            self._block(block_id="ocr_1_8", bbox=(105, 122, 150, 168), text="is", order=8),
+            self._block(block_id="ocr_1_9", bbox=(165, 120, 190, 170), text="a", order=9),
+            self._block(block_id="ocr_1_10", bbox=(205, 120, 360, 170), text="workflow", order=10),
+            self._block(block_id="ocr_1_11", bbox=(375, 120, 520, 170), text="property.", order=11),
+        ]
+
+        merged = merge_adjacent_ocr_line_blocks(blocks, page_number=1)
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0].text, "Accuracy is not a model feature.")
+        self.assertEqual(merged[1].text, "It is a workflow property.")
+        self.assertEqual(merged[0].bbox[0], 20)
+        self.assertEqual(merged[0].bbox[2], 540)
+        self.assertEqual(merged[0].id, "ocr_1_1")
+        self.assertEqual(merged[1].id, "ocr_1_2")
+
+    def test_merge_adjacent_ocr_line_blocks_uses_group_extent_for_gap(self) -> None:
+        blocks = [
+            self._block(block_id="ocr_3_1", bbox=(100, 120, 500, 180), text="workflow", order=1),
+            self._block(block_id="ocr_3_2", bbox=(310, 150, 330, 158), text="noise", order=2),
+            self._block(block_id="ocr_3_3", bbox=(500, 120, 700, 180), text="property.", order=3),
+        ]
+
+        merged = merge_adjacent_ocr_line_blocks(blocks, page_number=3)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].text, "workflow noise property.")
+
+    def test_merge_adjacent_ocr_line_blocks_keeps_multi_column_boxes_separate(self) -> None:
+        blocks = [
+            self._block(block_id="ocr_4_1", bbox=(10, 40, 250, 70), text="每個 API 都要客製串接", order=1),
+            self._block(block_id="ocr_4_2", bbox=(270, 10, 500, 40), text="Agent 無法規模化使", order=2),
+            self._block(block_id="ocr_4_3", bbox=(270, 45, 350, 75), text="用工具", order=3),
+            self._block(block_id="ocr_4_4", bbox=(535, 10, 680, 40), text="MCP (Model", order=4),
+            self._block(block_id="ocr_4_5", bbox=(535, 45, 740, 75), text="Context Protocol)", order=5),
+        ]
+
+        merged = merge_adjacent_ocr_line_blocks(blocks, page_number=4)
+
+        self.assertGreaterEqual(len(merged), 3)
+        merged_text = " ".join(block.text for block in merged)
+        self.assertIn("每個 API", merged_text)
+        self.assertIn("Agent", merged_text)
+        self.assertIn("MCP", merged_text)
+        self.assertNotIn("每個 API 都要客製串接 Agent", merged_text)
+
+    def test_merge_adjacent_ocr_line_blocks_keeps_wide_horizontal_gap_separate(self) -> None:
+        blocks = [
+            self._block(block_id="ocr_2_1", bbox=(10, 20, 80, 60), text="Left", order=1),
+            self._block(block_id="ocr_2_2", bbox=(420, 20, 500, 60), text="Right", order=2),
+        ]
+
+        merged = merge_adjacent_ocr_line_blocks(blocks, page_number=2)
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0].text, "Left")
+        self.assertEqual(merged[1].text, "Right")
+
+    def test_ocr_engine_passes_return_word_box_to_paddleocr(self) -> None:
+        engine = OcrEngine(
+            lang="ch",
+            model_root=None,
+            use_doc_orientation=False,
+            use_textline_orientation=False,
+            use_doc_unwarping=False,
+            det_thresh=None,
+            det_box_thresh=None,
+            drop_score=None,
+            return_word_box=True,
+        )
+
+        kwargs = engine._build_engine_kwargs()
+
+        self.assertTrue(kwargs["return_word_box"])
+
+
 class CliTests(unittest.TestCase):
     def test_doc_unwarping_disabled_by_default(self) -> None:
         parser = build_parser()
@@ -2405,6 +2515,7 @@ class CliTests(unittest.TestCase):
         self.assertIsNone(args.ocr_det_thresh)
         self.assertIsNone(args.ocr_det_box_thresh)
         self.assertIsNone(args.ocr_drop_score)
+        self.assertFalse(args.ocr_return_word_box)
         self.assertEqual(args.ocr_batch_size, 3)
         self.assertEqual(args.inpaint_padding_px, 6)
         self.assertAlmostEqual(args.inpaint_max_area_ratio, 0.12)
@@ -2460,6 +2571,7 @@ class CliTests(unittest.TestCase):
                 "0.6",
                 "--ocr-drop-score",
                 "0.65",
+                "--ocr-return-word-box",
                 "--ocr-batch-size",
                 "6",
                 "--inpaint-engine",
@@ -2495,6 +2607,7 @@ class CliTests(unittest.TestCase):
         self.assertAlmostEqual(args.ocr_det_thresh, 0.55)
         self.assertAlmostEqual(args.ocr_det_box_thresh, 0.6)
         self.assertAlmostEqual(args.ocr_drop_score, 0.65)
+        self.assertTrue(args.ocr_return_word_box)
         self.assertEqual(args.ocr_batch_size, 6)
         self.assertEqual(args.inpaint_engine, "opencv-fast")
         self.assertEqual(args.inpaint_padding_px, 10)

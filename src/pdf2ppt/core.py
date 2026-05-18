@@ -50,6 +50,7 @@ class ConversionOptions:
     ocr_det_thresh: float | None = None
     ocr_det_box_thresh: float | None = None
     ocr_drop_score: float | None = None
+    ocr_return_word_box: bool = False
     ocr_batch_size: int = DEFAULT_OCR_BATCH_SIZE
     render_dpi: int = 144
     background_dpi: int = 110

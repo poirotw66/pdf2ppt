@@ -105,6 +105,7 @@ def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
         det_thresh=request.det_thresh,
         det_box_thresh=request.det_box_thresh,
         drop_score=request.drop_score,
+        return_word_box=request.return_word_box,
     )
 
     pages: list[DetectPageResponse] = []
@@ -197,6 +198,7 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         ocr_det_thresh=request.det_thresh,
         ocr_det_box_thresh=request.det_box_thresh,
         ocr_drop_score=request.drop_score,
+        ocr_return_word_box=request.return_word_box,
         ocr_batch_size=request.ocr_batch_size,
         render_dpi=request.dpi,
         background_dpi=request.background_dpi,

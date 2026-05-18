@@ -116,6 +116,7 @@ def convert_pdf(
         det_thresh=options.ocr_det_thresh,
         det_box_thresh=options.ocr_det_box_thresh,
         drop_score=options.ocr_drop_score,
+        return_word_box=options.ocr_return_word_box,
     )
     page_results: list[PageResult] = []
 
