@@ -54,7 +54,15 @@ export function InspectorPanel({
   return (
     <section className="inspector-panel">
       <div className="section-header">
-        <h2>Selected Box</h2>
+        <div className="section-heading">
+          <span className="eyebrow">Inspector</span>
+          <h2>Selected Box</h2>
+          <p className="muted">Review OCR content, correct metadata, and make small geometric fixes without leaving the current page.</p>
+        </div>
+        <div className="header-pills">
+          <span className="stat-pill">{selectedBox ? selectedBox.source : "No active box"}</span>
+          <span className="stat-pill subtle">{selectedBox ? `Conf ${selectedBox.confidence.toFixed(2)}` : `${selectedPageBoxCount} page boxes`}</span>
+        </div>
         <div className="inspector-actions">
           <button onClick={onDuplicate} disabled={!selectedBox}>Duplicate</button>
           <button onClick={onDelete} disabled={selectedBoxIds.length === 0 && !selectedBox}>Delete</button>
@@ -118,7 +126,12 @@ export function InspectorPanel({
           </div>
         </div>
       ) : (
-        <div className="empty-state">Select a box to inspect it.</div>
+        <div className="empty-state inspector-empty-state">
+          <div>
+            <strong>Select a box to inspect it</strong>
+            <p className="muted">Click a region in the preview or choose one from the list below to edit text, confidence, and bounds.</p>
+          </div>
+        </div>
       )}
       <div className="panel-tip">
         <strong>Editing tips</strong>
@@ -135,8 +148,11 @@ export function InspectorPanel({
 
       <div className="panel box-list-panel">
         <div className="section-header">
-          <h2>Boxes</h2>
-          <span>{orderedBoxes.length}/{selectedPageBoxCount}</span>
+          <div className="section-heading compact-heading">
+            <span className="eyebrow">Inventory</span>
+            <h2>Boxes</h2>
+          </div>
+          <span className="stat-pill subtle">{orderedBoxes.length}/{selectedPageBoxCount}</span>
         </div>
         <div className="filter-row">
           <button className={boxFilter === "all" ? "filter-chip active" : "filter-chip"} onClick={() => onBoxFilterChange("all")}>All</button>

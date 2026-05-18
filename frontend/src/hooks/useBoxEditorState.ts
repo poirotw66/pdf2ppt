@@ -130,7 +130,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
   }, [dragState, orderedBoxes, selectedBoxId, selectedPage]);
 
   useEffect(() => {
-    if (!editorViewportRef.current) {
+    if (!selectedPage || !editorViewportRef.current) {
       return;
     }
     const element = editorViewportRef.current;
@@ -144,7 +144,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     const observer = new ResizeObserver(updateSize);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [selectedPage]);
 
   useEffect(() => {
     setDragState(null);
@@ -177,6 +177,7 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
     setSelectedPageIndex(index);
     setSelectedBoxId(page?.boxes[0]?.id ?? null);
     setSelectedBoxIds(page?.boxes[0]?.id ? [page.boxes[0].id] : []);
+    setZoom(1);
     if (page) {
       setStatusText(`Viewing page ${page.page}.`);
     }

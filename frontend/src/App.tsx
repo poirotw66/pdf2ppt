@@ -18,12 +18,17 @@ export default function App() {
   const api = usePdf2PptApi();
   const editor = useBoxEditorState({ setStatusText: api.setStatusText });
 
-  async function handleCreateJob() {
-    if (!file) {
-      api.setStatusText("Select a PDF before creating a job.");
+  async function handleFileChange(nextFile: File | null) {
+    setFile(nextFile);
+    editor.resetPages();
+    api.setJob(null);
+
+    if (!nextFile) {
+      api.setStatusText("Upload a PDF to start.");
       return;
     }
-    const payload = await api.createJob(file);
+
+    const payload = await api.createJob(nextFile);
     if (payload) {
       editor.resetPages();
     }
@@ -72,7 +77,6 @@ export default function App() {
         isBusy={api.isBusy}
         job={api.job}
         onConvert={handleConvert}
-        onCreateJob={handleCreateJob}
         onDetectConfidenceThresholdChange={(value) => {
           if (!Number.isFinite(value)) {
             return;
@@ -80,7 +84,9 @@ export default function App() {
           setDetectConfidenceThreshold(Math.min(1, Math.max(0, value)));
         }}
         onInpaintEngineChange={setInpaintEngine}
-        onFileChange={setFile}
+        onFileChange={(nextFile) => {
+          void handleFileChange(nextFile);
+        }}
         onRunDetect={handleRunDetect}
         onSaveBoxes={() => {
           void handleSaveBoxes();

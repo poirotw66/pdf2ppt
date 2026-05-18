@@ -62,6 +62,22 @@ const lowConfidencePage: PagePayload = {
   ],
 };
 
+const tallPage: PagePayload = {
+  page: 1,
+  image_url: "/jobs/demo/pages/tall.png",
+  width: 400,
+  height: 800,
+  boxes: [
+    {
+      id: "box_tall",
+      source: "ocr-auto",
+      bbox: [30, 40, 180, 120],
+      text: "portrait",
+      confidence: 0.93,
+    },
+  ],
+};
+
 describe("box editor interactions", () => {
   afterEach(() => {
     cleanup();
@@ -103,6 +119,18 @@ describe("box editor interactions", () => {
     expect(screen.getByTestId("box-count")).toHaveTextContent("1");
   });
 
+  it("resets preview zoom to fit when switching pages", () => {
+    render(<EditorHarness initialPages={[firstPage, secondPage]} />);
+
+    fireEvent.change(screen.getByRole("slider"), { target: { value: "150" } });
+    expect(screen.getByTestId("zoom-value")).toHaveTextContent("1.5");
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to page 2" }));
+
+    expect(screen.getByTestId("current-page")).toHaveTextContent("2");
+    expect(screen.getByTestId("zoom-value")).toHaveTextContent("1");
+  });
+
   it("trusts backend-filtered detect results when pages load", () => {
     render(<EditorHarness initialPages={[lowConfidencePage]} />);
 
@@ -111,6 +139,39 @@ describe("box editor interactions", () => {
     expect(screen.getByTestId("status-text")).toHaveTextContent(
       `Loaded 2 OCR box(es) from backend detect results at threshold ${detectConfidenceThreshold.toFixed(2)}.`,
     );
+  });
+
+  it("calculates fit zoom when the preview mounts after pages load", async () => {
+    const clientWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    const clientHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+      configurable: true,
+      get() {
+        return this.classList.contains("editor-scroll") ? 420 : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        return this.classList.contains("editor-scroll") ? 320 : 0;
+      },
+    });
+
+    try {
+      render(<DelayedLoadHarness pages={[tallPage]} />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Load pages" }));
+
+      expect(await screen.findByText("Fit 36%")).toBeInTheDocument();
+    } finally {
+      if (clientWidthDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, "clientWidth", clientWidthDescriptor);
+      }
+      if (clientHeightDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDescriptor);
+      }
+    }
   });
 });
 
@@ -131,6 +192,42 @@ function EditorHarness({ initialPages }: { initialPages: PagePayload[] }) {
       <div data-testid="current-page">{editor.selectedPage?.page ?? 0}</div>
       <div data-testid="box-count">{editor.selectedPage?.boxes.length ?? 0}</div>
       <div data-testid="selected-box">{editor.selectedBoxId ?? ""}</div>
+      <div data-testid="zoom-value">{editor.zoom}</div>
+      <PreviewEditor
+        apiBase=""
+        dragState={editor.dragState}
+        editorRef={editor.editorRef}
+        editorTool={editor.editorTool}
+        editorViewportRef={editor.editorViewportRef}
+        onEditorMouseDown={editor.onEditorMouseDown}
+        onEditorMouseMove={editor.onEditorMouseMove}
+        onEditorMouseUp={editor.onEditorMouseUp}
+        onEditorToolChange={editor.setEditorTool}
+        onFitToSlide={editor.fitToSlide}
+        onSelectBox={editor.selectBox}
+        onStartMoveBox={editor.startMoveBox}
+        onStartResizeBox={editor.startResizeBox}
+        fitZoomPercent={editor.fitZoomPercent}
+        onZoomChange={editor.onZoomChange}
+        previewScale={editor.previewScale}
+        previewZoomPercent={editor.previewZoomPercent}
+        selectedBoxId={editor.selectedBoxId}
+        selectedBoxIds={editor.selectedBoxIds}
+        selectedPage={editor.selectedPage}
+        zoom={editor.zoom}
+      />
+    </div>
+  );
+}
+
+function DelayedLoadHarness({ pages }: { pages: PagePayload[] }) {
+  const [statusText, setStatusText] = useState("ready");
+  const editor = useBoxEditorState({ setStatusText });
+
+  return (
+    <div>
+      <button type="button" onClick={() => editor.loadDetectedPages(pages, detectConfidenceThreshold)}>Load pages</button>
+      <div data-testid="status-text">{statusText}</div>
       <PreviewEditor
         apiBase=""
         dragState={editor.dragState}

@@ -50,12 +50,28 @@ export function PreviewEditor({
   selectedPage,
   zoom,
 }: PreviewEditorProps) {
+  const selectedCount = selectedBoxIds.length;
+
   return (
     <section className="editor-panel">
       <div className="section-header">
-        <h2>Preview</h2>
-        <div className="preview-toolbar">
-          <span>{selectedPage ? `${selectedPage.width} x ${selectedPage.height}` : "No page"}</span>
+        <div className="section-heading">
+          <span className="eyebrow">Canvas</span>
+          <h2>Preview</h2>
+          <p className="muted">Inspect each slide visually, switch tools quickly, and adjust the working zoom without leaving the canvas.</p>
+        </div>
+        <div className="header-pills">
+          <span className="stat-pill">{selectedPage ? `Page ${selectedPage.page}` : "No page"}</span>
+          <span className="stat-pill subtle">{selectedPage ? `${selectedPage.boxes.length} boxes` : "Awaiting OCR"}</span>
+          <span className="stat-pill subtle">{selectedCount > 0 ? `${selectedCount} selected` : "No selection"}</span>
+        </div>
+      </div>
+      <div className="preview-toolbar">
+        <div className="toolbar-cluster toolbar-readout">
+          <span className="toolbar-label">Resolution</span>
+          <strong>{selectedPage ? `${selectedPage.width} x ${selectedPage.height}` : "No page loaded"}</strong>
+        </div>
+        <div className="toolbar-cluster">
           <div className="tool-toggle" role="group" aria-label="Preview tool">
             <button
               type="button"
@@ -72,15 +88,17 @@ export function PreviewEditor({
               Create Box
             </button>
           </div>
+        </div>
+        <div className="toolbar-cluster toolbar-actions">
           <button type="button" className="tool-chip" onClick={onFitToSlide}>
             Fit Slide
           </button>
           <label className="zoom-control">
-            <span>Zoom</span>
+            <span className="toolbar-label">Zoom</span>
             <input type="range" min="50" max="200" step="10" value={zoom * 100} onChange={onZoomChange} />
             <strong>{previewZoomPercent}%</strong>
           </label>
-          <span>Fit {fitZoomPercent}%</span>
+          <span className="fit-indicator">Fit {fitZoomPercent}%</span>
         </div>
       </div>
       {selectedPage ? (
@@ -133,7 +151,12 @@ export function PreviewEditor({
           </div>
         </div>
       ) : (
-        <div className="empty-state">Run OCR detect to load page previews.</div>
+        <div className="empty-state editor-empty-state">
+          <div>
+            <strong>Preview will appear here</strong>
+            <p className="muted">Run OCR detection after creating a job to open the canvas and start refining detected regions.</p>
+          </div>
+        </div>
       )}
     </section>
   );

@@ -10,7 +10,7 @@ export const INPAINT_ENGINE_OPTIONS = [
 
 export type InpaintEngine = (typeof INPAINT_ENGINE_OPTIONS)[number]["value"];
 
-export const defaultInpaintEngine: InpaintEngine = "opencv-fast";
+export const defaultInpaintEngine: InpaintEngine = "lama-pytorch";
 
 export type ConvertRequestPayload = {
   write_debug_artifacts: boolean;

@@ -31,7 +31,6 @@ describe("JobSidebar", () => {
         isBusy={false}
         job={defaultJob}
         onConvert={vi.fn()}
-        onCreateJob={vi.fn()}
         onDetectConfidenceThresholdChange={onDetectConfidenceThresholdChange}
         onInpaintEngineChange={vi.fn()}
         onFileChange={vi.fn()}
@@ -61,7 +60,6 @@ describe("JobSidebar", () => {
         isBusy={false}
         job={defaultJob}
         onConvert={vi.fn()}
-        onCreateJob={vi.fn()}
         onDetectConfidenceThresholdChange={vi.fn()}
         onInpaintEngineChange={vi.fn()}
         onFileChange={vi.fn()}
@@ -97,7 +95,6 @@ describe("JobSidebar", () => {
         isBusy={false}
         job={null}
         onConvert={vi.fn()}
-        onCreateJob={vi.fn()}
         onDetectConfidenceThresholdChange={vi.fn()}
         onInpaintEngineChange={vi.fn()}
         onFileChange={vi.fn()}
@@ -111,9 +108,43 @@ describe("JobSidebar", () => {
     );
 
     expect(screen.getByText("No PDF selected yet")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create Job" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Create Job" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run OCR Detect" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Convert PPTX" })).toBeDisabled();
     expect(screen.getByText("Detected pages will appear here after OCR runs.")).toBeInTheDocument();
+  });
+
+  it("passes the selected file upward immediately", () => {
+    const onFileChange = vi.fn();
+
+    render(
+      <JobSidebar
+        apiBase=""
+        busyAction={null}
+        convertResult={null}
+        detectConfidenceThreshold={0.75}
+        inpaintEngine="opencv-fast"
+        file={null}
+        isBusy={false}
+        job={null}
+        onConvert={vi.fn()}
+        onDetectConfidenceThresholdChange={vi.fn()}
+        onInpaintEngineChange={vi.fn()}
+        onFileChange={onFileChange}
+        onRunDetect={vi.fn()}
+        onSaveBoxes={vi.fn()}
+        onSelectPage={vi.fn()}
+        pages={[]}
+        selectedPageIndex={0}
+        statusText="idle"
+      />,
+    );
+
+    const fileInput = screen.getByLabelText(/upload pdf/i) as HTMLInputElement | null;
+    const file = new File(["pdf"], "deck.pdf", { type: "application/pdf" });
+
+    fireEvent.change(fileInput ?? screen.getByRole("textbox", { hidden: true }), { target: { files: [file] } });
+
+    expect(onFileChange).toHaveBeenCalledWith(file);
   });
 });

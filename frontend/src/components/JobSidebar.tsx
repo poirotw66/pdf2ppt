@@ -10,7 +10,6 @@ type JobSidebarProps = {
   isBusy: boolean;
   job: JobResponse | null;
   onConvert: () => void;
-  onCreateJob: () => void;
   onDetectConfidenceThresholdChange: (value: number) => void;
   onInpaintEngineChange: (value: InpaintEngine) => void;
   onFileChange: (file: File | null) => void;
@@ -33,7 +32,6 @@ export function JobSidebar({
   isBusy,
   job,
   onConvert,
-  onCreateJob,
   onDetectConfidenceThresholdChange,
   onInpaintEngineChange,
   onFileChange,
@@ -55,28 +53,26 @@ export function JobSidebar({
         <p className="muted">Move through the pipeline from upload to conversion without losing track of the current step.</p>
 
         <div className="workflow-steps" aria-label="Workflow steps">
-          <section className={hasFile ? "workflow-step complete" : "workflow-step active"}>
+          <section className={hasJob ? "workflow-step complete" : "workflow-step active"}>
             <div className="workflow-step-header">
               <span className="workflow-step-index">1</span>
               <div>
                 <strong>Upload PDF</strong>
-                <p className="muted">Pick a source file to start a new job.</p>
+                <p className="muted">Pick a source file and the app will create a new job automatically.</p>
               </div>
             </div>
             <input
               type="file"
               accept="application/pdf"
+              aria-label="Upload PDF"
               onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
             />
             <div className="panel-tip">
               <strong>{hasFile ? file.name : "No PDF selected yet"}</strong>
               <span className="muted">
-                {hasFile ? "Selecting a different file will prepare a fresh job." : "Only PDF files are accepted."}
+                {hasFile ? (busyAction === "Creating job..." ? "Uploading now and creating a fresh job." : "A new job is created immediately after selection.") : "Only PDF files are accepted."}
               </span>
             </div>
-            <button onClick={onCreateJob} disabled={isBusy || !hasFile}>
-              {busyAction === "Creating job..." ? "Creating Job..." : "Create Job"}
-            </button>
           </section>
 
           <section className={hasJob ? "workflow-step active" : "workflow-step"}>
@@ -103,7 +99,7 @@ export function JobSidebar({
               {busyAction === "Running OCR detect..." ? "Running OCR Detect..." : "Run OCR Detect"}
             </button>
             <span className="muted step-hint">
-              {hasJob ? "Run detection once the upload job is ready." : "Create a job first to unlock OCR detection."}
+              {hasJob ? "Run detection once the upload job is ready." : "Upload a PDF first to auto-create a job and unlock OCR detection."}
             </span>
           </section>
 
