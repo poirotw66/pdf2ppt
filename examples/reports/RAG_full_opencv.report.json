@@ -1,6 +1,6 @@
 {
-  "input_path": "RAG_full.pdf",
-  "output_path": "RAG_full_opencv.pptx",
+  "input_path": "../../RAG_full.pdf",
+  "output_path": "../outputs/RAG_full_opencv.pptx",
   "page_count": 13,
   "editable_page_count": 13,
   "pages": [

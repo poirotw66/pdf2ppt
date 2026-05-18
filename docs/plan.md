@@ -157,7 +157,7 @@ Reason:
 
 This implementation pass will start with:
 
-1. `plan.md`
+1. `docs/plan.md`
 2. FastAPI dependency wiring
 3. Minimal job storage
 4. `POST /jobs`

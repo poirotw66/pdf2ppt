@@ -1,6 +1,6 @@
 {
-  "input_path": "test.pdf",
-  "output_path": "test_o.pptx",
+  "input_path": "../../test.pdf",
+  "output_path": "../outputs/test_o.pptx",
   "page_count": 1,
   "editable_page_count": 1,
   "pages": [
