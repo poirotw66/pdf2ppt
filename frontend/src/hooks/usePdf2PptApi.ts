@@ -11,7 +11,7 @@ const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
 export function usePdf2PptApi() {
   const [job, setJob] = useState<JobResponse | null>(null);
-  const [statusText, setStatusText] = useState("Upload a PDF to start.");
+  const [statusText, setStatusText] = useState("Upload a PDF or image to start.");
   const [isBusy, setIsBusy] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [convertResult, setConvertResult] = useState<ConvertResponse | null>(null);

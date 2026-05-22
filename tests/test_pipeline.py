@@ -210,6 +210,26 @@ class BlockSelectionTests(unittest.TestCase):
         self.assertGreater(combined_blocks[-1].bbox[0], 720.0)
         self.assertGreater(combined_blocks[-1].bbox[1], 570.0)
 
+    def test_append_notebooklm_watermark_mask_blocks_skips_synthetic_fallback_when_disabled(self) -> None:
+        mask_blocks = [
+            TextBlock(
+                id="ocr_body_1",
+                source="ocr",
+                bbox=(100.0, 100.0, 320.0, 180.0),
+                text="Main content",
+                confidence=0.95,
+            )
+        ]
+
+        combined_blocks = append_notebooklm_watermark_mask_blocks(
+            mask_blocks,
+            [],
+            page_rect=fitz.Rect(0, 0, 800, 600),
+            apply_synthetic_fallback=False,
+        )
+
+        self.assertEqual(combined_blocks, mask_blocks)
+
     def test_build_notebooklm_watermark_mask_block_places_block_in_bottom_right_corner(self) -> None:
         block = build_notebooklm_watermark_mask_block(fitz.Rect(0, 0, 960, 540))
 
@@ -450,6 +470,30 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIsInstance(engine, inpainting_engines.LamaPytorchInpaintingEngine)
         self.assertIn("lama-pytorch", note)
 
+    def test_uses_lama_patch_hybrid_only_for_hybrid_engine_alias(self) -> None:
+        self.assertFalse(inpainting_engines.uses_lama_patch_hybrid("lama-pytorch"))
+        self.assertTrue(inpainting_engines.uses_lama_patch_hybrid("lama-pytorch-hybrid"))
+
+    def test_resolve_background_inpainting_engine_returns_lama_hybrid_alias(self) -> None:
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        mask_image = Image.new("L", (60, 40), color=0)
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="lama-pytorch-hybrid",
+            inpaint_model_root=Path("model/big-lama"),
+            inpaint_lama_repo_root=Path("lama"),
+            inpaint_lama_device="cuda",
+            inpaint_lama_patch_hybrid=True,
+        )
+
+        engine, note = resolve_background_inpainting_engine(image, mask_image, options)
+
+        self.assertIsInstance(engine, inpainting_engines.LamaPytorchInpaintingEngine)
+        self.assertTrue(engine.patch_hybrid)
+        self.assertIn("patch_hybrid=True", note)
+
     def test_render_overlay_background_explicit_lama_pytorch_is_strict(self) -> None:
         image = Image.new("RGB", (60, 40), color=(35, 45, 55))
         blocks = [
@@ -677,6 +721,78 @@ class BackgroundModeTests(unittest.TestCase):
         edge_value = int(result[6, 10, 0])
         self.assertGreater(edge_value, 10)
         self.assertLess(edge_value, 200)
+
+    def test_build_lama_composite_alpha_hard_core_replaces_mask_interior(self) -> None:
+        mask_array = np.zeros((20, 20), dtype=np.uint8)
+        mask_array[6:14, 6:14] = 255
+
+        alpha = inpainting_engines._build_lama_composite_alpha(
+            mask_array,
+            blend_sigma=inpainting_engines.DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+            alpha_gain=inpainting_engines.DEFAULT_LAMA_COMPOSITE_ALPHA_GAIN,
+            composite_dilate_px=inpainting_engines.DEFAULT_LAMA_COMPOSITE_MASK_DILATE_PX,
+            hard_core_erode_px=inpainting_engines.DEFAULT_LAMA_COMPOSITE_HARD_CORE_ERODE_PX,
+        )
+
+        self.assertIsNotNone(alpha)
+        assert alpha is not None
+        self.assertEqual(float(alpha[10, 10, 0]), 1.0)
+        self.assertGreater(float(alpha[6, 10, 0]), 0.5)
+
+    def test_should_use_lama_patch_inpaint_for_dense_masks(self) -> None:
+        mask_array = np.zeros((100, 100), dtype=np.uint8)
+        mask_array[:, :40] = 255
+
+        self.assertTrue(inpainting_engines._should_use_lama_patch_inpaint(mask_array))
+
+    def test_should_use_opencv_for_lama_patch_on_flat_background(self) -> None:
+        crop_source = np.full((80, 200, 3), 240, dtype=np.uint8)
+        crop_mask = np.zeros((80, 200), dtype=np.uint8)
+        crop_mask[30:50, 50:150] = 255
+
+        self.assertTrue(inpainting_engines._should_use_opencv_for_lama_patch(crop_source, crop_mask))
+
+    def test_inpaint_lama_crop_with_hybrid_routes_flat_patch_to_opencv(self) -> None:
+        crop_source = np.full((80, 200, 3), 240, dtype=np.uint8)
+        crop_mask = np.zeros((80, 200), dtype=np.uint8)
+        crop_mask[30:50, 50:150] = 255
+        lama_called = {"count": 0}
+
+        def fake_lama(crop_source_arg: np.ndarray, crop_mask_arg: np.ndarray) -> np.ndarray:
+            lama_called["count"] += 1
+            return crop_source_arg
+
+        restored, engine_name = inpainting_engines._inpaint_lama_crop_with_hybrid(
+            crop_source,
+            crop_mask,
+            fake_lama,
+            use_patch_hybrid=True,
+        )
+
+        self.assertEqual(engine_name, "opencv-fast")
+        self.assertEqual(lama_called["count"], 0)
+        self.assertEqual(tuple(restored[40, 100]), (240, 240, 240))
+
+    def test_build_lama_patch_groups_merge_nearby_text_regions(self) -> None:
+        mask_array = np.zeros((80, 120), dtype=np.uint8)
+        mask_array[10:20, 10:30] = 255
+        mask_array[10:20, 40:60] = 255
+
+        groups = inpainting_engines._build_lama_patch_groups(
+            mask_array,
+            context_padding_px=8,
+            merge_gap_px=18,
+        )
+
+        self.assertEqual(len(groups), 1)
+
+    def test_prepare_lama_working_mask_closes_small_gaps(self) -> None:
+        mask_array = np.zeros((30, 30), dtype=np.uint8)
+        mask_array[10:20, 10:14] = 255
+        mask_array[10:20, 16:20] = 255
+
+        prepared = inpainting_engines._prepare_lama_working_mask(mask_array)
+        self.assertGreater(int(np.count_nonzero(prepared)), int(np.count_nonzero(mask_array)))
 
     def test_lama_pytorch_engine_uses_expanded_inference_mask(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

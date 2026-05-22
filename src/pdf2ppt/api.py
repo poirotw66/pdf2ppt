@@ -33,6 +33,8 @@ from .models import TextBlock
 from .ocr import OcrEngine
 from .paths import resolve_repo_relative_path
 from .pipeline import build_notebooklm_watermark_mask_block, convert_pdf
+from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
+from .upload_input import SUPPORTED_UPLOAD_SUFFIXES, is_raster_image_upload, normalize_upload_to_pdf_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -60,17 +62,17 @@ COMMON_ERROR_RESPONSES = {
 async def create_job(file: UploadFile = File(...)) -> JobResponse:
     if not file.filename:
         raise _http_exception(400, "input-error", "Uploaded file must have a filename.")
-    if not file.filename.lower().endswith(".pdf"):
-        raise _http_exception(400, "input-error", "Only PDF uploads are supported.")
+    if Path(file.filename).suffix.lower() not in SUPPORTED_UPLOAD_SUFFIXES:
+        raise _http_exception(400, "input-error", "Only PDF, PNG, and JPG uploads are supported.")
 
-    pdf_bytes = await file.read()
-    if not pdf_bytes:
-        raise _http_exception(400, "input-error", "Uploaded PDF is empty.")
-
+    file_bytes = await file.read()
     try:
+        pdf_bytes = normalize_upload_to_pdf_bytes(filename=file.filename, file_bytes=file_bytes)
         record = job_store.create_job(filename=file.filename, pdf_bytes=pdf_bytes)
+    except InputValidationError as error:
+        raise _to_http_exception(error) from error
     except Exception as error:
-        raise _to_http_exception(InputValidationError(f"Failed to read uploaded PDF: {error}")) from error
+        raise _to_http_exception(InputValidationError(f"Failed to process uploaded file: {error}")) from error
     return _job_to_response(record)
 
 
@@ -121,7 +123,11 @@ def detect_job(job_id: str, request: DetectRequest) -> DetectResponse:
                 batch_numbers = []
                 for page_index in range(batch_start, min(batch_start + request.ocr_batch_size, document.page_count)):
                     page = document[page_index]
-                    preview_image = _render_page_preview(page, dpi=request.dpi)
+                    preview_image = _render_page_preview(
+                        page,
+                        dpi=request.dpi,
+                        apply_notebooklm_fallback=_should_apply_notebooklm_watermark_fallback(record.original_filename),
+                    )
                     batch_pages.append(page_index)
                     batch_images.append(preview_image)
                     batch_numbers.append(page_index + 1)
@@ -210,7 +216,8 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         background_jpeg_quality=request.background_jpeg_quality,
         debug_dir=debug_dir,
         use_doc_unwarping=request.use_doc_unwarping,
-        inpaint_engine=request.inpaint_engine,
+        inpaint_engine=base_lama_inpaint_engine(request.inpaint_engine),
+        inpaint_lama_patch_hybrid=uses_lama_patch_hybrid(request.inpaint_engine),
         inpaint_padding_px=request.inpaint_padding_px,
         inpaint_max_area_ratio=request.inpaint_max_area_ratio,
         inpaint_model_root=resolve_repo_relative_path(request.inpaint_model_root),
@@ -221,6 +228,7 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         inpaint_lama_device=request.inpaint_lama_device,
         approved_ocr_blocks_by_page=approved_boxes_by_page,
         approved_ocr_image_size_by_page=approved_image_sizes_by_page,
+        apply_notebooklm_watermark_fallback=_should_apply_notebooklm_watermark_fallback(record.original_filename),
     )
 
     job_store.update_job(job_id, status="converting")
@@ -255,7 +263,11 @@ def get_job_page_preview(job_id: str, page_number: int) -> FileResponse:
         with fitz.open(record.input_pdf_path) as document:
             if page_number < 1 or page_number > document.page_count:
                 raise _http_exception(404, "not-found", "Preview page not found.")
-            preview_image = _render_page_preview(document[page_number - 1], dpi=144)
+            preview_image = _render_page_preview(
+                document[page_number - 1],
+                dpi=144,
+                apply_notebooklm_fallback=_should_apply_notebooklm_watermark_fallback(record.original_filename),
+            )
     except HTTPException:
         raise
     except Exception as error:
@@ -320,13 +332,24 @@ def _job_to_response(record: JobRecord) -> JobResponse:
     )
 
 
-def _render_page_preview(page: fitz.Page, *, dpi: int) -> Image.Image:
+def _should_apply_notebooklm_watermark_fallback(original_filename: str) -> bool:
+    return not is_raster_image_upload(original_filename)
+
+
+def _render_page_preview(page: fitz.Page, *, dpi: int, apply_notebooklm_fallback: bool = True) -> Image.Image:
     pixmap = page.get_pixmap(dpi=dpi, alpha=False)
     preview_image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
-    return _clean_preview_watermark(preview_image, page.rect)
+    return _clean_preview_watermark(preview_image, page.rect, apply_notebooklm_fallback=apply_notebooklm_fallback)
 
 
-def _clean_preview_watermark(preview_image: Image.Image, page_rect: fitz.Rect) -> Image.Image:
+def _clean_preview_watermark(
+    preview_image: Image.Image,
+    page_rect: fitz.Rect,
+    *,
+    apply_notebooklm_fallback: bool = True,
+) -> Image.Image:
+    if not apply_notebooklm_fallback:
+        return preview_image
     watermark_block = build_notebooklm_watermark_mask_block(page_rect)
     mask_image = build_text_mask_image([watermark_block], preview_image.size, page_rect, padding_px=2)
     try:

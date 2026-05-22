@@ -327,6 +327,7 @@ def analyze_page(
                 mask_blocks,
                 notebooklm_watermark_blocks,
                 page_rect=page.rect,
+                apply_synthetic_fallback=options.apply_notebooklm_watermark_fallback,
             )
             background_process_started_at = perf_counter()
             background_result = render_overlay_background(
@@ -477,9 +478,12 @@ def append_notebooklm_watermark_mask_blocks(
     detected_watermark_blocks: list[TextBlock],
     *,
     page_rect: fitz.Rect,
+    apply_synthetic_fallback: bool = True,
 ) -> list[TextBlock]:
     if detected_watermark_blocks:
         return [*mask_blocks, *detected_watermark_blocks]
+    if not apply_synthetic_fallback:
+        return mask_blocks
     return [*mask_blocks, build_notebooklm_watermark_mask_block(page_rect)]
 
 

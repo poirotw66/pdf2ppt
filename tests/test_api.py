@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,6 +117,59 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(cleaned.size, image.size)
 
+    def test_preview_cleanup_helper_skips_inpainting_for_raster_uploads(self) -> None:
+        from pdf2ppt.api import _clean_preview_watermark
+
+        image = Image.new("RGB", (320, 240), (250, 250, 250))
+        cleaned = _clean_preview_watermark(
+            image,
+            fitz.Rect(0, 0, 320, 240),
+            apply_notebooklm_fallback=False,
+        )
+
+        self.assertIs(cleaned, image)
+
+    @patch("pdf2ppt.api.convert_pdf")
+    def test_convert_disables_notebooklm_fallback_for_raster_uploads(
+        self,
+        convert_pdf_mock: unittest.mock.Mock,
+    ) -> None:
+        convert_pdf_mock.return_value = SimpleNamespace(pages=[object()])
+        image = Image.new("RGB", (320, 240), color=(240, 240, 240))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("slide.png", buffer.getvalue(), "image/png")},
+        )
+        job_id = create_response.json()["job_id"]
+        self.client.put(
+            f"/jobs/{job_id}/boxes",
+            json={
+                "pages": [
+                    {
+                        "page": 1,
+                        "width": 320,
+                        "height": 240,
+                        "boxes": [
+                            {
+                                "id": "box_1",
+                                "source": "ocr-auto",
+                                "bbox": [10.0, 12.0, 80.0, 48.0],
+                                "text": "alpha",
+                                "confidence": 0.91,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        response = self.client.post(f"/jobs/{job_id}/convert", json={})
+        self.assertEqual(response.status_code, 200)
+        options = convert_pdf_mock.call_args.args[0]
+        self.assertFalse(options.apply_notebooklm_watermark_fallback)
+
     def test_preview_endpoint_returns_not_found_for_missing_page(self) -> None:
         pdf_bytes = build_sample_pdf_bytes()
         create_response = self.client.post(
@@ -179,7 +233,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"]["code"], "input-error")
 
-    def test_create_job_rejects_non_pdf_upload_with_structured_error(self) -> None:
+    def test_create_job_rejects_unsupported_upload_with_structured_error(self) -> None:
         response = self.client.post(
             "/jobs",
             files={"file": ("broken.txt", b"plain-text", "text/plain")},
@@ -187,7 +241,35 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"]["code"], "input-error")
-        self.assertEqual(response.json()["detail"]["message"], "Only PDF uploads are supported.")
+        self.assertEqual(response.json()["detail"]["message"], "Only PDF, PNG, and JPG uploads are supported.")
+
+    def test_create_job_accepts_single_page_png_upload(self) -> None:
+        image = Image.new("RGB", (320, 240), color=(240, 240, 240))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        response = self.client.post(
+            "/jobs",
+            files={"file": ("slide.png", buffer.getvalue(), "image/png")},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["page_count"], 1)
+        self.assertEqual(payload["original_filename"], "slide.png")
+
+    def test_create_job_accepts_single_page_jpg_upload(self) -> None:
+        image = Image.new("RGB", (400, 300), color=(200, 210, 220))
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG")
+        response = self.client.post(
+            "/jobs",
+            files={"file": ("slide.jpg", buffer.getvalue(), "image/jpeg")},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["page_count"], 1)
+        self.assertEqual(payload["original_filename"], "slide.jpg")
 
     @patch("pdf2ppt.api.convert_pdf")
     def test_convert_uses_approved_boxes_and_updates_job(

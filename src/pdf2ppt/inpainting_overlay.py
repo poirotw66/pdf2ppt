@@ -10,6 +10,7 @@ from PIL import Image
 
 from .core import ConversionOptions
 from .inpainting_engines import (
+    DEFAULT_LAMA_MASK_EXTRA_PADDING_PX,
     BackgroundInpaintingEngine,
     BackgroundInpaintingError,
     BackgroundRenderResult,
@@ -17,6 +18,8 @@ from .inpainting_engines import (
     LamaPytorchInpaintingEngine,
     OpenCvFastInpaintingEngine,
     WhiteBoxInpaintingEngine,
+    base_lama_inpaint_engine,
+    uses_lama_inpaint_engine,
 )
 from .inpainting_masks import (
     build_refined_text_mask_for_inpainting,
@@ -70,12 +73,15 @@ def render_overlay_background(
     *,
     options: ConversionOptions,
 ) -> BackgroundRenderResult:
+    mask_padding_px = max(0, options.inpaint_padding_px)
+    if uses_lama_inpaint_engine(options.inpaint_engine):
+        mask_padding_px += DEFAULT_LAMA_MASK_EXTRA_PADDING_PX
     mask_refinement = build_refined_text_mask_for_inpainting(
         page_image,
         text_blocks,
         page_image.size,
         page_rect,
-        padding_px=max(0, options.inpaint_padding_px),
+        padding_px=mask_padding_px,
     )
     mask_image = mask_refinement.mask_image
     mask_array = np.array(mask_image, dtype=np.uint8)
@@ -173,7 +179,7 @@ def render_overlay_background(
 
     logger.info("Using background engine %s", engine.name)
     logger.debug("Background engine note: %s", note)
-    if options.inpaint_engine in {"lama-onnx-cuda", "lama-pytorch"}:
+    if uses_lama_inpaint_engine(options.inpaint_engine):
         return finalize_result(
             engine.inpaint(prepared_page_image, mask_image),
             rendered_engine_name=engine.name,
@@ -903,26 +909,30 @@ def resolve_background_inpainting_engine(
         return OpenCvFastInpaintingEngine(), (
             f"Selected opencv-fast engine explicitly (mask area ratio {mask_ratio:.4f})."
         )
-    if requested_engine == "lama-onnx-cuda":
+    if base_lama_inpaint_engine(requested_engine) == "lama-onnx-cuda":
         return LamaOnnxCudaInpaintingEngine(
             model_root=options.inpaint_model_root,
             cuda_provider=options.inpaint_onnx_cuda_provider,
             execution_mode=options.inpaint_onnx_execution_mode,
             max_side_px=options.inpaint_max_side_px,
+            patch_hybrid=options.inpaint_lama_patch_hybrid,
         ), (
-            f"Selected lama-onnx-cuda engine explicitly (mask area ratio {mask_ratio:.4f}, "
-            f"provider {options.inpaint_onnx_cuda_provider}, execution_mode {options.inpaint_onnx_execution_mode})."
+            f"Selected {requested_engine} engine explicitly (mask area ratio {mask_ratio:.4f}, "
+            f"provider {options.inpaint_onnx_cuda_provider}, execution_mode {options.inpaint_onnx_execution_mode}, "
+            f"patch_hybrid={options.inpaint_lama_patch_hybrid})."
         )
-    if requested_engine == "lama-pytorch":
+    if base_lama_inpaint_engine(requested_engine) == "lama-pytorch":
         return LamaPytorchInpaintingEngine(
             model_root=options.inpaint_model_root,
             repo_root=options.inpaint_lama_repo_root,
             device=options.inpaint_lama_device,
             python_executable=options.inpaint_lama_python_executable,
             max_side_px=options.inpaint_max_side_px,
+            patch_hybrid=options.inpaint_lama_patch_hybrid,
         ), (
-            f"Selected lama-pytorch engine explicitly (mask area ratio {mask_ratio:.4f}, "
-            f"repo_root {options.inpaint_lama_repo_root}, device {options.inpaint_lama_device})."
+            f"Selected {requested_engine} engine explicitly (mask area ratio {mask_ratio:.4f}, "
+            f"repo_root {options.inpaint_lama_repo_root}, device {options.inpaint_lama_device}, "
+            f"patch_hybrid={options.inpaint_lama_patch_hybrid})."
         )
 
     if mask_ratio > options.inpaint_max_area_ratio:

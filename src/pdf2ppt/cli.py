@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from .core import DEFAULT_OCR_BATCH_SIZE
+from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
 from .pipeline import ConversionOptions, convert_pdf
 
 
@@ -151,7 +152,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--inpaint-engine",
-        choices=("auto", "white-box", "opencv-fast", "lama-onnx-cuda", "lama-pytorch"),
+        choices=(
+            "auto",
+            "white-box",
+            "opencv-fast",
+            "lama-onnx-cuda",
+            "lama-pytorch",
+            "lama-onnx-cuda-hybrid",
+            "lama-pytorch-hybrid",
+        ),
         default="opencv-fast",
         help="Background reconstruction engine for overlay pages.",
     )
@@ -247,7 +256,8 @@ def main(argv: list[str] | None = None) -> int:
         background_jpeg_quality=args.background_jpeg_quality,
         debug_dir=args.debug_dir,
         use_doc_unwarping=args.enable_doc_unwarping,
-        inpaint_engine=args.inpaint_engine,
+        inpaint_engine=base_lama_inpaint_engine(args.inpaint_engine),
+        inpaint_lama_patch_hybrid=uses_lama_patch_hybrid(args.inpaint_engine),
         inpaint_padding_px=args.inpaint_padding_px,
         inpaint_max_area_ratio=args.inpaint_max_area_ratio,
         inpaint_model_root=args.inpaint_model_root,

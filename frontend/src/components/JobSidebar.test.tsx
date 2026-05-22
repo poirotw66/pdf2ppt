@@ -78,9 +78,10 @@ describe("JobSidebar", () => {
       "opencv-fast",
       "auto",
       "white-box",
-      "lama-onnx-cuda",
+      "lama-pytorch-hybrid",
       "lama-pytorch",
     ]);
+    expect(inpaintSelects[0].value).toBe("lama-pytorch");
   });
 
   it("shows workflow guidance and keeps later actions disabled until prerequisites exist", () => {
@@ -107,7 +108,7 @@ describe("JobSidebar", () => {
       />,
     );
 
-    expect(screen.getByText("No PDF selected yet")).toBeInTheDocument();
+    expect(screen.getByText("No source file selected yet")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Create Job" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run OCR Detect" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Convert PPTX" })).toBeDisabled();
@@ -140,7 +141,7 @@ describe("JobSidebar", () => {
       />,
     );
 
-    const fileInput = screen.getByLabelText(/upload pdf/i) as HTMLInputElement | null;
+    const fileInput = screen.getByLabelText(/upload source file/i) as HTMLInputElement | null;
     const file = new File(["pdf"], "deck.pdf", { type: "application/pdf" });
 
     fireEvent.change(fileInput ?? screen.getByRole("textbox", { hidden: true }), { target: { files: [file] } });

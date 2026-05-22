@@ -70,6 +70,8 @@ class ConversionOptions:
     inpaint_lama_python_executable: Path | None = None
     approved_ocr_blocks_by_page: dict[int, list[Any]] = field(default_factory=dict)
     approved_ocr_image_size_by_page: dict[int, tuple[int, int]] = field(default_factory=dict)
+    apply_notebooklm_watermark_fallback: bool = True
+    inpaint_lama_patch_hybrid: bool = True
 
 
 @dataclass(slots=True)

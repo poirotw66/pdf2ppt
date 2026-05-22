@@ -22,6 +22,9 @@ from .inpainting_masks import (
     DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX,
     DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD,
     DEFAULT_LOW_TEXTURE_STD_THRESHOLD,
+    estimate_background_complexity,
+    estimate_low_texture_mask_fraction,
+    mask_area_ratio,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,9 +65,35 @@ DEFAULT_TELEA_DIRECTIONAL_SIDE_STRONG_EDGE_MARGIN = 0.05
 DEFAULT_STRUCTURAL_LINE_PADDING_PX = 4
 DEFAULT_STRUCTURAL_LINE_MIN_KERNEL_PX = 12
 DEFAULT_LAMA_ONNX_MAX_SIDE_PX = 1536
-DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX = 3
-DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA = 1.4
-DEFAULT_LAMA_COMPOSITE_ALPHA_GAIN = 1.5
+DEFAULT_LAMA_MASK_CLOSE_PX = 2
+DEFAULT_LAMA_MASK_EXTRA_PADDING_PX = 2
+DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX = 4
+DEFAULT_LAMA_EDGE_FEATHER_PX = 3
+DEFAULT_LAMA_PATCH_INPAINT_MASK_RATIO_THRESHOLD = 0.12
+DEFAULT_LAMA_PATCH_MAX_COMPONENTS_FOR_FULL_PAGE = 4
+DEFAULT_LAMA_PATCH_CONTEXT_PADDING_PX = 28
+DEFAULT_LAMA_PATCH_MERGE_GAP_PX = 18
+DEFAULT_LAMA_PATCH_MAX_SIDE_PX = 512
+DEFAULT_LAMA_PATCH_HYBRID_LOW_TEXTURE_THRESHOLD = 0.75
+DEFAULT_LAMA_PATCH_HYBRID_COMPLEXITY_THRESHOLD = 0.42
+LAMA_INPAINT_ENGINES = frozenset(
+    {
+        "lama-pytorch",
+        "lama-onnx-cuda",
+        "lama-pytorch-hybrid",
+        "lama-onnx-cuda-hybrid",
+    }
+)
+LAMA_HYBRID_INPAINT_ENGINES = frozenset(
+    {
+        "lama-pytorch-hybrid",
+        "lama-onnx-cuda-hybrid",
+    }
+)
+DEFAULT_LAMA_COMPOSITE_MASK_DILATE_PX = 2
+DEFAULT_LAMA_COMPOSITE_HARD_CORE_ERODE_PX = 1
+DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA = 1.2
+DEFAULT_LAMA_COMPOSITE_ALPHA_GAIN = 2.0
 DEFAULT_LAMA_ONNX_MODEL_FILENAMES = (
     "lama_fp16.onnx",
     "big-lama-fp16.onnx",
@@ -75,6 +104,22 @@ DEFAULT_LAMA_ONNX_MODEL_FILENAMES = (
 
 _LAMA_SESSION_CACHE: dict[tuple[str, str, str], Any] = {}
 _LAMA_SESSION_CACHE_LOCK = Lock()
+
+
+def base_lama_inpaint_engine(engine: str) -> str:
+    if engine == "lama-pytorch-hybrid":
+        return "lama-pytorch"
+    if engine == "lama-onnx-cuda-hybrid":
+        return "lama-onnx-cuda"
+    return engine
+
+
+def uses_lama_inpaint_engine(engine: str) -> bool:
+    return engine in LAMA_INPAINT_ENGINES
+
+
+def uses_lama_patch_hybrid(engine: str, *, enabled: bool = True) -> bool:
+    return enabled and engine in LAMA_HYBRID_INPAINT_ENGINES
 
 
 @dataclass(slots=True)
@@ -264,11 +309,13 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
         cuda_provider: str = "CUDAExecutionProvider",
         execution_mode: str = "sequential",
         max_side_px: int = DEFAULT_LAMA_ONNX_MAX_SIDE_PX,
+        patch_hybrid: bool = True,
     ) -> None:
         self.model_root = model_root
         self.cuda_provider = cuda_provider
         self.execution_mode = execution_mode.lower().strip()
         self.max_side_px = max(256, int(max_side_px))
+        self.patch_hybrid = patch_hybrid
         self._last_debug_note: str | None = None
 
     @property
@@ -288,16 +335,59 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
             cuda_provider=self.cuda_provider,
             execution_mode=self.execution_mode,
         )
+        working_mask = _prepare_lama_working_mask(mask_array)
+        if _should_use_lama_patch_inpaint(working_mask):
+            result, patch_note = _inpaint_lama_page_by_patches(
+                source_rgb,
+                working_mask,
+                lambda crop_source, crop_mask: self._inpaint_onnx_crop(
+                    session,
+                    crop_source,
+                    crop_mask,
+                    max_side_px=DEFAULT_LAMA_PATCH_MAX_SIDE_PX,
+                )[0],
+                use_patch_hybrid=self.patch_hybrid,
+            )
+            composite_note = _lama_composite_debug_suffix(dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX)
+            self._last_debug_note = (
+                f"LaMa ONNX CUDA provider={self.cuda_provider} execution_mode={self.execution_mode} "
+                f"model={model_path.name} {patch_note}{composite_note}."
+            )
+            return Image.fromarray(result, mode="RGB")
 
-        composite_mask = mask_array
+        resize_note = ""
+        fixed_input_note = ""
+        if self.patch_hybrid and _should_use_opencv_for_lama_patch(source_rgb, working_mask):
+            restored_rgb = _inpaint_opencv_fast_crop(source_rgb, working_mask)
+            result = _finalize_lama_inpaint(source_rgb, restored_rgb, working_mask)
+            hybrid_note = " full-page-hybrid-opencv"
+        else:
+            restored_rgb, resize_note, fixed_input_note = self._inpaint_onnx_crop(session, source_rgb, working_mask)
+            result = _finalize_lama_inpaint(source_rgb, restored_rgb, working_mask)
+            hybrid_note = ""
+        composite_note = _lama_composite_debug_suffix(dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX)
+        self._last_debug_note = (
+            f"LaMa ONNX CUDA provider={self.cuda_provider} execution_mode={self.execution_mode} "
+            f"model={model_path.name}{resize_note}{fixed_input_note}{hybrid_note}{composite_note}."
+        )
+        return Image.fromarray(result, mode="RGB")
+
+    def _inpaint_onnx_crop(
+        self,
+        session: Any,
+        source_rgb: np.ndarray,
+        working_mask: np.ndarray,
+        *,
+        max_side_px: int | None = None,
+    ) -> tuple[np.ndarray, str, str]:
         inference_mask = _expand_lama_inference_mask(
-            mask_array,
+            working_mask,
             dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
         )
         resized_rgb, resized_mask, resized = _resize_lama_inputs(
             source_rgb,
             inference_mask,
-            max_side_px=self.max_side_px,
+            max_side_px=max_side_px if max_side_px is not None else self.max_side_px,
         )
         fixed_input_size = _resolve_lama_fixed_input_size(session)
         model_rgb, model_mask, fit_to_fixed_size = _fit_lama_inputs_to_model(
@@ -334,28 +424,13 @@ class LamaOnnxCudaInpaintingEngine(BackgroundInpaintingEngine):
                 (source_rgb.shape[1], source_rgb.shape[0]),
                 interpolation=cv2.INTER_CUBIC,
             )
-
-        result = _composite_lama_restoration(
-            source_rgb,
-            restored_rgb,
-            composite_mask,
-            blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
-        )
         resize_note = f" resized-to-max-side={self.max_side_px}" if resized else ""
         fixed_input_note = (
             f" model_input={fixed_input_size[1]}x{fixed_input_size[0]}"
             if fixed_input_size is not None
             else ""
         )
-        composite_note = _lama_composite_debug_suffix(
-            dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
-            blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
-        )
-        self._last_debug_note = (
-            f"LaMa ONNX CUDA provider={self.cuda_provider} execution_mode={self.execution_mode} "
-            f"model={model_path.name}{resize_note}{fixed_input_note}{composite_note}."
-        )
-        return Image.fromarray(result, mode="RGB")
+        return restored_rgb, resize_note, fixed_input_note
 
 
 @dataclass(slots=True)
@@ -397,12 +472,14 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
         device: str = "cuda",
         python_executable: Path | None = None,
         max_side_px: int = DEFAULT_LAMA_ONNX_MAX_SIDE_PX,
+        patch_hybrid: bool = True,
     ) -> None:
         self.model_root = model_root
         self.repo_root = repo_root
         self.device = device.strip() or "cuda"
         self.python_executable = python_executable
         self.max_side_px = max(256, int(max_side_px))
+        self.patch_hybrid = patch_hybrid
         self._last_debug_note: str | None = None
 
     @property
@@ -421,15 +498,68 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
         python_executable = _resolve_lama_python_executable(self.python_executable)
         _validate_lama_pytorch_runtime(python_executable=python_executable, repo_root=repo_root)
 
-        composite_mask = mask_array
+        working_mask = _prepare_lama_working_mask(mask_array)
+        if _should_use_lama_patch_inpaint(working_mask):
+            result, patch_note = _inpaint_lama_page_by_patches(
+                source_rgb,
+                working_mask,
+                lambda crop_source, crop_mask: self._inpaint_pytorch_crop(
+                    crop_source,
+                    crop_mask,
+                    model_path=model_path,
+                    repo_root=repo_root,
+                    python_executable=python_executable,
+                    max_side_px=DEFAULT_LAMA_PATCH_MAX_SIDE_PX,
+                )[0],
+                use_patch_hybrid=self.patch_hybrid,
+            )
+            composite_note = _lama_composite_debug_suffix(dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX)
+            self._last_debug_note = (
+                f"Official LaMa repo={repo_root.name} device={self.device} model={model_path.name} "
+                f"python={Path(python_executable).name} persistent-worker {patch_note}{composite_note}."
+            )
+            return Image.fromarray(result, mode="RGB")
+
+        resize_note = ""
+        if self.patch_hybrid and _should_use_opencv_for_lama_patch(source_rgb, working_mask):
+            restored_rgb = _inpaint_opencv_fast_crop(source_rgb, working_mask)
+            result = _finalize_lama_inpaint(source_rgb, restored_rgb, working_mask)
+            hybrid_note = " full-page-hybrid-opencv"
+        else:
+            restored_rgb, resize_note = self._inpaint_pytorch_crop(
+                source_rgb,
+                working_mask,
+                model_path=model_path,
+                repo_root=repo_root,
+                python_executable=python_executable,
+            )
+            result = _finalize_lama_inpaint(source_rgb, restored_rgb, working_mask)
+            hybrid_note = ""
+        composite_note = _lama_composite_debug_suffix(dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX)
+        self._last_debug_note = (
+            f"Official LaMa repo={repo_root.name} device={self.device} model={model_path.name} "
+            f"python={Path(python_executable).name} persistent-worker{resize_note}{hybrid_note}{composite_note}."
+        )
+        return Image.fromarray(result, mode="RGB")
+
+    def _inpaint_pytorch_crop(
+        self,
+        source_rgb: np.ndarray,
+        working_mask: np.ndarray,
+        *,
+        model_path: Path,
+        repo_root: Path,
+        python_executable: Path,
+        max_side_px: int | None = None,
+    ) -> tuple[np.ndarray, str]:
         inference_mask = _expand_lama_inference_mask(
-            mask_array,
+            working_mask,
             dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
         )
         resized_rgb, resized_inference_mask, resized = _resize_lama_inputs(
             source_rgb,
             inference_mask,
-            max_side_px=self.max_side_px,
+            max_side_px=max_side_px if max_side_px is not None else self.max_side_px,
         )
         resized_page = Image.fromarray(resized_rgb, mode="RGB")
         resized_mask_image = Image.fromarray((resized_inference_mask > 0).astype(np.uint8) * 255, mode="L")
@@ -476,22 +606,8 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
                     (source_rgb.shape[1], source_rgb.shape[0]),
                     interpolation=cv2.INTER_CUBIC,
                 )
-            result = _composite_lama_restoration(
-                source_rgb,
-                restored_rgb,
-                composite_mask,
-                blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
-            )
-            resize_note = f" resized-to-max-side={self.max_side_px}" if resized else ""
-            composite_note = _lama_composite_debug_suffix(
-                dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
-                blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
-            )
-            self._last_debug_note = (
-                f"Official LaMa repo={repo_root.name} device={self.device} model={model_path.name} "
-                f"python={Path(python_executable).name} persistent-worker{resize_note}{composite_note}."
-            )
-            return Image.fromarray(result, mode="RGB")
+        resize_note = f" resized-to-max-side={self.max_side_px}" if resized else ""
+        return restored_rgb, resize_note
 
 
 def _resolve_lama_model_path(model_root: Path | None) -> Path:
@@ -787,6 +903,247 @@ def _get_lama_session(*, model_path: Path, cuda_provider: str, execution_mode: s
         return _LAMA_SESSION_CACHE[cache_key]
 
 
+def _prepare_lama_working_mask(mask_array: np.ndarray, *, close_px: int = DEFAULT_LAMA_MASK_CLOSE_PX) -> np.ndarray:
+    binary_mask = (mask_array > 0).astype(np.uint8)
+    if not np.any(binary_mask):
+        return mask_array
+    if close_px > 0:
+        kernel_size = close_px * 2 + 1
+        binary_mask = cv2.morphologyEx(
+            binary_mask,
+            cv2.MORPH_CLOSE,
+            np.ones((kernel_size, kernel_size), dtype=np.uint8),
+        )
+    return binary_mask * 255
+
+
+def _should_use_lama_patch_inpaint(mask_array: np.ndarray) -> bool:
+    if mask_area_ratio(mask_array) > DEFAULT_LAMA_PATCH_INPAINT_MASK_RATIO_THRESHOLD:
+        return True
+    component_count, _, _, _ = cv2.connectedComponentsWithStats((mask_array > 0).astype(np.uint8), 8)
+    return component_count > DEFAULT_LAMA_PATCH_MAX_COMPONENTS_FOR_FULL_PAGE + 1
+
+
+def _boxes_overlap_with_gap(
+    left: tuple[int, int, int, int],
+    right: tuple[int, int, int, int],
+    *,
+    gap_px: int,
+) -> bool:
+    left_x0, left_y0, left_x1, left_y1 = left
+    right_x0, right_y0, right_x1, right_y1 = right
+    return not (
+        left_x1 + gap_px < right_x0
+        or right_x1 + gap_px < left_x0
+        or left_y1 + gap_px < right_y0
+        or right_y1 + gap_px < left_y0
+    )
+
+
+def _merge_lama_patch_boxes(
+    boxes: list[tuple[int, int, int, int, int]],
+    *,
+    merge_gap_px: int,
+) -> list[tuple[int, int, int, int, list[int]]]:
+    if not boxes:
+        return []
+
+    parent = list(range(len(boxes)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left_index: int, right_index: int) -> None:
+        left_root = find(left_index)
+        right_root = find(right_index)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for left_index, left_box in enumerate(boxes):
+        for right_index in range(left_index + 1, len(boxes)):
+            if _boxes_overlap_with_gap(left_box[:4], boxes[right_index][:4], gap_px=merge_gap_px):
+                union(left_index, right_index)
+
+    grouped: dict[int, list[int]] = {}
+    for index, box in enumerate(boxes):
+        grouped.setdefault(find(index), []).append(box[4])
+
+    merged_boxes: list[tuple[int, int, int, int, list[int]]] = []
+    for member_indices in grouped.values():
+        member_boxes = [box for box in boxes if box[4] in member_indices]
+        x0 = min(box[0] for box in member_boxes)
+        y0 = min(box[1] for box in member_boxes)
+        x1 = max(box[2] for box in member_boxes)
+        y1 = max(box[3] for box in member_boxes)
+        merged_boxes.append((x0, y0, x1, y1, member_indices))
+    return merged_boxes
+
+
+def _build_lama_patch_groups(
+    working_mask: np.ndarray,
+    *,
+    context_padding_px: int,
+    merge_gap_px: int,
+) -> list[tuple[int, int, int, int, np.ndarray]]:
+    height, width = working_mask.shape[:2]
+    binary_mask = (working_mask > 0).astype(np.uint8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask, 8)
+    if component_count <= 1:
+        return []
+
+    initial_boxes: list[tuple[int, int, int, int, int]] = []
+    for component_index in range(1, component_count):
+        x, y, box_width, box_height, _ = stats[component_index]
+        if box_width <= 0 or box_height <= 0:
+            continue
+        initial_boxes.append(
+            (
+                max(0, int(x) - context_padding_px),
+                max(0, int(y) - context_padding_px),
+                min(width, int(x + box_width) + context_padding_px),
+                min(height, int(y + box_height) + context_padding_px),
+                component_index,
+            )
+        )
+
+    merged_boxes = _merge_lama_patch_boxes(initial_boxes, merge_gap_px=merge_gap_px)
+    patch_groups: list[tuple[int, int, int, int, np.ndarray]] = []
+    for x0, y0, x1, y1, member_indices in merged_boxes:
+        group_mask = np.zeros((height, width), dtype=np.uint8)
+        for component_index in member_indices:
+            group_mask[labels == component_index] = 255
+        patch_groups.append((x0, y0, x1, y1, group_mask))
+    return patch_groups
+
+
+def _composite_lama_patch_into_page(
+    page_rgb: np.ndarray,
+    patch_rgb: np.ndarray,
+    crop_mask: np.ndarray,
+    *,
+    origin: tuple[int, int],
+) -> None:
+    x0, y0 = origin
+    patch_height, patch_width = patch_rgb.shape[:2]
+    region = page_rgb[y0 : y0 + patch_height, x0 : x0 + patch_width]
+    blended = _composite_lama_restoration(
+        region,
+        patch_rgb,
+        crop_mask,
+        blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+        alpha_gain=1.35,
+        composite_dilate_px=1,
+        hard_core_erode_px=0,
+    )
+    page_rgb[y0 : y0 + patch_height, x0 : x0 + patch_width] = blended
+
+
+def _should_use_opencv_for_lama_patch(
+    crop_source: np.ndarray,
+    crop_mask: np.ndarray,
+) -> bool:
+    crop_page = Image.fromarray(crop_source, mode="RGB")
+    crop_mask_image = Image.fromarray(crop_mask, mode="L")
+    low_texture_fraction = estimate_low_texture_mask_fraction(crop_page, crop_mask_image)
+    if low_texture_fraction >= DEFAULT_LAMA_PATCH_HYBRID_LOW_TEXTURE_THRESHOLD:
+        return True
+    complexity = estimate_background_complexity(crop_page, crop_mask_image)
+    return (
+        complexity <= DEFAULT_LAMA_PATCH_HYBRID_COMPLEXITY_THRESHOLD
+        and mask_area_ratio(crop_mask) <= 0.25
+    )
+
+
+def _inpaint_opencv_fast_crop(source_rgb: np.ndarray, working_mask: np.ndarray) -> np.ndarray:
+    crop_page = Image.fromarray(source_rgb, mode="RGB")
+    crop_mask_image = Image.fromarray(working_mask, mode="L")
+    return np.array(OpenCvFastInpaintingEngine().inpaint(crop_page, crop_mask_image), dtype=np.uint8)
+
+
+def _inpaint_lama_crop_with_hybrid(
+    crop_source: np.ndarray,
+    crop_working_mask: np.ndarray,
+    run_lama_crop_inpaint: Any,
+    *,
+    use_patch_hybrid: bool,
+) -> tuple[np.ndarray, str]:
+    if use_patch_hybrid and _should_use_opencv_for_lama_patch(crop_source, crop_working_mask):
+        return _inpaint_opencv_fast_crop(crop_source, crop_working_mask), "opencv-fast"
+    return run_lama_crop_inpaint(crop_source, crop_working_mask), "lama"
+
+
+def _inpaint_lama_page_by_patches(
+    source_rgb: np.ndarray,
+    working_mask: np.ndarray,
+    run_crop_inpaint: Any,
+    *,
+    use_patch_hybrid: bool,
+) -> tuple[np.ndarray, str]:
+    patch_groups = _build_lama_patch_groups(
+        working_mask,
+        context_padding_px=DEFAULT_LAMA_PATCH_CONTEXT_PADDING_PX,
+        merge_gap_px=DEFAULT_LAMA_PATCH_MERGE_GAP_PX,
+    )
+    if not patch_groups:
+        return source_rgb.copy(), "patch-mode groups=0"
+
+    result = source_rgb.copy()
+    opencv_patch_count = 0
+    lama_patch_count = 0
+    for x0, y0, x1, y1, group_mask in patch_groups:
+        crop_source = source_rgb[y0:y1, x0:x1]
+        crop_mask = group_mask[y0:y1, x0:x1]
+        if not np.any(crop_mask):
+            continue
+        crop_working_mask = _prepare_lama_working_mask(crop_mask)
+        crop_restored, patch_engine = _inpaint_lama_crop_with_hybrid(
+            crop_source,
+            crop_working_mask,
+            run_crop_inpaint,
+            use_patch_hybrid=use_patch_hybrid,
+        )
+        if patch_engine == "opencv-fast":
+            opencv_patch_count += 1
+        else:
+            lama_patch_count += 1
+        _composite_lama_patch_into_page(
+            result,
+            crop_restored,
+            crop_working_mask,
+            origin=(x0, y0),
+        )
+
+    hybrid_note = (
+        f" hybrid-opencv={opencv_patch_count} hybrid-lama={lama_patch_count}"
+        if use_patch_hybrid
+        else ""
+    )
+    patch_note = (
+        f"patch-mode groups={len(patch_groups)}{hybrid_note} "
+        f"mask-ratio={mask_area_ratio(working_mask):.4f}"
+    )
+    return result, patch_note
+
+
+def _finalize_lama_inpaint(
+    source_rgb: np.ndarray,
+    restored_rgb: np.ndarray,
+    working_mask: np.ndarray,
+) -> np.ndarray:
+    return _composite_lama_restoration(
+        source_rgb,
+        restored_rgb,
+        working_mask,
+        blend_sigma=DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+        alpha_gain=1.35,
+        composite_dilate_px=1,
+        hard_core_erode_px=0,
+    )
+
+
 def _expand_lama_inference_mask(mask_array: np.ndarray, *, dilate_px: int) -> np.ndarray:
     binary_mask = (mask_array > 0).astype(np.uint8)
     if dilate_px <= 0 or not np.any(binary_mask):
@@ -801,20 +1158,111 @@ def _composite_lama_restoration(
     restored_rgb: np.ndarray,
     composite_mask: np.ndarray,
     *,
-    blend_sigma: float,
+    inference_mask: np.ndarray | None = None,
+    blend_sigma: float = DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
     alpha_gain: float = DEFAULT_LAMA_COMPOSITE_ALPHA_GAIN,
+    composite_dilate_px: int = DEFAULT_LAMA_COMPOSITE_MASK_DILATE_PX,
+    hard_core_erode_px: int = DEFAULT_LAMA_COMPOSITE_HARD_CORE_ERODE_PX,
 ) -> np.ndarray:
-    component = (composite_mask > 0).astype(np.float32)
-    if not np.any(component):
+    if inference_mask is not None:
+        return _composite_lama_restoration_with_inference_mask(
+            source_rgb,
+            restored_rgb,
+            inference_mask,
+            edge_feather_px=DEFAULT_LAMA_EDGE_FEATHER_PX,
+        )
+    alpha = _build_lama_composite_alpha(
+        composite_mask,
+        blend_sigma=blend_sigma,
+        alpha_gain=alpha_gain,
+        composite_dilate_px=composite_dilate_px,
+        hard_core_erode_px=hard_core_erode_px,
+    )
+    if alpha is None:
         return source_rgb
-    alpha = cv2.GaussianBlur(component, (0, 0), sigmaX=blend_sigma, sigmaY=blend_sigma)
-    alpha = np.clip(alpha * alpha_gain, 0.0, 1.0)[..., None]
     blended = source_rgb.astype(np.float32) * (1.0 - alpha) + restored_rgb.astype(np.float32) * alpha
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
-def _lama_composite_debug_suffix(*, dilate_px: int, blend_sigma: float) -> str:
-    return f" inference-mask-dilate={dilate_px} composite-feather-sigma={blend_sigma:.1f}"
+def _composite_lama_restoration_with_inference_mask(
+    source_rgb: np.ndarray,
+    restored_rgb: np.ndarray,
+    inference_mask: np.ndarray,
+    *,
+    edge_feather_px: int,
+) -> np.ndarray:
+    binary_mask = (inference_mask > 0).astype(np.uint8)
+    if not np.any(binary_mask):
+        return source_rgb
+
+    distance = cv2.distanceTransform(binary_mask, cv2.DIST_L2, 5)
+    max_distance = float(distance.max())
+    feather = max(1, edge_feather_px)
+    alpha = np.zeros_like(distance, dtype=np.float32)
+    if max_distance <= feather:
+        alpha[binary_mask > 0] = 1.0
+    else:
+        inner_threshold = max_distance - feather
+        inside = binary_mask > 0
+        alpha[inside & (distance >= inner_threshold)] = 1.0
+        edge_band = inside & (distance < inner_threshold)
+        alpha[edge_band] = np.clip(distance[edge_band] / feather, 0.0, 1.0)
+
+    alpha = alpha[..., None]
+    blended = source_rgb.astype(np.float32) * (1.0 - alpha) + restored_rgb.astype(np.float32) * alpha
+    return np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _build_lama_composite_alpha(
+    composite_mask: np.ndarray,
+    *,
+    blend_sigma: float,
+    alpha_gain: float,
+    composite_dilate_px: int,
+    hard_core_erode_px: int,
+) -> np.ndarray | None:
+    binary_mask = (composite_mask > 0).astype(np.uint8)
+    if not np.any(binary_mask):
+        return None
+
+    expanded_mask = binary_mask
+    if composite_dilate_px > 0:
+        kernel_size = composite_dilate_px * 2 + 1
+        expanded_mask = cv2.dilate(
+            binary_mask,
+            np.ones((kernel_size, kernel_size), dtype=np.uint8),
+            iterations=1,
+        )
+
+    alpha = cv2.GaussianBlur(
+        expanded_mask.astype(np.float32),
+        (0, 0),
+        sigmaX=blend_sigma,
+        sigmaY=blend_sigma,
+    )
+    alpha = np.clip(alpha * alpha_gain, 0.0, 1.0)
+
+    if hard_core_erode_px > 0:
+        core_kernel_size = hard_core_erode_px * 2 + 1
+        hard_core = cv2.erode(
+            binary_mask,
+            np.ones((core_kernel_size, core_kernel_size), dtype=np.uint8),
+            iterations=1,
+        )
+        if np.any(hard_core):
+            alpha[hard_core > 0] = 1.0
+
+    return alpha[..., None]
+
+
+def _lama_composite_debug_suffix(*, dilate_px: int) -> str:
+    return (
+        f" mask-close={DEFAULT_LAMA_MASK_CLOSE_PX}"
+        f" inference-mask-dilate={dilate_px}"
+        f" patch-threshold={DEFAULT_LAMA_PATCH_INPAINT_MASK_RATIO_THRESHOLD:.2f}"
+        f" patch-hybrid-low-texture>={DEFAULT_LAMA_PATCH_HYBRID_LOW_TEXTURE_THRESHOLD:.2f}"
+        f" patch-max-side={DEFAULT_LAMA_PATCH_MAX_SIDE_PX}"
+    )
 
 
 def _resize_lama_inputs(

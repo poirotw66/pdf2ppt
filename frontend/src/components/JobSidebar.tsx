@@ -1,5 +1,6 @@
 import { INPAINT_ENGINE_OPTIONS, type InpaintEngine } from "../config";
 import type { JobResponse, PagePayload } from "../types";
+import { UPLOAD_ACCEPT } from "../utils/upload";
 
 type JobSidebarProps = {
   busyAction: string | null;
@@ -57,20 +58,20 @@ export function JobSidebar({
             <div className="workflow-step-header">
               <span className="workflow-step-index">1</span>
               <div>
-                <strong>Upload PDF</strong>
-                <p className="muted">Pick a source file and the app will create a new job automatically.</p>
+                <strong>Upload Source</strong>
+                <p className="muted">Pick a PDF or a single PNG/JPG image and the app will create a new job automatically.</p>
               </div>
             </div>
             <input
               type="file"
-              accept="application/pdf"
-              aria-label="Upload PDF"
+              accept={UPLOAD_ACCEPT}
+              aria-label="Upload source file"
               onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
             />
             <div className="panel-tip">
-              <strong>{hasFile ? file.name : "No PDF selected yet"}</strong>
+              <strong>{hasFile ? file.name : "No source file selected yet"}</strong>
               <span className="muted">
-                {hasFile ? (busyAction === "Creating job..." ? "Uploading now and creating a fresh job." : "A new job is created immediately after selection.") : "Only PDF files are accepted."}
+                {hasFile ? (busyAction === "Creating job..." ? "Uploading now and creating a fresh job." : "A new job is created immediately after selection.") : "PDF, PNG, and JPG files are accepted."}
               </span>
             </div>
           </section>
@@ -99,7 +100,7 @@ export function JobSidebar({
               {busyAction === "Running OCR detect..." ? "Running OCR Detect..." : "Run OCR Detect"}
             </button>
             <span className="muted step-hint">
-              {hasJob ? "Run detection once the upload job is ready." : "Upload a PDF first to auto-create a job and unlock OCR detection."}
+              {hasJob ? "Run detection once the upload job is ready." : "Upload a PDF or image first to auto-create a job and unlock OCR detection."}
             </span>
           </section>
 

@@ -10,6 +10,7 @@ import { JobSidebar } from "./components/JobSidebar";
 import { PreviewEditor } from "./components/PreviewEditor";
 import { useBoxEditorState } from "./hooks/useBoxEditorState";
 import { usePdf2PptApi } from "./hooks/usePdf2PptApi";
+import { isSupportedUpload } from "./utils/upload";
 
 export default function App() {
   const [detectConfidenceThreshold, setDetectConfidenceThreshold] = useState(defaultDetectConfidenceThreshold);
@@ -24,7 +25,13 @@ export default function App() {
     api.setJob(null);
 
     if (!nextFile) {
-      api.setStatusText("Upload a PDF to start.");
+      api.setStatusText("Upload a PDF or image to start.");
+      return;
+    }
+
+    if (!isSupportedUpload(nextFile)) {
+      api.setStatusText("Only PDF, PNG, and JPG files are supported.");
+      setFile(null);
       return;
     }
 
