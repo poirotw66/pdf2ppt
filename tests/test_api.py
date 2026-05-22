@@ -62,14 +62,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(get_response.status_code, 404)
         self.assertEqual(get_response.json()["detail"]["code"], "not-found")
 
-    @patch("pdf2ppt.api._clean_preview_watermark", side_effect=lambda image, _page_rect: image)
-    @patch("pdf2ppt.api.OcrEngine.extract_text_blocks_batch")
+    @patch("pdf2ppt.api._clean_preview_watermark", side_effect=lambda image, _page_rect, **_: image)
+    @patch("pdf2ppt.api.OcrEngine")
     def test_detect_generates_preview_payload(
         self,
-        extract_text_blocks_batch_mock: unittest.mock.Mock,
+        ocr_engine_class_mock: unittest.mock.Mock,
         clean_preview_watermark_mock: unittest.mock.Mock,
     ) -> None:
-        extract_text_blocks_batch_mock.return_value = [
+        ocr_engine = unittest.mock.Mock()
+        ocr_engine.extract_text_blocks_batch.return_value = [
             SimpleNamespace(
                 blocks=[
                     SimpleNamespace(
@@ -82,6 +83,7 @@ class ApiTests(unittest.TestCase):
                 ]
             )
         ]
+        ocr_engine_class_mock.return_value = ocr_engine
         pdf_bytes = build_sample_pdf_bytes()
         create_response = self.client.post(
             "/jobs",
@@ -91,8 +93,8 @@ class ApiTests(unittest.TestCase):
 
         detect_response = self.client.post(f"/jobs/{job_id}/detect", json={"dpi": 110})
         self.assertEqual(detect_response.status_code, 200)
-        extract_text_blocks_batch_mock.assert_called_once()
-        self.assertEqual(extract_text_blocks_batch_mock.call_args.args[1], [1])
+        ocr_engine.extract_text_blocks_batch.assert_called_once()
+        self.assertEqual(ocr_engine.extract_text_blocks_batch.call_args.args[1], [1])
         payload = detect_response.json()
         self.assertEqual(payload["status"], "detected")
         self.assertEqual(len(payload["pages"]), 1)

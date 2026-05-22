@@ -714,13 +714,24 @@ class BackgroundModeTests(unittest.TestCase):
             source_rgb,
             restored_rgb,
             mask_array,
-            blend_sigma=inpainting_engines.DEFAULT_LAMA_COMPOSITE_BLEND_SIGMA,
+            blend_sigma=1.4,
+            alpha_gain=1.2,
+            composite_dilate_px=2,
+            hard_core_erode_px=0,
         )
 
         self.assertEqual(tuple(result[10, 10]), (200, 200, 200))
-        edge_value = int(result[6, 10, 0])
-        self.assertGreater(edge_value, 10)
-        self.assertLess(edge_value, 200)
+        self.assertEqual(tuple(result[0, 0]), (10, 10, 10))
+        alpha = inpainting_engines._build_lama_composite_alpha(
+            mask_array,
+            blend_sigma=1.4,
+            alpha_gain=1.2,
+            composite_dilate_px=2,
+            hard_core_erode_px=0,
+        )
+        assert alpha is not None
+        self.assertGreater(float(alpha[6, 10, 0]), 0.0)
+        self.assertLess(float(alpha[6, 10, 0]), 1.0)
 
     def test_build_lama_composite_alpha_hard_core_replaces_mask_interior(self) -> None:
         mask_array = np.zeros((20, 20), dtype=np.uint8)
@@ -823,6 +834,7 @@ class BackgroundModeTests(unittest.TestCase):
             engine = inpainting_engines.LamaPytorchInpaintingEngine(
                 model_root=model_dir,
                 repo_root=repo_root,
+                patch_hybrid=False,
             )
             mask_array = np.zeros((20, 20), dtype=np.uint8)
             mask_array[8:12, 8:12] = 255
