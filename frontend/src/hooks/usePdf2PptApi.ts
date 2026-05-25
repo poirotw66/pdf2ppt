@@ -108,7 +108,11 @@ export function usePdf2PptApi() {
   async function convertJob(jobId: string, inpaintEngine: InpaintEngine): Promise<ConvertResponse | null> {
     setIsBusy(true);
     setBusyAction("Converting PPTX...");
-    setStatusText(`Converting job ${jobId} into PPTX...`);
+    const lamaHint =
+      inpaintEngine === "lama-pytorch" || inpaintEngine === "lama-pytorch-hybrid"
+        ? " LaMa may take several minutes on dense slides (first run loads the GPU model)."
+        : "";
+    setStatusText(`Converting job ${jobId} into PPTX...${lamaHint}`);
     try {
       const response = await fetch(`${apiBase}/jobs/${jobId}/convert`, {
         method: "POST",

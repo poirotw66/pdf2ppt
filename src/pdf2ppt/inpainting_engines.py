@@ -512,6 +512,13 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
                     max_side_px=DEFAULT_LAMA_PATCH_MAX_SIDE_PX,
                 )[0],
                 use_patch_hybrid=self.patch_hybrid,
+                run_crops_batch_inpaint=lambda crops: self._inpaint_pytorch_crops_batch(
+                    crops,
+                    model_path=model_path,
+                    repo_root=repo_root,
+                    python_executable=python_executable,
+                    max_side_px=DEFAULT_LAMA_PATCH_MAX_SIDE_PX,
+                ),
             )
             composite_note = _lama_composite_debug_suffix(dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX)
             self._last_debug_note = (
@@ -608,6 +615,98 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
                 )
         resize_note = f" resized-to-max-side={self.max_side_px}" if resized else ""
         return restored_rgb, resize_note
+
+    def _inpaint_pytorch_crops_batch(
+        self,
+        crops: list[tuple[np.ndarray, np.ndarray]],
+        *,
+        model_path: Path,
+        repo_root: Path,
+        python_executable: Path,
+        max_side_px: int,
+    ) -> list[np.ndarray]:
+        if not crops:
+            return []
+
+        prepared: list[dict[str, Any]] = []
+        for source_rgb, working_mask in crops:
+            inference_mask = _expand_lama_inference_mask(
+                working_mask,
+                dilate_px=DEFAULT_LAMA_INFERENCE_MASK_DILATE_PX,
+            )
+            resized_rgb, resized_inference_mask, resized = _resize_lama_inputs(
+                source_rgb,
+                inference_mask,
+                max_side_px=max_side_px,
+            )
+            prepared.append(
+                {
+                    "source_rgb": source_rgb,
+                    "resized_rgb": resized_rgb,
+                    "resized_inference_mask": resized_inference_mask,
+                    "resized": resized,
+                }
+            )
+
+        with tempfile.TemporaryDirectory(prefix="pdf2ppt-lama-batch-") as temp_dir_str:
+            temp_dir = Path(temp_dir_str)
+            indir = temp_dir / "inputs"
+            outdir = temp_dir / "outputs"
+            indir.mkdir(parents=True, exist_ok=True)
+            outdir.mkdir(parents=True, exist_ok=True)
+
+            for index, item in enumerate(prepared):
+                stem = f"patch{index:03d}"
+                resized_page = Image.fromarray(item["resized_rgb"], mode="RGB")
+                resized_mask_image = Image.fromarray(
+                    (item["resized_inference_mask"] > 0).astype(np.uint8) * 255,
+                    mode="L",
+                )
+                resized_page.save(indir / f"{stem}.png")
+                resized_mask_image.save(indir / f"{stem}_mask001.png")
+
+            logger.info(
+                "LaMa PyTorch batch predict: crops=%s max_side=%s device=%s",
+                len(prepared),
+                max_side_px,
+                self.device,
+            )
+            _run_lama_pytorch_prediction(
+                python_executable=python_executable,
+                repo_root=repo_root,
+                model_path=model_path,
+                device=self.device,
+                indir=indir,
+                outdir=outdir,
+            )
+
+            restored_list: list[np.ndarray] = []
+            for index, item in enumerate(prepared):
+                stem = f"patch{index:03d}"
+                output_path = outdir / f"{stem}_mask001.png"
+                if not output_path.exists():
+                    output_candidates = sorted(outdir.glob(f"{stem}*.png"))
+                    if len(output_candidates) == 1:
+                        output_path = output_candidates[0]
+                    else:
+                        raise BackgroundInpaintingError(
+                            f"Official LaMa batch prediction did not produce output for {stem} under {outdir}."
+                        )
+                restored_rgb = np.array(Image.open(output_path).convert("RGB"), dtype=np.uint8)
+                if restored_rgb.shape[:2] != item["resized_rgb"].shape[:2]:
+                    raise BackgroundInpaintingError(
+                        f"Official LaMa batch output shape {restored_rgb.shape[:2]} "
+                        f"did not match input shape {item['resized_rgb'].shape[:2]}."
+                    )
+                if item["resized"]:
+                    source_rgb = item["source_rgb"]
+                    restored_rgb = cv2.resize(
+                        restored_rgb,
+                        (source_rgb.shape[1], source_rgb.shape[0]),
+                        interpolation=cv2.INTER_CUBIC,
+                    )
+                restored_list.append(restored_rgb)
+        return restored_list
 
 
 def _resolve_lama_model_path(model_root: Path | None) -> Path:
@@ -780,6 +879,10 @@ def _get_lama_pytorch_worker(
         if cached is not None:
             cached.process.kill()
 
+        logger.info(
+            "Starting LaMa PyTorch worker (loading model to %s; first run may take 1-3 minutes)...",
+            device,
+        )
         process = subprocess.Popen(
             [
                 str(python_executable),
@@ -1081,6 +1184,7 @@ def _inpaint_lama_page_by_patches(
     run_crop_inpaint: Any,
     *,
     use_patch_hybrid: bool,
+    run_crops_batch_inpaint: Any | None = None,
 ) -> tuple[np.ndarray, str]:
     patch_groups = _build_lama_patch_groups(
         working_mask,
@@ -1093,36 +1197,70 @@ def _inpaint_lama_page_by_patches(
     result = source_rgb.copy()
     opencv_patch_count = 0
     lama_patch_count = 0
+    lama_jobs: list[tuple[int, int, int, int, np.ndarray, np.ndarray]] = []
+
     for x0, y0, x1, y1, group_mask in patch_groups:
         crop_source = source_rgb[y0:y1, x0:x1]
         crop_mask = group_mask[y0:y1, x0:x1]
         if not np.any(crop_mask):
             continue
         crop_working_mask = _prepare_lama_working_mask(crop_mask)
-        crop_restored, patch_engine = _inpaint_lama_crop_with_hybrid(
-            crop_source,
-            crop_working_mask,
-            run_crop_inpaint,
-            use_patch_hybrid=use_patch_hybrid,
-        )
-        if patch_engine == "opencv-fast":
+        if use_patch_hybrid and _should_use_opencv_for_lama_patch(crop_source, crop_working_mask):
+            crop_restored = _inpaint_opencv_fast_crop(crop_source, crop_working_mask)
             opencv_patch_count += 1
+            _composite_lama_patch_into_page(
+                result,
+                crop_restored,
+                crop_working_mask,
+                origin=(x0, y0),
+            )
+            continue
+        lama_jobs.append((x0, y0, x1, y1, crop_source, crop_working_mask))
+
+    if lama_jobs:
+        use_batch = run_crops_batch_inpaint is not None and len(lama_jobs) > 1
+        if use_batch:
+            logger.info(
+                "LaMa patch mode: batch inpainting %s/%s patch groups (hybrid=%s)",
+                len(lama_jobs),
+                len(patch_groups),
+                use_patch_hybrid,
+            )
+            batch_crops = [(job[4], job[5]) for job in lama_jobs]
+            batch_restored = run_crops_batch_inpaint(batch_crops)
+            if len(batch_restored) != len(lama_jobs):
+                raise BackgroundInpaintingError(
+                    f"LaMa batch inpaint returned {len(batch_restored)} crops for {len(lama_jobs)} jobs."
+                )
+            for (x0, y0, _x1, _y1, _crop_source, crop_working_mask), crop_restored in zip(
+                lama_jobs, batch_restored, strict=True
+            ):
+                lama_patch_count += 1
+                _composite_lama_patch_into_page(
+                    result,
+                    crop_restored,
+                    crop_working_mask,
+                    origin=(x0, y0),
+                )
         else:
-            lama_patch_count += 1
-        _composite_lama_patch_into_page(
-            result,
-            crop_restored,
-            crop_working_mask,
-            origin=(x0, y0),
-        )
+            for x0, y0, _x1, _y1, crop_source, crop_working_mask in lama_jobs:
+                crop_restored = run_crop_inpaint(crop_source, crop_working_mask)
+                lama_patch_count += 1
+                _composite_lama_patch_into_page(
+                    result,
+                    crop_restored,
+                    crop_working_mask,
+                    origin=(x0, y0),
+                )
 
     hybrid_note = (
         f" hybrid-opencv={opencv_patch_count} hybrid-lama={lama_patch_count}"
         if use_patch_hybrid
         else ""
     )
+    batch_note = " batch-lama" if lama_jobs and run_crops_batch_inpaint is not None and len(lama_jobs) > 1 else ""
     patch_note = (
-        f"patch-mode groups={len(patch_groups)}{hybrid_note} "
+        f"patch-mode groups={len(patch_groups)}{hybrid_note}{batch_note} "
         f"mask-ratio={mask_area_ratio(working_mask):.4f}"
     )
     return result, patch_note
