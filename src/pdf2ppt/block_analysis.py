@@ -14,7 +14,7 @@ from .text_style import classify_text_script, estimate_font_size, estimate_text_
 
 def render_page_image(page: fitz.Page, dpi: int) -> Image.Image:
     pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-    return Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+    return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
 
 
 def resolve_render_dpi(options: Any) -> int:

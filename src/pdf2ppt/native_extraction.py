@@ -90,7 +90,7 @@ def extract_image_elements(
         if rect.width <= 1 or rect.height <= 1:
             continue
         pixmap = page.get_pixmap(clip=rect, dpi=dpi, alpha=False)
-        image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
         image_elements.append(ImagePlacement(bbox=bbox, png_bytes=pil_to_png_bytes(image)))
     return image_elements
 

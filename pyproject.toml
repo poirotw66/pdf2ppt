@@ -26,6 +26,14 @@ dependencies = [
 gpu = [
   "onnxruntime-gpu>=1.18.0,<2.0",
 ]
+# Pinned exactly (not a range) so CI and local runs always see the same
+# ruff/mypy release -- these tools regularly add checks in minor/patch
+# releases, and the blocking lint gate must not go red from an upstream
+# release alone. Bump deliberately, in a commit that re-triages the diff.
+lint = [
+  "ruff==0.16.2",
+  "mypy==2.3.0",
+]
 
 [project.scripts]
 pdf2ppt = "pdf2ppt.cli:main"

@@ -172,7 +172,7 @@ def convert_pdf(
                 progress_callback(page_index + 1, total_pages)
 
         presentation_save_started_at = perf_counter()
-        presentation.save(options.output_path)
+        presentation.save(str(options.output_path))
         presentation_save_seconds = perf_counter() - presentation_save_started_at
         logger.info("Presentation save: %.3fs", presentation_save_seconds)
 
@@ -311,6 +311,10 @@ def analyze_page(
         elif page_image is not None and effective_background_render_dpi == render_dpi:
             background_image = page_image
         elif can_reuse_ocr_raster_for_background:
+            # can_reuse_ocr_raster_for_background is only True when
+            # has_ocr_reference_image (== ocr_reference_image is not None) is
+            # True; make that invariant explicit for the type checker.
+            assert ocr_reference_image is not None
             background_render_started_at = perf_counter()
             background_image = resize_rendered_page_image(
                 ocr_reference_image,
@@ -353,6 +357,13 @@ def analyze_page(
         )
         background_encode_seconds = perf_counter() - background_encode_started_at
     if options.debug_dir is not None and ocr_blocks:
+        # ocr_blocks is only ever populated inside the has_approved_ocr_blocks
+        # or need_ocr branches above, and both of those always set
+        # ocr_reference_image too; split_notebooklm_watermark_blocks only
+        # partitions the list, so a non-empty ocr_blocks here guarantees
+        # ocr_reference_image was set. Make that invariant explicit for the
+        # type checker.
+        assert ocr_reference_image is not None
         debug_blocks = [block for block in text_blocks if block.source == "ocr"] or ocr_blocks
         debug_masked_image = background_image if background_mode == "overlay" else ocr_reference_image
         if debug_masked_image is not None and ocr_reference_image is not None:

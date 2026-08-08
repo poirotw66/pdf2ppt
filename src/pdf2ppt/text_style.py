@@ -246,7 +246,7 @@ def measure_text_dimensions(text: str, font_size: int, font_path: str) -> tuple[
 
 
 @lru_cache(maxsize=128)
-def load_measurement_font(font_path: str, font_size: int) -> ImageFont.ImageFont:
+def load_measurement_font(font_path: str, font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidate_paths = [font_path, DEFAULT_CJK_FONT_PATH, DEFAULT_FONT_PATH, DEFAULT_BOLD_FONT_PATH]
     tried: set[str] = set()
     for candidate in candidate_paths:
@@ -277,7 +277,12 @@ def extract_text_foreground_mask(gray_crop: Image.Image) -> np.ndarray | None:
 
     samples = gray.reshape(-1, 1).astype(np.float32)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 12, 1.0)
-    _compactness, labels, centers = cv2.kmeans(
+    # cv2-stubs' generated overloads require `bestLabels` to be an array, but
+    # the actual C++ binding treats it as an optional output parameter and
+    # accepts None at runtime (this is the standard cv2.kmeans idiom). No
+    # array-typed spelling of this call exists that mypy would accept without
+    # also pre-allocating an unused output buffer.
+    _compactness, labels, centers = cv2.kmeans(  # type: ignore[call-overload]
         samples,
         2,
         None,

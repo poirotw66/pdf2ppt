@@ -263,7 +263,7 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
 
 
 @app.get("/jobs/{job_id}/pages/{page_number}.jpg", responses={404: COMMON_ERROR_RESPONSES[404]})
-def get_job_page_preview(job_id: str, page_number: int) -> FileResponse:
+def get_job_page_preview(job_id: str, page_number: int) -> Response:
     record = _load_job_or_404(job_id)
     try:
         with fitz.open(record.input_pdf_path) as document:
@@ -344,7 +344,7 @@ def _should_apply_notebooklm_watermark_fallback(original_filename: str) -> bool:
 
 def _render_page_preview(page: fitz.Page, *, dpi: int, apply_notebooklm_fallback: bool = True) -> Image.Image:
     pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-    preview_image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+    preview_image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
     return _clean_preview_watermark(preview_image, page.rect, apply_notebooklm_fallback=apply_notebooklm_fallback)
 
 

@@ -42,7 +42,7 @@ def _read_pdf_bytes(file_bytes: bytes) -> bytes:
 
 def _image_bytes_to_pdf_bytes(file_bytes: bytes) -> bytes:
     try:
-        image = Image.open(io.BytesIO(file_bytes))
+        image: Image.Image = Image.open(io.BytesIO(file_bytes))
         image.load()
         image = image.convert("RGB")
     except Exception as error:

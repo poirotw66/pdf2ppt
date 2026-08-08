@@ -364,7 +364,9 @@ def save_comparison_grid(panels: list[tuple[str, Image.Image]], out_path: Path, 
     thumbs = []
     for title, image in panels:
         ratio = thumb_width / image.width
-        thumb = image.convert("RGB").resize((thumb_width, max(1, int(image.height * ratio))), Image.LANCZOS)
+        thumb = image.convert("RGB").resize(
+            (thumb_width, max(1, int(image.height * ratio))), Image.Resampling.LANCZOS
+        )
         thumbs.append(_label(thumb, title))
 
     height = max(thumb.height for thumb in thumbs)
