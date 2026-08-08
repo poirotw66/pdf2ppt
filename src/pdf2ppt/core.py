@@ -6,7 +6,6 @@ from typing import Any
 
 from PIL import Image
 
-
 DEFAULT_OCR_BATCH_SIZE = 3
 
 

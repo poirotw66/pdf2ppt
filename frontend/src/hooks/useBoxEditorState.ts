@@ -127,6 +127,13 @@ export function useBoxEditorState({ setStatusText }: UseBoxEditorStateOptions) {
 
     window.addEventListener("keydown", onWindowKeyDown);
     return () => window.removeEventListener("keydown", onWindowKeyDown);
+    // deleteSelectedBox/nudgeSelectedBox/selectRelativeBox are plain
+    // functions re-created every render (not memoized); listing them here
+    // would rebind the listener on every render instead of only when
+    // selection-relevant state changes. Every call site that mutates
+    // selectedBoxIds also updates selectedBoxId in the same handler, so the
+    // listed deps already cover when these functions' closures go stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dragState, orderedBoxes, selectedBoxId, selectedPage]);
 
   useEffect(() => {

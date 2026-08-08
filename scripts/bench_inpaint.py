@@ -38,7 +38,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -364,7 +364,9 @@ def save_comparison_grid(panels: list[tuple[str, Image.Image]], out_path: Path, 
     thumbs = []
     for title, image in panels:
         ratio = thumb_width / image.width
-        thumb = image.convert("RGB").resize((thumb_width, max(1, int(image.height * ratio))), Image.LANCZOS)
+        thumb = image.convert("RGB").resize(
+            (thumb_width, max(1, int(image.height * ratio))), Image.Resampling.LANCZOS
+        )
         thumbs.append(_label(thumb, title))
 
     height = max(thumb.height for thumb in thumbs)
@@ -418,7 +420,7 @@ def run_benchmark(config: BenchmarkConfig) -> dict[str, Any]:
             raise SystemExit(f"--ocr=on but OCR is unavailable: {ocr_availability.reason}")
 
     report: dict[str, Any] = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "dpi": config.dpi,
         "padding_px": config.padding_px,
         "engines": list(config.engines),

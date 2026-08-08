@@ -4,12 +4,12 @@ import json
 import os
 import shutil
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import fitz
-
 
 DEFAULT_JOB_ROOT = Path(".pdf2ppt_jobs")
 DEFAULT_JOB_RETENTION_HOURS = 24
@@ -33,7 +33,7 @@ class JobRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, object]) -> "JobRecord":
+    def from_dict(cls, payload: dict[str, Any]) -> JobRecord:
         return cls(**payload)
 
 
@@ -108,7 +108,7 @@ class JobStore:
     def delete_expired_jobs(self, *, now: datetime | None = None) -> int:
         if self.retention is None:
             return 0
-        expiration_time = (now or datetime.now(timezone.utc)) - self.retention
+        expiration_time = (now or datetime.now(UTC)) - self.retention
         deleted_count = 0
         for job_dir in self.root.iterdir():
             if not job_dir.is_dir():
@@ -146,4 +146,4 @@ class JobStore:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

@@ -5,12 +5,32 @@ import logging
 import re
 from functools import lru_cache
 from pathlib import Path
+from typing import TypedDict
 
 import cv2
 import numpy as np
 from PIL import Image, ImageFont
 
 from .models import TextBlock
+
+
+class _BoxSizePt(TypedDict):
+    width: float
+    height: float
+
+
+class TextFitDebugEntry(TypedDict):
+    id: str
+    text: str
+    script: str
+    font_size_pt: float
+    font_path: str | None
+    target_bbox_pt: _BoxSizePt
+    estimated_ppt_text_pt: _BoxSizePt
+    width_error_pt: float
+    height_error_pt: float
+    width_error_ratio: float
+    height_error_ratio: float
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +134,7 @@ def classify_text_script(text: str) -> str:
         "latin": latin_count,
         "numeric": numeric_count,
     }
-    dominant = max(counts, key=counts.get)
+    dominant = max(counts, key=lambda key: counts[key])
     dominant_count = counts[dominant]
     if dominant_count == 0:
         return "other"
@@ -226,7 +246,7 @@ def measure_text_dimensions(text: str, font_size: int, font_path: str) -> tuple[
 
 
 @lru_cache(maxsize=128)
-def load_measurement_font(font_path: str, font_size: int) -> ImageFont.ImageFont:
+def load_measurement_font(font_path: str, font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     candidate_paths = [font_path, DEFAULT_CJK_FONT_PATH, DEFAULT_FONT_PATH, DEFAULT_BOLD_FONT_PATH]
     tried: set[str] = set()
     for candidate in candidate_paths:
@@ -257,7 +277,12 @@ def extract_text_foreground_mask(gray_crop: Image.Image) -> np.ndarray | None:
 
     samples = gray.reshape(-1, 1).astype(np.float32)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 12, 1.0)
-    _compactness, labels, centers = cv2.kmeans(
+    # cv2-stubs' generated overloads require `bestLabels` to be an array, but
+    # the actual C++ binding treats it as an optional output parameter and
+    # accepts None at runtime (this is the standard cv2.kmeans idiom). No
+    # array-typed spelling of this call exists that mypy would accept without
+    # also pre-allocating an unused output buffer.
+    _compactness, labels, centers = cv2.kmeans(  # type: ignore[call-overload]
         samples,
         2,
         None,
@@ -303,16 +328,16 @@ def estimate_text_color_from_mask(
     foreground_mask: np.ndarray | None,
 ) -> str:
     if foreground_mask is None:
-        mean_rgb = tuple(int(round(channel)) for channel in np.mean(color.reshape(-1, 3), axis=0))
-        return format_hex_color(mean_rgb)
+        mean_r, mean_g, mean_b = (int(round(channel)) for channel in np.mean(color.reshape(-1, 3), axis=0))
+        return format_hex_color((mean_r, mean_g, mean_b))
 
     foreground_pixels = color[foreground_mask]
     if foreground_pixels.size == 0:
         foreground_pixels = color.reshape(-1, 3)
 
     dominant_rgb = np.median(foreground_pixels, axis=0)
-    rgb = tuple(int(np.clip(round(channel), 0, 255)) for channel in dominant_rgb[:3])
-    return format_hex_color(rgb)
+    dom_r, dom_g, dom_b = (int(np.clip(round(channel), 0, 255)) for channel in dominant_rgb[:3])
+    return format_hex_color((dom_r, dom_g, dom_b))
 
 
 def estimate_text_color(color_crop: Image.Image, gray_crop: Image.Image) -> str:
@@ -382,7 +407,7 @@ def estimate_text_bold_from_mask(
     return fill_ratio >= fill_threshold and normalized_stroke >= stroke_threshold
 
 
-def build_text_fit_debug_entry(block: TextBlock) -> dict[str, object]:
+def build_text_fit_debug_entry(block: TextBlock) -> TextFitDebugEntry:
     script = classify_text_script(block.text)
     font_path = choose_measurement_font(script)
     font_size = max(6.0, block.font_size or 12.0)

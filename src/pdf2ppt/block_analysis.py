@@ -7,14 +7,14 @@ import fitz
 from PIL import Image
 
 from .core import PageSignals
-from .models import PageKind, QualityScore, TextBlock
+from .models import BackgroundMode, PageKind, QualityScore, TextBlock
 from .native_extraction import assign_block_roles, promote_ocr_bold_blocks, sort_text_blocks
 from .text_style import classify_text_script, estimate_font_size, estimate_text_style
 
 
 def render_page_image(page: fitz.Page, dpi: int) -> Image.Image:
     pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-    return Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+    return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
 
 
 def resolve_render_dpi(options: Any) -> int:
@@ -150,7 +150,7 @@ def choose_background_mode(
     quality: QualityScore,
     has_text: bool,
     has_visuals: bool,
-) -> tuple[str, str | None]:
+) -> tuple[BackgroundMode, str | None]:
     if not has_text or quality.editable_ratio < 0.4:
         return "full-page", "Editable ratio below fallback threshold."
     if page_kind == "digital" and quality.editable_ratio >= 0.8 and not has_visuals:

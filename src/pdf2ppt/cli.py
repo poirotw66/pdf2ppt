@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, TextIO
+from typing import TextIO
 
 from .core import DEFAULT_OCR_BATCH_SIZE
 from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid

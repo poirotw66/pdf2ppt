@@ -32,6 +32,14 @@ cpu = [
 gpu = [
   "onnxruntime-gpu>=1.18.0,<2.0",
 ]
+# Pinned exactly (not a range) so CI and local runs always see the same
+# ruff/mypy release -- these tools regularly add checks in minor/patch
+# releases, and the blocking lint gate must not go red from an upstream
+# release alone. Bump deliberately, in a commit that re-triages the diff.
+lint = [
+  "ruff==0.16.2",
+  "mypy==2.3.0",
+]
 
 [project.scripts]
 pdf2ppt = "pdf2ppt.cli:main"
@@ -43,24 +51,42 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# --- Phase 0 static analysis baseline -------------------------------------
-# Both tools run in CI as report-only (continue-on-error: true, see
-# .github/workflows/ci.yml). Findings are collected as a signal ahead of the
-# Phase 1 inpainting_engines.py rework; they do not block CI yet. Phase 2
-# turns this into a blocking gate. Do not "fix" existing violations under
-# this config change -- see docs/optimization-roadmap.md Phase 0 / Phase 2.
+# --- Phase 2 static analysis gate -------------------------------------
+# Both tools are now blocking in CI (see .github/workflows/ci.yml). The
+# Phase 0 baseline (49 ruff findings, 29 mypy findings) has been cleared
+# everywhere except the inpainting_* modules below, which are excluded
+# on purpose -- see the note next to each exclusion.
 
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = ["frontend", "tests/fixtures", "lama", "model", "output", "outputs"]
+exclude = [
+  "frontend",
+  "tests/fixtures",
+  "lama",
+  "model",
+  "output",
+  "outputs",
+  # Patch files applied verbatim onto a cloned third-party LaMa repo by
+  # scripts/apply_lama_patches.sh -- not our code to lint.
+  "scripts/lama_patches",
+  # --- Pending: fold the inpainting modules into the blocking gate ------
+  # Phase 1 has landed (inpainting_engines.py is now a package), so the
+  # original "parallel session in flight" reason is gone. What remains is
+  # 126 ruff findings across the freshly-split 3,162-line package. Folding
+  # them in is its own tracked task: every change there must be re-verified
+  # against scripts/bench_inpaint.py, whose metrics must stay bit-identical.
+  "src/pdf2ppt/inpainting.py",
+  "src/pdf2ppt/inpainting_engines",
+  "src/pdf2ppt/inpainting_overlay.py",
+  "src/pdf2ppt/inpainting_masks.py",
+]
 
 [tool.ruff.lint]
 # Deliberately small, high-signal rule set for the report-only baseline:
 # pyflakes (F), a slice of pycodestyle (E/W), import sorting (I), and
 # pyupgrade (UP). Broader rule sets (bugbear, complexity, etc.) are a
-# Phase 2 decision once the baseline is enforced and the team has agreed on
-# scope.
+# later decision once the team has agreed on scope.
 select = ["E", "F", "W", "I", "UP"]
 ignore = [
   "E501",  # line-length is handled by the formatter/line-length setting, not worth failing the report on
@@ -69,13 +95,27 @@ ignore = [
 [tool.mypy]
 python_version = "3.11"
 exclude = ["frontend/", "tests/fixtures/", "lama/", "model/", "output/", "outputs/"]
-# Third-party stubs (fitz, cv2, PIL, pptx, fastapi, ...) are not installed in
-# this report-only stage; without this the run is 90%+ import-not-found noise
-# instead of a useful signal.
+# Third-party stubs (fitz, cv2, PIL, pptx, fastapi, ...) are not installed
+# in CI; without this the run is 90%+ import-not-found noise instead of a
+# useful signal.
 ignore_missing_imports = true
 # The existing 8,100-line codebase predates any type-checking; being strict
 # here would just produce thousands of untyped-def warnings that drown out
-# the handful of real bugs mypy already finds (see roadmap Phase 0/2).
+# the handful of real bugs mypy already finds.
 check_untyped_defs = false
 disallow_untyped_defs = false
 warn_unused_ignores = false
+
+# --- Pending: fold the inpainting modules into the blocking mypy gate -----
+# Mirrors the ruff exclusion above (30 mypy findings, mostly cv2/PIL stub
+# interop in the freshly-split package). `exclude` alone is not enough --
+# mypy still follows imports into these modules from checked ones, so
+# `ignore_errors` on the modules themselves is what actually silences them.
+[[tool.mypy.overrides]]
+module = [
+  "pdf2ppt.inpainting",
+  "pdf2ppt.inpainting_engines.*",
+  "pdf2ppt.inpainting_overlay",
+  "pdf2ppt.inpainting_masks",
+]
+ignore_errors = true

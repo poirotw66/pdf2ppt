@@ -28,14 +28,12 @@ jobs:
         run: pytest -q
 
   lint:
-    # Phase 0 (docs/optimization-roadmap.md): report-only static analysis.
-    # Findings are collected as a signal ahead of the Phase 1
-    # inpainting_engines.py rework but must never turn CI red -- every step
-    # (and the job itself) is continue-on-error. Phase 2 promotes this to a
-    # blocking gate once the codebase has had a chance to work through the
-    # baseline.
+    # Phase 2 (docs/optimization-roadmap.md): blocking static analysis.
+    # The Phase 0 baseline has been cleared except for the inpainting_*
+    # modules, which are temporarily excluded in pyproject.toml while a
+    # parallel Phase 1 session splits inpainting_engines.py into a package
+    # -- see the exclusion comments there for the removal plan.
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,15 +46,13 @@ jobs:
       - name: Install lint tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . ruff mypy
+          python -m pip install -e ".[lint]"
 
-      - name: ruff check (report-only)
-        continue-on-error: true
-        run: ruff check .
+      - name: ruff check
+        run: python -m ruff check .
 
-      - name: mypy (report-only)
-        continue-on-error: true
-        run: mypy src/pdf2ppt scripts/bench_inpaint.py
+      - name: mypy
+        run: python -m mypy src/pdf2ppt scripts/bench_inpaint.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -76,6 +72,9 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Lint frontend
+        run: npm run lint
 
       - name: Run frontend tests
         run: CI=1 npm test -- --watch=false

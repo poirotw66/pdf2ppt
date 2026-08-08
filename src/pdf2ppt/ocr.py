@@ -7,6 +7,7 @@ import re
 import shutil
 import statistics
 import warnings
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -342,13 +343,13 @@ def _extract_ocr_blocks(payload: Any, *, page_number: int, order_start: int) -> 
                 )
             return blocks
 
-        blocks: list[TextBlock] = []
+        nested_blocks: list[TextBlock] = []
         next_order = order_start
         for item in payload:
             extracted = _extract_ocr_blocks(item, page_number=page_number, order_start=next_order)
-            blocks.extend(extracted)
+            nested_blocks.extend(extracted)
             next_order += len(extracted)
-        return blocks
+        return nested_blocks
 
     return []
 
@@ -631,7 +632,7 @@ def _merge_ocr_block_group(blocks: list[TextBlock]) -> TextBlock:
     )
 
 
-def _join_ocr_text_segments(texts: list[str]) -> str:
+def _join_ocr_text_segments(texts: Iterable[str]) -> str:
     segments = [text.strip() for text in texts if text.strip()]
     if not segments:
         return ""
