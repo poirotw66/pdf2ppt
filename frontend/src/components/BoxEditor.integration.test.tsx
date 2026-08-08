@@ -181,6 +181,10 @@ function EditorHarness({ initialPages }: { initialPages: PagePayload[] }) {
 
   useEffect(() => {
     editor.loadDetectedPages(initialPages, detectConfidenceThreshold);
+    // Intentional mount-only load: `editor` is a fresh object every render,
+    // so including it (or the loader it carries) would reload on every
+    // render instead of once when the harness mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
