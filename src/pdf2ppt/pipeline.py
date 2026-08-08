@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from time import perf_counter
-from typing import Any, Callable
+from typing import Any
 
 import fitz
 from PIL import Image
@@ -41,8 +42,8 @@ from .block_analysis import (
     select_text_blocks,
 )
 from .core import (
-    ConversionOptions,
     DEFAULT_OCR_BATCH_SIZE,
+    ConversionOptions,
     InputValidationError,
     OcrInitializationError,
     OcrPageData,
@@ -69,8 +70,8 @@ from .ppt_render import (
     fit_text_frame,
     pt_to_emu,
     render_page_to_slide,
-    resolve_vertical_anchor,
     resolve_ocr_fit_max_size,
+    resolve_vertical_anchor,
     should_wrap_text_block,
 )
 from .text_style import (

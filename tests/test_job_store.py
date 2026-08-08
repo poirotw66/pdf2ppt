@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pdf2ppt.job_store import JobStore
@@ -18,13 +18,13 @@ class JobStoreTests(unittest.TestCase):
     def test_delete_expired_jobs_removes_stale_job_directories(self) -> None:
         stale_record = self.job_store.create_job(filename="stale.pdf", pdf_bytes=build_sample_pdf_bytes())
         fresh_record = self.job_store.create_job(filename="fresh.pdf", pdf_bytes=build_sample_pdf_bytes())
-        stale_updated_at = datetime.now(timezone.utc) - timedelta(hours=48)
+        stale_updated_at = datetime.now(UTC) - timedelta(hours=48)
         metadata_path = self.job_store.metadata_path(stale_record.job_id)
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
         payload["updated_at"] = stale_updated_at.isoformat()
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        deleted_count = self.job_store.delete_expired_jobs(now=datetime.now(timezone.utc))
+        deleted_count = self.job_store.delete_expired_jobs(now=datetime.now(UTC))
 
         self.assertEqual(deleted_count, 1)
         self.assertFalse(self.job_store.job_dir(stale_record.job_id).exists())
@@ -43,7 +43,7 @@ class JobStoreTests(unittest.TestCase):
         self.job_store.retention = None
         stale_record = self.job_store.create_job(filename="stale.pdf", pdf_bytes=build_sample_pdf_bytes())
 
-        deleted_count = self.job_store.delete_expired_jobs(now=datetime.now(timezone.utc))
+        deleted_count = self.job_store.delete_expired_jobs(now=datetime.now(UTC))
 
         self.assertEqual(deleted_count, 0)
         self.assertTrue(self.job_store.job_dir(stale_record.job_id).exists())

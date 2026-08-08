@@ -3,12 +3,11 @@ from __future__ import annotations
 import io
 import unittest
 
+import fitz
 from PIL import Image
 
 from pdf2ppt.core import InputValidationError
 from pdf2ppt.upload_input import is_raster_image_upload, normalize_upload_to_pdf_bytes
-
-import fitz
 
 
 class UploadInputTests(unittest.TestCase):

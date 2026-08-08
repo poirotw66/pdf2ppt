@@ -25,15 +25,21 @@ from .api_models import (
     JobResponse,
     OcrBoxResponse,
 )
-from .core import ConversionOptions, DEFAULT_OCR_BATCH_SIZE
-from .core import InputValidationError, OcrInitializationError, OcrProcessingError, PageConversionError, Pdf2PptError
 from .background import OpenCvFastInpaintingEngine, build_text_mask_image
+from .core import (
+    ConversionOptions,
+    InputValidationError,
+    OcrInitializationError,
+    OcrProcessingError,
+    PageConversionError,
+    Pdf2PptError,
+)
+from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
 from .job_store import JobRecord, JobStore
 from .models import TextBlock
 from .ocr import OcrEngine
 from .paths import resolve_repo_relative_path
 from .pipeline import build_notebooklm_watermark_mask_block, convert_pdf
-from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
 from .upload_input import SUPPORTED_UPLOAD_SUFFIXES, is_raster_image_upload, normalize_upload_to_pdf_bytes
 
 logger = logging.getLogger(__name__)
@@ -393,14 +399,15 @@ def _load_approved_boxes_payload(
             bbox = box.get("bbox")
             if not isinstance(bbox, list) or len(bbox) != 4:
                 raise InputValidationError(f"Approved box {index} on page {page_number} must contain a 4-value bbox.")
+            bbox_tuple = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
             blocks.append(
                 TextBlock(
                     id=str(box.get("id") or f"approved_{page_number}_{index}"),
                     source="ocr",
-                    bbox=tuple(float(value) for value in bbox),
+                    bbox=bbox_tuple,
                     text=str(box.get("text") or ""),
                     confidence=float(box.get("confidence", 1.0)),
-                    image_bbox=tuple(float(value) for value in bbox),
+                    image_bbox=bbox_tuple,
                     image_polygon=(
                         tuple((float(point[0]), float(point[1])) for point in polygon)
                         if polygon is not None

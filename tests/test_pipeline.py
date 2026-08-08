@@ -18,14 +18,14 @@ from pptx.util import Pt
 import pdf2ppt.inpainting_engines as inpainting_engines
 import pdf2ppt.inpainting_masks as inpainting_masks
 from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_line, main
+from pdf2ppt.inpainting_masks import refine_text_mask_for_inpainting
 from pdf2ppt.inpainting_overlay import (
-    _apply_targeted_footer_label_color_correction,
     _apply_targeted_file_back_color_correction,
+    _apply_targeted_footer_label_color_correction,
     _neutralize_protected_table_lines,
     _restore_protected_table_lines,
     resolve_background_inpainting_engine,
 )
-from pdf2ppt.inpainting_masks import refine_text_mask_for_inpainting
 from pdf2ppt.models import QualityScore, TextBlock
 from pdf2ppt.ocr import (
     OcrEngine,
@@ -36,38 +36,38 @@ from pdf2ppt.ocr import (
 )
 from pdf2ppt.pipeline import (
     BackgroundInpaintingError,
+    ConversionOptions,
+    OpenCvFastInpaintingEngine,
+    PageSignals,
     analyze_page,
     append_notebooklm_watermark_mask_blocks,
-    build_text_fit_debug_entry,
     build_mask_shapes,
-    build_text_mask_image,
     build_notebooklm_watermark_mask_block,
+    build_text_fit_debug_entry,
+    build_text_mask_image,
+    choose_background_mode,
+    classify_page,
     classify_text_script,
-    ConversionOptions,
     default_font_family,
-    estimate_font_size,
+    enrich_ocr_blocks,
     estimate_background_complexity,
+    estimate_font_size,
     estimate_text_bold,
     estimate_text_color,
-    fit_text_frame,
     filter_suspicious_ocr_blocks,
+    fit_text_frame,
+    intersection_ratio,
+    mask_text_regions_with_white_boxes,
     measure_text_dimensions,
-    OpenCvFastInpaintingEngine,
     pil_to_image_bytes,
     promote_ocr_bold_blocks,
+    render_overlay_background,
     resolve_background_render_dpi,
     resolve_ocr_fit_max_size,
     resolve_vertical_anchor,
-    PageSignals,
-    choose_background_mode,
-    classify_page,
-    intersection_ratio,
-    mask_text_regions_with_white_boxes,
-    render_overlay_background,
-    split_notebooklm_watermark_blocks,
     select_text_blocks,
     should_wrap_text_block,
-    enrich_ocr_blocks,
+    split_notebooklm_watermark_blocks,
 )
 from pdf2ppt.ppt_render import add_text_block, resolve_fallback_font_size_pt
 from pdf2ppt.text_style import estimate_text_style
@@ -1960,7 +1960,6 @@ class OcrStyleOptimizationTests(unittest.TestCase):
         )
 
         outer = cv2.dilate(inner.astype(np.uint8), np.ones((17, 17), np.uint8), iterations=1).astype(bool)
-        ring = outer & (~inner)
         broad_outer = cv2.dilate(inner.astype(np.uint8), np.ones((49, 49), np.uint8), iterations=1).astype(bool)
         broad_ring = broad_outer & (~outer)
         repaired_arr = np.array(repaired_image, dtype=np.uint8)
@@ -1982,9 +1981,6 @@ class OcrStyleOptimizationTests(unittest.TestCase):
         right_mask = np.zeros((height, width), dtype=np.uint8)
         cv2.fillConvexPoly(left_mask, np.array([[28, 138], [208, 136], [206, 176], [30, 174]], dtype=np.int32), 1)
         cv2.fillConvexPoly(right_mask, np.array([[288, 138], [468, 136], [466, 176], [290, 174]], dtype=np.int32), 1)
-        union_mask = (left_mask | right_mask).astype(np.uint8)
-        inner = cv2.dilate(union_mask, np.ones((5, 5), np.uint8), iterations=1).astype(bool)
-        near_outer = cv2.dilate(inner.astype(np.uint8), np.ones((17, 17), np.uint8), iterations=1).astype(bool)
         base_with_halo = base.copy().astype(np.float32)
         base_with_halo[:, :260] -= np.array([18.0, 18.0, 18.0], dtype=np.float32)
         base_with_halo = np.clip(base_with_halo, 0, 255).astype(np.uint8)
