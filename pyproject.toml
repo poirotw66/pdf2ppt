@@ -36,3 +36,40 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# --- Phase 0 static analysis baseline -------------------------------------
+# Both tools run in CI as report-only (continue-on-error: true, see
+# .github/workflows/ci.yml). Findings are collected as a signal ahead of the
+# Phase 1 inpainting_engines.py rework; they do not block CI yet. Phase 2
+# turns this into a blocking gate. Do not "fix" existing violations under
+# this config change -- see docs/optimization-roadmap.md Phase 0 / Phase 2.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = ["frontend", "tests/fixtures", "lama", "model", "output", "outputs"]
+
+[tool.ruff.lint]
+# Deliberately small, high-signal rule set for the report-only baseline:
+# pyflakes (F), a slice of pycodestyle (E/W), import sorting (I), and
+# pyupgrade (UP). Broader rule sets (bugbear, complexity, etc.) are a
+# Phase 2 decision once the baseline is enforced and the team has agreed on
+# scope.
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+  "E501",  # line-length is handled by the formatter/line-length setting, not worth failing the report on
+]
+
+[tool.mypy]
+python_version = "3.11"
+exclude = ["frontend/", "tests/fixtures/", "lama/", "model/", "output/", "outputs/"]
+# Third-party stubs (fitz, cv2, PIL, pptx, fastapi, ...) are not installed in
+# this report-only stage; without this the run is 90%+ import-not-found noise
+# instead of a useful signal.
+ignore_missing_imports = true
+# The existing 8,100-line codebase predates any type-checking; being strict
+# here would just produce thousands of untyped-def warnings that drown out
+# the handful of real bugs mypy already finds (see roadmap Phase 0/2).
+check_untyped_defs = false
+disallow_untyped_defs = false
+warn_unused_ignores = false
