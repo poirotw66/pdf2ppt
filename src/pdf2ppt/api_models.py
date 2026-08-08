@@ -118,8 +118,10 @@ class ConvertRequest(BaseModel):
         "auto",
         "white-box",
         "opencv-fast",
+        "lama-onnx",
         "lama-onnx-cuda",
         "lama-pytorch",
+        "lama-onnx-hybrid",
         "lama-onnx-cuda-hybrid",
         "lama-pytorch-hybrid",
     ] = "opencv-fast"

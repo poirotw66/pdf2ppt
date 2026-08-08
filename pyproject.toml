@@ -23,6 +23,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# CPU-only ONNX Runtime for the lama-onnx engine (Phase 1.1: this engine no longer requires a
+# GPU -- it falls back to CPUExecutionProvider automatically). Use `gpu` instead when a CUDA
+# provider is available and desired.
+cpu = [
+  "onnxruntime>=1.18.0,<2.0",
+]
 gpu = [
   "onnxruntime-gpu>=1.18.0,<2.0",
 ]
