@@ -21,6 +21,7 @@ from pdf2ppt.cli import build_parser, build_progress_callback, format_progress_l
 from pdf2ppt.inpainting_overlay import (
     _apply_targeted_footer_label_color_correction,
     _apply_targeted_file_back_color_correction,
+    _detect_auto_lama_runtime,
     _neutralize_protected_table_lines,
     _restore_protected_table_lines,
     resolve_background_inpainting_engine,
@@ -571,6 +572,135 @@ class BackgroundModeTests(unittest.TestCase):
                 with self.assertRaisesRegex(BackgroundInpaintingError, "onnxruntime-gpu"):
                     engine.inpaint(Image.new("RGB", (20, 20), color=(10, 20, 30)), Image.new("L", (20, 20), color=255))
 
+    def test_import_onnxruntime_error_mentions_cpu_extra(self) -> None:
+        # Phase 1.1: the missing-dependency message must no longer read as GPU-only -- it should
+        # point at the new CPU-only extra as well as the existing GPU extra.
+        with patch("pdf2ppt.inpainting_engines.importlib.import_module", side_effect=ImportError("missing ort")):
+            with self.assertRaisesRegex(BackgroundInpaintingError, r"pdf2ppt\[cpu\]"):
+                inpainting_engines._import_onnxruntime()
+
+    def test_resolve_lama_execution_provider_prefers_requested_provider(self) -> None:
+        resolved = inpainting_engines._resolve_lama_execution_provider(
+            "CUDAExecutionProvider",
+            {"CUDAExecutionProvider", "CPUExecutionProvider"},
+        )
+        self.assertEqual(resolved, "CUDAExecutionProvider")
+
+    def test_resolve_lama_execution_provider_falls_back_to_cpu(self) -> None:
+        # Phase 1.1: an unavailable requested provider (e.g. no GPU) must fall back to
+        # CPUExecutionProvider instead of raising, as long as CPU is available.
+        resolved = inpainting_engines._resolve_lama_execution_provider(
+            "CUDAExecutionProvider",
+            {"CPUExecutionProvider"},
+        )
+        self.assertEqual(resolved, "CPUExecutionProvider")
+
+    def test_resolve_lama_execution_provider_raises_when_no_provider_at_all(self) -> None:
+        with self.assertRaisesRegex(BackgroundInpaintingError, "is unavailable"):
+            inpainting_engines._resolve_lama_execution_provider("CUDAExecutionProvider", set())
+
+    def test_get_lama_session_falls_back_to_cpu_provider(self) -> None:
+        # End-to-end (but mocked) proof that _get_lama_session actually constructs the ONNX
+        # session with CPUExecutionProvider when the requested CUDA provider is unavailable,
+        # rather than raising BackgroundInpaintingError as it did before Phase 1.1.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path = Path(temp_dir) / "cpu_fallback_model.onnx"
+            model_path.write_bytes(b"fake-onnx")
+
+            fake_session = SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"])
+            inference_session_calls: list[dict[str, object]] = []
+
+            def fake_inference_session(path: str, *, sess_options: object, providers: list[str]) -> object:
+                inference_session_calls.append({"path": path, "providers": providers})
+                return fake_session
+
+            fake_ort = SimpleNamespace(
+                get_available_providers=lambda: ["CPUExecutionProvider"],
+                SessionOptions=lambda: SimpleNamespace(execution_mode=None),
+                ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential", ORT_PARALLEL="parallel"),
+                InferenceSession=fake_inference_session,
+            )
+
+            with patch("pdf2ppt.inpainting_engines.importlib.import_module", return_value=fake_ort):
+                session = inpainting_engines._get_lama_session(
+                    model_path=model_path,
+                    cuda_provider="CUDAExecutionProvider",
+                    execution_mode="sequential",
+                )
+
+            self.assertIs(session, fake_session)
+            self.assertEqual(len(inference_session_calls), 1)
+            self.assertEqual(inference_session_calls[0]["providers"], ["CPUExecutionProvider"])
+
+    def test_get_lama_session_raises_when_no_provider_available_at_all(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            model_path = Path(temp_dir) / "no_provider_model.onnx"
+            model_path.write_bytes(b"fake-onnx")
+
+            fake_ort = SimpleNamespace(
+                get_available_providers=lambda: [],
+                SessionOptions=lambda: SimpleNamespace(execution_mode=None),
+                ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL="sequential", ORT_PARALLEL="parallel"),
+                InferenceSession=lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
+            )
+
+            with patch("pdf2ppt.inpainting_engines.importlib.import_module", return_value=fake_ort):
+                with self.assertRaisesRegex(BackgroundInpaintingError, "is unavailable"):
+                    inpainting_engines._get_lama_session(
+                        model_path=model_path,
+                        cuda_provider="CUDAExecutionProvider",
+                        execution_mode="sequential",
+                    )
+
+    def test_base_lama_inpaint_engine_normalizes_onnx_legacy_aliases(self) -> None:
+        # "lama-onnx-cuda" / "lama-onnx-cuda-hybrid" are Phase 1.1 backward-compatible aliases
+        # for the new canonical "lama-onnx" identifier.
+        self.assertEqual(inpainting_engines.base_lama_inpaint_engine("lama-onnx-cuda"), "lama-onnx")
+        self.assertEqual(inpainting_engines.base_lama_inpaint_engine("lama-onnx-cuda-hybrid"), "lama-onnx")
+        self.assertEqual(inpainting_engines.base_lama_inpaint_engine("lama-onnx"), "lama-onnx")
+        self.assertEqual(inpainting_engines.base_lama_inpaint_engine("lama-onnx-hybrid"), "lama-onnx")
+        # pytorch normalization is unaffected by the ONNX rename.
+        self.assertEqual(inpainting_engines.base_lama_inpaint_engine("lama-pytorch-hybrid"), "lama-pytorch")
+
+    def test_resolve_background_inpainting_engine_accepts_legacy_onnx_cuda_alias(self) -> None:
+        # The old "lama-onnx-cuda" engine identifier must keep resolving to the same engine
+        # class as the new canonical "lama-onnx" name -- existing CLI/API callers must not break.
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        mask_image = Image.new("L", (60, 40), color=0)
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="lama-onnx-cuda",
+            inpaint_model_root=Path("model/lama"),
+        )
+
+        engine, _note = resolve_background_inpainting_engine(image, mask_image, options)
+
+        self.assertIsInstance(engine, inpainting_engines.LamaOnnxCudaInpaintingEngine)
+        self.assertEqual(engine.name, "lama-onnx")
+
+    def test_resolve_background_inpainting_engine_accepts_new_onnx_alias(self) -> None:
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        mask_image = Image.new("L", (60, 40), color=0)
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="lama-onnx",
+            inpaint_model_root=Path("model/lama"),
+        )
+
+        engine, _note = resolve_background_inpainting_engine(image, mask_image, options)
+
+        self.assertIsInstance(engine, inpainting_engines.LamaOnnxCudaInpaintingEngine)
+
+    def test_cli_accepts_legacy_and_new_onnx_engine_choices(self) -> None:
+        parser = build_parser()
+        for choice in ("lama-onnx", "lama-onnx-cuda", "lama-onnx-hybrid", "lama-onnx-cuda-hybrid"):
+            args = parser.parse_args(["in.pdf", "out.pptx", "--inpaint-engine", choice])
+            self.assertEqual(args.inpaint_engine, choice)
+
     def test_lama_pytorch_engine_requires_repo_root(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             model_dir = Path(temp_dir) / "big-lama"
@@ -638,7 +768,7 @@ class BackgroundModeTests(unittest.TestCase):
 
             with (
                 patch("pdf2ppt.inpainting_engines.subprocess.run", side_effect=fake_run),
-                patch("pdf2ppt.inpainting_engines._run_lama_pytorch_prediction", side_effect=fake_predict) as predict_mock,
+                patch("pdf2ppt.inpainting_engines.lama._run_lama_pytorch_prediction", side_effect=fake_predict) as predict_mock,
             ):
                 result = engine.inpaint(
                     Image.new("RGB", (20, 20), color=(10, 20, 30)),
@@ -842,7 +972,7 @@ class BackgroundModeTests(unittest.TestCase):
 
             with (
                 patch("pdf2ppt.inpainting_engines.subprocess.run", side_effect=fake_run),
-                patch("pdf2ppt.inpainting_engines._run_lama_pytorch_prediction", side_effect=fake_predict),
+                patch("pdf2ppt.inpainting_engines.lama._run_lama_pytorch_prediction", side_effect=fake_predict),
             ):
                 engine.inpaint(Image.new("RGB", (20, 20), color=(10, 20, 30)), Image.fromarray(mask_array, mode="L"))
 
@@ -1162,6 +1292,177 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("white-box", result.note or "")
         self.assertEqual(result.image.getpixel((20, 18)), (255, 255, 255))
 
+    # -- Phase 1.4: LaMa in the auto route for large masks ---------------------------------
+
+    def test_detect_auto_lama_runtime_returns_none_without_model_root(self) -> None:
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_model_root=None,
+        )
+        self.assertIsNone(_detect_auto_lama_runtime(options))
+
+    def test_detect_auto_lama_runtime_returns_none_when_model_root_missing(self) -> None:
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_model_root=Path("this-lama-model-root-does-not-exist-anywhere"),
+        )
+        self.assertIsNone(_detect_auto_lama_runtime(options))
+
+    def test_detect_auto_lama_runtime_returns_none_when_onnxruntime_not_importable(self) -> None:
+        # In this sandbox onnxruntime is not installed, so find_spec naturally returns None --
+        # but we also mock it explicitly so the guarantee does not depend on the environment.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            options = ConversionOptions(
+                input_path=Path("input.pdf"),
+                output_path=Path("output.pptx"),
+                report_path=Path("output.report.json"),
+                inpaint_model_root=Path(temp_dir),
+            )
+            with patch("pdf2ppt.inpainting_overlay.importlib.util.find_spec", return_value=None):
+                self.assertIsNone(_detect_auto_lama_runtime(options))
+
+    def test_detect_auto_lama_runtime_never_raises_on_unexpected_probe_error(self) -> None:
+        # The detection probe must be safe to call unconditionally on every large-mask page --
+        # any unexpected error (e.g. a broken/partial onnxruntime install) must be swallowed
+        # rather than aborting the conversion.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            options = ConversionOptions(
+                input_path=Path("input.pdf"),
+                output_path=Path("output.pptx"),
+                report_path=Path("output.report.json"),
+                inpaint_model_root=Path(temp_dir),
+            )
+            with patch(
+                "pdf2ppt.inpainting_overlay.importlib.util.find_spec",
+                side_effect=RuntimeError("boom"),
+            ):
+                self.assertIsNone(_detect_auto_lama_runtime(options))
+
+    def test_detect_auto_lama_runtime_detects_available_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            options = ConversionOptions(
+                input_path=Path("input.pdf"),
+                output_path=Path("output.pptx"),
+                report_path=Path("output.report.json"),
+                inpaint_model_root=Path(temp_dir),
+            )
+            fake_spec = SimpleNamespace(name="onnxruntime")
+            with patch("pdf2ppt.inpainting_overlay.importlib.util.find_spec", return_value=fake_spec):
+                detection = _detect_auto_lama_runtime(options)
+        self.assertIsNotNone(detection)
+        self.assertIsInstance(detection, str)
+
+    def _build_large_low_texture_mask_scenario(self) -> tuple[Image.Image, list[TextBlock], fitz.Rect]:
+        # Mirrors test_render_overlay_background_auto_falls_back_to_white_box_for_large_mask's
+        # sibling low-texture case: a large, mostly-flat masked region that fails the
+        # low-texture opencv-fast exception and previously always fell back to white-box.
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        blocks = [
+            TextBlock(
+                id="ocr_large_mask",
+                source="ocr",
+                bbox=(5, 5, 55, 35),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(5, 5, 55, 35),
+            )
+        ]
+        return image, blocks, fitz.Rect(0, 0, 60, 40)
+
+    def _build_large_mask_image(self, size: tuple[int, int]) -> Image.Image:
+        # A mask covering well beyond any realistic --inpaint-max-area-ratio, so the large-mask
+        # auto-route branch is exercised regardless of the exact threshold used by a test.
+        mask_array = np.zeros((size[1], size[0]), dtype=np.uint8)
+        mask_array[5:35, 5:55] = 255
+        return Image.fromarray(mask_array, mode="L")
+
+    def test_resolve_background_inpainting_engine_auto_large_mask_stays_white_box_without_lama_runtime(
+        self,
+    ) -> None:
+        # This is the regression guard for Phase 1.4's hard constraint: with no LaMa runtime
+        # detected (the default, GPU-less, no-model-configured case), the large-mask auto route
+        # must select white-box exactly as it did before Phase 1.4.
+        image, blocks, page_rect = self._build_large_low_texture_mask_scenario()
+        mask_image = self._build_large_mask_image(image.size)
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="auto",
+            inpaint_max_area_ratio=0.1,
+            inpaint_model_root=None,
+        )
+        with patch(
+            "pdf2ppt.inpainting_overlay.estimate_low_texture_mask_fraction",
+            return_value=0.0,
+        ):
+            engine, note = resolve_background_inpainting_engine(image, mask_image, options)
+        self.assertIsInstance(engine, inpainting_engines.WhiteBoxInpaintingEngine)
+        self.assertIn("no LaMa runtime was detected", note)
+        del blocks, page_rect  # unused in this routing-level assertion
+
+    def test_resolve_background_inpainting_engine_auto_large_mask_uses_lama_when_runtime_detected(
+        self,
+    ) -> None:
+        image, blocks, page_rect = self._build_large_low_texture_mask_scenario()
+        mask_image = self._build_large_mask_image(image.size)
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="auto",
+            inpaint_max_area_ratio=0.1,
+            inpaint_model_root=Path("model/lama"),
+        )
+        with (
+            patch("pdf2ppt.inpainting_overlay.estimate_low_texture_mask_fraction", return_value=0.0),
+            patch(
+                "pdf2ppt.inpainting_overlay._detect_auto_lama_runtime",
+                return_value="onnxruntime is importable; model root model/lama exists",
+            ),
+        ):
+            engine, note = resolve_background_inpainting_engine(image, mask_image, options)
+        self.assertIsInstance(engine, inpainting_engines.LamaOnnxCudaInpaintingEngine)
+        self.assertIn("lama-onnx", note)
+        del blocks, page_rect  # unused in this routing-level assertion
+
+    def test_render_overlay_background_auto_large_mask_falls_back_safely_when_lama_runtime_reports_but_engine_fails(
+        self,
+    ) -> None:
+        # Even if a LaMa runtime is detected but the engine itself fails at inpaint time (e.g.
+        # a stale/corrupt model file), render_overlay_background's existing fallback safety net
+        # must still recover to white-box for the auto route, exactly as it already does for
+        # opencv-fast engine failures.
+        image, blocks, page_rect = self._build_large_low_texture_mask_scenario()
+        options = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="auto",
+            inpaint_padding_px=0,
+            inpaint_max_area_ratio=0.1,
+            inpaint_model_root=Path("model/lama"),
+        )
+        with (
+            patch("pdf2ppt.inpainting_overlay.estimate_low_texture_mask_fraction", return_value=0.0),
+            patch(
+                "pdf2ppt.inpainting_overlay._detect_auto_lama_runtime",
+                return_value="fake runtime for test",
+            ),
+            patch.object(
+                inpainting_engines.LamaOnnxCudaInpaintingEngine,
+                "inpaint",
+                side_effect=BackgroundInpaintingError("model file is corrupt"),
+            ),
+        ):
+            result = render_overlay_background(image, blocks, page_rect, options=options)
+        self.assertEqual(result.engine_name, "white-box")
+        self.assertIn("Fallback to white-box", result.note or "")
+
 
 class OcrStyleOptimizationTests(unittest.TestCase):
     def test_estimate_text_style_matches_individual_estimators(self) -> None:
@@ -1337,7 +1638,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             return local_source.copy()
 
         with (
-            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.opencv_fast._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
             patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
         ):
             OpenCvFastInpaintingEngine().inpaint(
@@ -1369,7 +1670,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             return local_source.copy()
 
         with (
-            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.opencv_fast._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
             patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
         ):
             OpenCvFastInpaintingEngine(
@@ -1401,7 +1702,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             return local_source.copy()
 
         with (
-            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.opencv_fast._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
             patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
         ):
             engine = OpenCvFastInpaintingEngine(
@@ -1483,7 +1784,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             return 0, 0, patch_width, patch_height, patch_values, 0.0
 
         with patch(
-            "pdf2ppt.inpainting_engines._fit_component_background_surface",
+            "pdf2ppt.inpainting_engines.opencv_fast._fit_component_background_surface",
             side_effect=fake_fit_component_background_surface,
         ):
             inpainting_engines._resolve_component_background_patch(
@@ -1561,7 +1862,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             return 0, 0, patch_width, patch_height, patch_values, 8.0
 
         with patch(
-            "pdf2ppt.inpainting_engines._fit_component_background_surface",
+            "pdf2ppt.inpainting_engines.opencv_fast._fit_component_background_surface",
             side_effect=fake_fit_component_background_surface,
         ):
             expanded_component, resolved_patch = inpainting_engines._resolve_component_background_patch(
@@ -1618,7 +1919,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             return 0, 0, patch_width, patch_height, patch_values, 8.0
 
         with patch(
-            "pdf2ppt.inpainting_engines._fit_component_background_surface",
+            "pdf2ppt.inpainting_engines.opencv_fast._fit_component_background_surface",
             side_effect=fake_fit_component_background_surface,
         ):
             _, resolved_patch = inpainting_engines._resolve_component_background_patch(
@@ -1658,7 +1959,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             return local_source.copy()
 
         with (
-            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.opencv_fast._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
             patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
         ):
             OpenCvFastInpaintingEngine(
@@ -1687,7 +1988,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             return local_source.copy()
 
         with (
-            patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
+            patch("pdf2ppt.inpainting_engines.opencv_fast._prefill_low_texture_regions", return_value=(base.copy(), mask.copy())),
             patch("pdf2ppt.inpainting_engines.cv2.inpaint", side_effect=fake_inpaint),
         ):
             OpenCvFastInpaintingEngine(
@@ -1718,7 +2019,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
 
         base_bgr = cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR)
         mask_array = np.array(mask_image, dtype=np.uint8)
-        with patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base_bgr.copy(), mask_array.copy())):
+        with patch("pdf2ppt.inpainting_engines.opencv_fast._prefill_low_texture_regions", return_value=(base_bgr.copy(), mask_array.copy())):
             result = OpenCvFastInpaintingEngine().inpaint(base_image, mask_image)
 
         result_array = np.array(result, dtype=np.int16)
@@ -1741,7 +2042,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
 
         base_bgr = cv2.cvtColor(np.array(base_image), cv2.COLOR_RGB2BGR)
         mask_array = np.array(mask_image, dtype=np.uint8)
-        with patch("pdf2ppt.inpainting_engines._prefill_low_texture_regions", return_value=(base_bgr.copy(), mask_array.copy())):
+        with patch("pdf2ppt.inpainting_engines.opencv_fast._prefill_low_texture_regions", return_value=(base_bgr.copy(), mask_array.copy())):
             result = OpenCvFastInpaintingEngine().inpaint(base_image, mask_image)
 
         result_array = np.array(result, dtype=np.int16)

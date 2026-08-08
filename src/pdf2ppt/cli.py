@@ -156,13 +156,19 @@ def build_parser() -> argparse.ArgumentParser:
             "auto",
             "white-box",
             "opencv-fast",
+            "lama-onnx",
             "lama-onnx-cuda",
             "lama-pytorch",
+            "lama-onnx-hybrid",
             "lama-onnx-cuda-hybrid",
             "lama-pytorch-hybrid",
         ),
         default="opencv-fast",
-        help="Background reconstruction engine for overlay pages.",
+        help=(
+            "Background reconstruction engine for overlay pages. 'lama-onnx-cuda' and "
+            "'lama-onnx-cuda-hybrid' are backward-compatible aliases for 'lama-onnx' and "
+            "'lama-onnx-hybrid'; the ONNX engine runs on CPU when no CUDA provider is available."
+        ),
     )
     parser.add_argument(
         "--inpaint-padding-px",
@@ -180,24 +186,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--inpaint-model-root",
         type=Path,
         default=Path("model/lama"),
-        help="Directory or .onnx file for the optional lama-onnx-cuda background model.",
+        help="Directory or .onnx file for the optional lama-onnx background model.",
     )
     parser.add_argument(
         "--inpaint-onnx-cuda-provider",
         default="CUDAExecutionProvider",
-        help="ONNX Runtime provider name used by --inpaint-engine lama-onnx-cuda.",
+        help=(
+            "ONNX Runtime provider name used by --inpaint-engine lama-onnx. Falls back to "
+            "CPUExecutionProvider automatically when this provider is unavailable."
+        ),
     )
     parser.add_argument(
         "--inpaint-onnx-execution-mode",
         choices=("sequential", "parallel"),
         default="sequential",
-        help="ONNX Runtime execution mode used by --inpaint-engine lama-onnx-cuda.",
+        help="ONNX Runtime execution mode used by --inpaint-engine lama-onnx.",
     )
     parser.add_argument(
         "--inpaint-max-side-px",
         type=positive_int,
         default=1536,
-        help="Maximum image side passed into lama-onnx-cuda before proportional downscaling.",
+        help="Maximum image side passed into lama-onnx before proportional downscaling.",
     )
     parser.add_argument(
         "--inpaint-lama-repo-root",

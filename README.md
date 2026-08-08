@@ -16,11 +16,15 @@ Core pipeline:
 ## Project Status
 
 - Recommended default background engine: `opencv-fast`
-- Optional GPU background engines:
-  - `lama-onnx-cuda` for explicit high-quality overlay repair when ONNX Runtime CUDA and a local LaMa ONNX model are available
+- Optional generative background engine: `lama-onnx` (formerly `lama-onnx-cuda`, kept as a
+  backward-compatible alias) for explicit high-quality overlay repair when a local LaMa ONNX
+  model is available. It runs on CPU by default and uses `CUDAExecutionProvider` automatically
+  when ONNX Runtime GPU is installed and a GPU is available (Phase 1.1).
   - `lama-pytorch` for explicit high-quality overlay repair through the official [advimman/lama](https://github.com/advimman/lama) PyTorch checkpoint (`big-lama`)
 - `diffusion-local` has been removed because local diffusion inpainting was too slow and inconsistent
-- For most documents, start with `opencv-fast` first and let the pipeline fall back to `white-box` when masking is too large
+- For most documents, start with `opencv-fast` first. `auto` routing falls back to `white-box`
+  for large masks, unless a `lama-onnx` runtime is detected, in which case it prefers `lama-onnx`
+  over `white-box` (Phase 1.4)
 
 ## Result Showcase
 
@@ -39,9 +43,9 @@ Core pipeline:
 - Support multiple background reconstruction engines:
   - `white-box`
   - `opencv-fast` (recommended)
-  - `lama-onnx-cuda` (optional GPU path, explicit opt-in)
+  - `lama-onnx` (optional CPU/GPU path, explicit opt-in; `lama-onnx-cuda` is a backward-compatible alias)
   - `lama-pytorch` (optional GPU path via official LaMa repo + PyTorch checkpoint, explicit opt-in)
-  - `auto` routing
+  - `auto` routing (uses `lama-onnx` instead of `white-box` for large masks when a LaMa runtime is available)
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
 - OCR post-processing: merge adjacent boxes on the same text line by default; opt in to PaddleOCR word-level boxes with `--ocr-return-word-box` for debugging.
@@ -135,19 +139,26 @@ pdf2ppt input.pdf output.pptx \
 
 `opencv-fast` is the lightweight local background reconstruction path used for overlay pages.
 
-### Optional GPU engine: `lama-onnx-cuda`
+### Optional engine: `lama-onnx` (CPU by default, GPU when available)
 
-`lama-onnx-cuda` is an explicit opt-in engine for overlay background reconstruction. Phase 1 keeps it out of `auto`, so the default route remains stable and CPU-safe.
+`lama-onnx` is an explicit opt-in engine for overlay background reconstruction (`lama-onnx-cuda`
+is a backward-compatible alias for the same engine and identifier; `lama-onnx-cuda-hybrid` /
+`lama-onnx-hybrid` are the hybrid-mode equivalents). As of Phase 1.1 it no longer requires a GPU:
 
-- Install the optional runtime with `pip install .[gpu]`
+- Install the optional runtime with `pip install .[cpu]` (CPU-only `onnxruntime`) or `pip install .[gpu]` (`onnxruntime-gpu`, for CUDA)
 - Place a local ONNX model under `model/lama/` or point `--inpaint-model-root` at a specific `.onnx` file
-- This path requires `CUDAExecutionProvider` from ONNX Runtime GPU
-- When `--inpaint-engine lama-onnx-cuda` is selected, missing runtime, missing provider, or missing model is a hard error; it does not silently fall back to `opencv-fast`
-- Large overlay images are proportionally downscaled to `--inpaint-max-side-px` before inference to reduce VRAM pressure
+- `--inpaint-onnx-cuda-provider` (default `CUDAExecutionProvider`) is used when available; otherwise the engine automatically falls back to `CPUExecutionProvider` instead of failing
+- When `--inpaint-engine lama-onnx` is selected, missing runtime (no `onnxruntime` package at all) or missing model is still a hard error; it does not silently fall back to `opencv-fast`
+- Large overlay images are proportionally downscaled to `--inpaint-max-side-px` before inference to reduce memory pressure
+
+As of Phase 1.4, `auto` routing also uses `lama-onnx` instead of `white-box` for large masks
+when a LaMa runtime is detected (an importable `onnxruntime` package and an existing
+`--inpaint-model-root`). When no runtime is detected -- the default for most installs, since
+`onnxruntime` is an optional extra -- `auto` routing behaves exactly as before Phase 1.4.
 
 ### Optional GPU engine: `lama-pytorch`
 
-`lama-pytorch` is an explicit opt-in engine that runs the official LaMa PyTorch checkpoint through a separate Python environment. Like `lama-onnx-cuda`, it is not part of `auto` routing.
+`lama-pytorch` is an explicit opt-in engine that runs the official LaMa PyTorch checkpoint through a separate Python environment. Unlike `lama-onnx`, it is never selected by `auto` routing (the Phase 1.4 large-mask fallback only considers `lama-onnx`).
 
 What you need:
 
@@ -190,11 +201,11 @@ Performance characteristics:
 
 Important notes:
 
-- `lama-pytorch` and `lama-onnx-cuda` use different model layouts:
+- `lama-pytorch` and `lama-onnx` use different model layouts:
   - `lama-pytorch` expects the extracted PyTorch checkpoint directory (`lama/big-lama`)
-  - `lama-onnx-cuda` expects an `.onnx` file under `model/lama/`
+  - `lama-onnx` expects an `.onnx` file under `model/lama/`
 - When `--inpaint-engine lama-pytorch` is selected, missing repo, missing checkpoint, or missing LaMa runtime dependencies is a hard error
-- If you need the fastest GPU path and already have a local ONNX export, prefer `lama-onnx-cuda`
+- If you need the fastest GPU path and already have a local ONNX export, prefer `lama-onnx`
 
 It is designed for speed and low setup cost:
 
@@ -245,25 +256,24 @@ How it interacts with `auto` routing:
 
 - `auto` first looks at text-mask area ratio, not just visual complexity.
 - If the mask area ratio stays within `--inpaint-max-area-ratio`, `auto` keeps using `opencv-fast`.
-- If the mask is larger than that threshold, `auto` usually falls back to `white-box`.
-- There is one exception: a moderately oversized mask can still use `opencv-fast` when most masked pixels sit on low-texture background.
-- The low-texture exception is capped internally, so very large masks still go to `white-box`.
+- If the mask is larger than that threshold, there is a low-texture exception: a moderately oversized mask can still use `opencv-fast` when most masked pixels sit on low-texture background (capped internally, so very large masks skip this exception).
+- Otherwise (Phase 1.4), `auto` uses `lama-onnx` when a LaMa runtime is detected (an importable `onnxruntime` package and an existing `--inpaint-model-root`); it falls back to `white-box` only when no runtime is available.
 - Background complexity is still measured and written into debug notes, but it is no longer the primary branch point.
 
 Relevant knobs:
 
 - `--inpaint-engine opencv-fast`: force this engine explicitly
-- `--inpaint-engine lama-onnx-cuda`: force the optional ONNX GPU engine explicitly
+- `--inpaint-engine lama-onnx`: force the optional ONNX engine explicitly (CPU by default, GPU when available; `lama-onnx-cuda` is a backward-compatible alias)
 - `--inpaint-engine lama-pytorch`: force the optional PyTorch GPU engine explicitly
 - `--inpaint-padding-px`: enlarge the text mask before inpainting
 - `--inpaint-max-area-ratio`: avoid using local repair when too much of the page is masked
-- `--inpaint-model-root`: checkpoint directory for `lama-pytorch`, or directory / `.onnx` file for `lama-onnx-cuda`
+- `--inpaint-model-root`: checkpoint directory for `lama-pytorch`, or directory / `.onnx` file for `lama-onnx`
 - `--inpaint-lama-repo-root`: official LaMa repository root for `lama-pytorch`, default `./lama`
 - `--inpaint-lama-device`: device passed to LaMa PyTorch inference, default `cuda`
 - `--inpaint-lama-python`: Python executable used for `lama-pytorch`; defaults to `PDF2PPT_LAMA_PYTHON` or the `lama` Conda env when present
-- `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for `lama-onnx-cuda`
+- `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for `lama-onnx`; falls back to `CPUExecutionProvider` automatically when unavailable
 - `--inpaint-onnx-execution-mode`: `sequential` or `parallel` ONNX Runtime execution mode
-- `--inpaint-max-side-px`: maximum image side sent into LaMa GPU engines before proportional downscaling
+- `--inpaint-max-side-px`: maximum image side sent into LaMa engines before proportional downscaling
 - `--debug-dir`: inspect generated masks and background decisions
 
 Practical guidance:
@@ -305,16 +315,16 @@ OCR line merging (enabled by default, no extra flag required):
 
 Background reconstruction:
 
-- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, `lama-onnx-cuda`, or `lama-pytorch`
+- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, `lama-onnx` (alias `lama-onnx-cuda`), or `lama-pytorch`
 - `--inpaint-padding-px`: expand text masks before inpainting
-- `--inpaint-max-area-ratio`: force white-box fallback when the masked area is too large
-- `--inpaint-model-root`: checkpoint directory for `lama-pytorch`, or local directory / `.onnx` file for `lama-onnx-cuda`
+- `--inpaint-max-area-ratio`: threshold above which `auto` stops using `opencv-fast` for a mask (see the `auto` routing notes above for what happens next)
+- `--inpaint-model-root`: checkpoint directory for `lama-pytorch`, or local directory / `.onnx` file for `lama-onnx`
 - `--inpaint-lama-repo-root`: official LaMa repository root for `lama-pytorch`
 - `--inpaint-lama-device`: device for `lama-pytorch`, default `cuda`
 - `--inpaint-lama-python`: Python executable for `lama-pytorch`
-- `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for `lama-onnx-cuda`
-- `--inpaint-onnx-execution-mode`: ONNX Runtime execution mode for `lama-onnx-cuda`
-- `--inpaint-max-side-px`: proportional resize guard before LaMa GPU inference
+- `--inpaint-onnx-cuda-provider`: ONNX Runtime provider name for `lama-onnx`; falls back to CPU automatically when unavailable
+- `--inpaint-onnx-execution-mode`: ONNX Runtime execution mode for `lama-onnx`
+- `--inpaint-max-side-px`: proportional resize guard before LaMa inference
 
 Diagnostics:
 
@@ -347,14 +357,16 @@ For overlay pages, `auto` routing can choose:
 
 - `opencv-fast` when the mask stays within the configured area threshold
 - `opencv-fast` for some moderately oversized masks when the masked region is mostly low-texture
-- `white-box` when the mask is too large or too structurally risky for local repair
+- `lama-onnx` for large masks when a LaMa runtime is detected (Phase 1.4)
+- `white-box` when the mask is too large or too structurally risky for local repair and no LaMa runtime is available
 
 In practical terms, the `auto` decision order is:
 
 1. Measure the text-mask area ratio.
 2. If it is at or below `--inpaint-max-area-ratio`, use `opencv-fast`.
 3. If it is above that threshold, estimate how much of the masked region is low-texture.
-4. Keep `opencv-fast` only when that large-mask exception still looks safe; otherwise use `white-box`.
+4. Keep `opencv-fast` when that large-mask exception still looks safe.
+5. Otherwise, use `lama-onnx` if a LaMa runtime is detected (an importable `onnxruntime` package and an existing `--inpaint-model-root`); use `white-box` if not.
 
 ## Output Files
 

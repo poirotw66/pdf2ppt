@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import cv2
+import importlib.util
 import logging
 import math
 
@@ -890,6 +891,39 @@ def _trimmed_percentiles(
     return tuple(float(np.percentile(sorted_values, percentile)) for percentile in percentiles)
 
 
+def _detect_auto_lama_runtime(options: ConversionOptions) -> str | None:
+    """Fast, exception-safe probe for a usable LaMa ONNX runtime for the ``auto`` route.
+
+    Phase 1.4 lets the ``auto`` route use ``lama-onnx`` for large masks instead of always
+    falling back to ``white-box``, but only when a LaMa runtime actually looks usable. This
+    check must be cheap (it can run once per page) and must never raise -- a broken or absent
+    onnxruntime install must never abort a conversion, it should just mean "no LaMa here" and
+    leave the pre-Phase-1.4 white-box fallback behavior completely unchanged.
+
+    Returns a short diagnostic string when a runtime was detected, or ``None`` otherwise. This
+    intentionally only checks for an importable ``onnxruntime`` module and a configured, present
+    model root -- it does not import onnxruntime, touch the GPU, or open the model file, all of
+    which are deferred to the engine itself (with its own CPU/GPU provider fallback and error
+    handling) once actually selected.
+    """
+    model_root = options.inpaint_model_root
+    if model_root is None:
+        return None
+    try:
+        if not model_root.expanduser().exists():
+            return None
+    except OSError:
+        return None
+
+    try:
+        spec = importlib.util.find_spec("onnxruntime")
+    except Exception:  # pragma: no cover - defensive: detection must never raise
+        return None
+    if spec is None:
+        return None
+    return f"onnxruntime is importable; model root {model_root} exists"
+
+
 def resolve_background_inpainting_engine(
     page_image: Image.Image,
     mask_image: Image.Image,
@@ -909,7 +943,7 @@ def resolve_background_inpainting_engine(
         return OpenCvFastInpaintingEngine(), (
             f"Selected opencv-fast engine explicitly (mask area ratio {mask_ratio:.4f})."
         )
-    if base_lama_inpaint_engine(requested_engine) == "lama-onnx-cuda":
+    if base_lama_inpaint_engine(requested_engine) == "lama-onnx":
         return LamaOnnxCudaInpaintingEngine(
             model_root=options.inpaint_model_root,
             cuda_provider=options.inpaint_onnx_cuda_provider,
@@ -949,12 +983,31 @@ def resolve_background_inpainting_engine(
                 f"{low_texture_fraction:.4f} met threshold {AUTO_OPENCV_LOW_TEXTURE_FRACTION_THRESHOLD:.4f} "
                 f"at mask area ratio {mask_ratio:.4f} (large-mask opencv limit {large_mask_opencv_limit:.4f})."
             )
+        # Phase 1.4: prefer lama-onnx over white-box for large masks when a LaMa runtime is
+        # actually available. When no runtime is detected (the common case: no onnxruntime
+        # install and/or no configured model root), this falls through to the exact same
+        # white-box fallback as before Phase 1.4 -- zero behavior change for that path.
+        auto_lama_detection = _detect_auto_lama_runtime(options)
+        if auto_lama_detection is not None:
+            return LamaOnnxCudaInpaintingEngine(
+                model_root=options.inpaint_model_root,
+                cuda_provider=options.inpaint_onnx_cuda_provider,
+                execution_mode=options.inpaint_onnx_execution_mode,
+                max_side_px=options.inpaint_max_side_px,
+                patch_hybrid=options.inpaint_lama_patch_hybrid,
+            ), (
+                f"Auto route selected lama-onnx for a large mask because mask area ratio "
+                f"{mask_ratio:.4f} exceeded threshold {options.inpaint_max_area_ratio:.4f}, "
+                f"low-texture mask fraction {low_texture_fraction:.4f} did not justify opencv-fast "
+                f"(large-mask opencv limit {large_mask_opencv_limit:.4f}), and a LaMa runtime was "
+                f"detected ({auto_lama_detection})."
+            )
         return WhiteBoxInpaintingEngine(), (
             f"Auto route fell back to white-box because mask area ratio {mask_ratio:.4f} "
             f"exceeded threshold {options.inpaint_max_area_ratio:.4f}, while low-texture mask fraction "
             f"{low_texture_fraction:.4f} did not justify opencv-fast (large-mask opencv limit "
             f"{large_mask_opencv_limit:.4f}, low-texture threshold "
-            f"{AUTO_OPENCV_LOW_TEXTURE_FRACTION_THRESHOLD:.4f})."
+            f"{AUTO_OPENCV_LOW_TEXTURE_FRACTION_THRESHOLD:.4f}); no LaMa runtime was detected."
         )
     complexity = estimate_background_complexity(page_image, mask_image)
     return OpenCvFastInpaintingEngine(), (

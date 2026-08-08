@@ -16,11 +16,12 @@
 ## 專案狀態
 
 - 目前建議優先使用的背景引擎：`opencv-fast`
-- 可選的 GPU 背景引擎：
-  - `lama-onnx-cuda`：適合在本機已有 ONNX Runtime CUDA 與 LaMa ONNX 模型時做較高品質的 overlay 修補
+- 可選的生成式背景引擎：`lama-onnx`（舊名 `lama-onnx-cuda`，保留為向後相容別名），適合在本機有
+  LaMa ONNX 模型時做較高品質的 overlay 修補。預設走 CPU，若已安裝 ONNX Runtime GPU 且 GPU 可用則自動使用（第 1.1 階段）。
   - `lama-pytorch`：透過官方 [advimman/lama](https://github.com/advimman/lama) PyTorch checkpoint（`big-lama`）做較高品質的 overlay 修補
 - `diffusion-local` 已移除，因為地端 diffusion inpainting 速度慢且效果不穩定
-- 大多數文件建議先從 `opencv-fast` 開始，遮罩過大時再回退到 `white-box`
+- 大多數文件建議先從 `opencv-fast` 開始。`auto` 路由在遮罩過大時會回退到 `white-box`，但若偵測到
+  `lama-onnx` 可用的 runtime，則會優先改用 `lama-onnx`（第 1.4 階段）
 
 ## 成果展示
 
@@ -39,9 +40,9 @@
 - 支援多種背景重建引擎：
   - `white-box`
   - `opencv-fast`（建議優先使用）
-  - `lama-onnx-cuda`（可選 GPU 路徑，需明確指定）
+  - `lama-onnx`（可選 CPU/GPU 路徑，需明確指定；`lama-onnx-cuda` 為向後相容別名）
   - `lama-pytorch`（可選 GPU 路徑，透過官方 LaMa repo 與 PyTorch checkpoint，需明確指定）
-  - `auto` 自動路由
+  - `auto` 自動路由（大遮罩時，若偵測到可用的 LaMa runtime，會優先用 `lama-onnx` 而非 `white-box`）
 - 每次轉換都可輸出 JSON 報告。
 - 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
 - OCR 後處理：預設合併同一文字行的相鄰偵測框；可選 `--ocr-return-word-box` 改回 PaddleOCR 字級框（除錯用）。
@@ -129,19 +130,21 @@ pdf2ppt input.pdf output.pptx \
 
 `opencv-fast` 是本專案在 `overlay` 頁面上使用的輕量級背景重建路徑。
 
-### 可選 GPU 引擎：`lama-onnx-cuda`
+### 可選引擎：`lama-onnx`（預設 CPU，GPU 可用時自動使用）
 
-`lama-onnx-cuda` 是額外提供的顯式選用引擎，只用在 `overlay` 背景重建。第一階段不放進 `auto`，因此預設流程仍維持現在的 CPU 路徑與穩定行為。
+`lama-onnx` 是額外提供的顯式選用引擎，只用在 `overlay` 背景重建（`lama-onnx-cuda` 是同一個引擎與識別碼的向後相容別名；`lama-onnx-cuda-hybrid` / `lama-onnx-hybrid` 則是對應的 hybrid 模式別名）。自第 1.1 階段起不再要求 GPU：
 
-- 先安裝選用相依：`pip install .[gpu]`
+- 先安裝選用相依：`pip install .[cpu]`（純 CPU 版 `onnxruntime`）或 `pip install .[gpu]`（`onnxruntime-gpu`，供 CUDA 使用）
 - 將本地 ONNX 模型放在 `model/lama/`，或用 `--inpaint-model-root` 直接指向某個 `.onnx` 檔
-- 這條路徑需要 ONNX Runtime GPU 的 `CUDAExecutionProvider`
-- 當你明確指定 `--inpaint-engine lama-onnx-cuda` 時，如果 runtime / provider / model 缺失，會直接報錯，不會默默回退到 `opencv-fast`
-- 為了降低顯存壓力，過大的 overlay 影像會先依 `--inpaint-max-side-px` 等比例縮小再做推論
+- `--inpaint-onnx-cuda-provider`（預設 `CUDAExecutionProvider`）在可用時會被使用；不可用時會自動回退到 `CPUExecutionProvider`，不會直接報錯
+- 當你明確指定 `--inpaint-engine lama-onnx` 時，若完全沒有 `onnxruntime` 套件或模型缺失，仍會直接報錯，不會默默回退到 `opencv-fast`
+- 為了降低記憶體壓力，過大的 overlay 影像會先依 `--inpaint-max-side-px` 等比例縮小再做推論
+
+第 1.4 階段起，`auto` 路由在遇到大遮罩、且偵測到可用的 LaMa runtime（`onnxruntime` 套件可匯入、且 `--inpaint-model-root` 存在）時，也會改用 `lama-onnx` 而非 `white-box`。若偵測不到 runtime（多數安裝的預設情況，因為 `onnxruntime` 是選用相依），`auto` 路由行為與第 1.4 階段之前完全相同。
 
 ### 可選 GPU 引擎：`lama-pytorch`
 
-`lama-pytorch` 是額外提供的顯式選用引擎，透過獨立的 Python 環境執行官方 LaMa PyTorch checkpoint。與 `lama-onnx-cuda` 一樣，目前不納入 `auto` 路由。
+`lama-pytorch` 是額外提供的顯式選用引擎，透過獨立的 Python 環境執行官方 LaMa PyTorch checkpoint。與 `lama-onnx` 一樣，目前不納入 `auto` 路由的「顯式指定」路徑（但 `auto` 的大遮罩後備選項只會考慮 `lama-onnx`）。
 
 前置需求：
 
@@ -184,11 +187,11 @@ Python 解譯器選擇：
 
 注意事項：
 
-- `lama-pytorch` 與 `lama-onnx-cuda` 使用的模型格式不同：
+- `lama-pytorch` 與 `lama-onnx` 使用的模型格式不同：
   - `lama-pytorch` 需要解壓後的 PyTorch checkpoint 目錄（`lama/big-lama`）
-  - `lama-onnx-cuda` 需要 `model/lama/` 底下的 `.onnx` 檔
+  - `lama-onnx` 需要 `model/lama/` 底下的 `.onnx` 檔
 - 明確指定 `--inpaint-engine lama-pytorch` 時，若 repo、checkpoint 或 LaMa 執行環境缺失，會直接報錯
-- 若你已有本地 ONNX 匯出且更重視速度，可優先考慮 `lama-onnx-cuda`
+- 若你已有本地 ONNX 匯出且更重視速度，可優先考慮 `lama-onnx`
 
 它的設計目標是：
 
@@ -239,25 +242,24 @@ Python 解譯器選擇：
 
 - `auto` 先看的是文字遮罩面積比例，不是單純看背景複雜度。
 - 如果遮罩面積比例不超過 `--inpaint-max-area-ratio`，就直接使用 `opencv-fast`。
-- 如果遮罩超過這個門檻，`auto` 通常會為了安全改用 `white-box`。
-- 只有一種例外：遮罩雖然稍大，但大部分遮罩區域都落在低紋理背景時，仍可能保留 `opencv-fast`。
-- 這個大遮罩例外還有內部上限，因此非常大的遮罩仍會回退到 `white-box`。
+- 如果遮罩超過這個門檻，有一種例外：遮罩雖然稍大，但大部分遮罩區域都落在低紋理背景時，仍可能保留 `opencv-fast`（這個大遮罩例外還有內部上限，因此非常大的遮罩不會套用此例外）。
+- 否則（第 1.4 階段起），若偵測到可用的 LaMa runtime（`onnxruntime` 套件可匯入、且 `--inpaint-model-root` 存在），`auto` 會改用 `lama-onnx`；偵測不到才會回退到 `white-box`。
 - 背景複雜度仍會被估算並寫進 debug note，但它不再是主要分支條件。
 
 常用參數：
 
 - `--inpaint-engine opencv-fast`：強制指定使用此引擎
-- `--inpaint-engine lama-onnx-cuda`：強制指定使用可選 ONNX GPU 引擎
+- `--inpaint-engine lama-onnx`：強制指定使用可選 ONNX 引擎（預設 CPU，GPU 可用時自動使用；`lama-onnx-cuda` 為向後相容別名）
 - `--inpaint-engine lama-pytorch`：強制指定使用可選 PyTorch GPU 引擎
 - `--inpaint-padding-px`：先擴張文字遮罩再修補
 - `--inpaint-max-area-ratio`：當遮罩過大時避免使用局部修補
-- `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx-cuda` 的目錄 / `.onnx` 模型檔
+- `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx` 的目錄 / `.onnx` 模型檔
 - `--inpaint-lama-repo-root`：`lama-pytorch` 使用的官方 LaMa repo 根目錄，預設 `./lama`
 - `--inpaint-lama-device`：傳給 LaMa PyTorch 推論的裝置，預設 `cuda`
 - `--inpaint-lama-python`：`lama-pytorch` 使用的 Python 解譯器；預設讀取 `PDF2PPT_LAMA_PYTHON` 或現有的 `lama` Conda 環境
-- `--inpaint-onnx-cuda-provider`：`lama-onnx-cuda` 使用的 ONNX Runtime provider 名稱
-- `--inpaint-onnx-execution-mode`：`lama-onnx-cuda` 使用的 ONNX Runtime execution mode
-- `--inpaint-max-side-px`：送進 LaMa GPU 引擎前允許的最大邊長
+- `--inpaint-onnx-cuda-provider`：`lama-onnx` 使用的 ONNX Runtime provider 名稱；不可用時會自動回退到 CPU
+- `--inpaint-onnx-execution-mode`：`lama-onnx` 使用的 ONNX Runtime execution mode
+- `--inpaint-max-side-px`：送進 LaMa 引擎前允許的最大邊長
 - `--debug-dir`：輸出 mask 與背景決策結果方便檢查
 
 實務建議：
@@ -296,16 +298,16 @@ OCR 行合併（預設啟用，無需額外參數）：
 
 背景重建相關：
 
-- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`lama-onnx-cuda`、`lama-pytorch`
+- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`lama-onnx`（別名 `lama-onnx-cuda`）、`lama-pytorch`
 - `--inpaint-padding-px`：在 inpainting 前擴張文字遮罩
-- `--inpaint-max-area-ratio`：當遮罩面積太大時，強制改用 white-box
-- `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx-cuda` 的本地目錄 / `.onnx` 檔案
+- `--inpaint-max-area-ratio`：`auto` 停止使用 opencv-fast 的遮罩面積門檻（後續行為見上方 `auto` 路由說明）
+- `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx` 的本地目錄 / `.onnx` 檔案
 - `--inpaint-lama-repo-root`：`lama-pytorch` 使用的官方 LaMa repo 根目錄
 - `--inpaint-lama-device`：`lama-pytorch` 使用的裝置，預設 `cuda`
 - `--inpaint-lama-python`：`lama-pytorch` 使用的 Python 解譯器
-- `--inpaint-onnx-cuda-provider`：`lama-onnx-cuda` 使用的 ONNX Runtime provider 名稱
-- `--inpaint-onnx-execution-mode`：`lama-onnx-cuda` 使用的 ONNX Runtime execution mode
-- `--inpaint-max-side-px`：LaMa GPU 推論前的等比例縮圖保護上限
+- `--inpaint-onnx-cuda-provider`：`lama-onnx` 使用的 ONNX Runtime provider 名稱；不可用時自動回退到 CPU
+- `--inpaint-onnx-execution-mode`：`lama-onnx` 使用的 ONNX Runtime execution mode
+- `--inpaint-max-side-px`：LaMa 推論前的等比例縮圖保護上限
 
 診斷相關：
 
@@ -338,14 +340,16 @@ OCR 行合併（預設啟用，無需額外參數）：
 
 - `opencv-fast`：當遮罩面積仍在設定門檻內時優先使用
 - `opencv-fast`：少數遮罩稍大但大多落在低紋理區域的情況下仍會保留
-- `white-box`：當遮罩過大，或局部修補風險過高時作為保底方案
+- `lama-onnx`：遮罩過大且偵測到可用的 LaMa runtime 時使用（第 1.4 階段）
+- `white-box`：當遮罩過大、局部修補風險過高、且沒有可用的 LaMa runtime 時作為保底方案
 
 實際判斷順序可以簡化成：
 
 1. 先量測文字遮罩的面積比例。
 2. 若不超過 `--inpaint-max-area-ratio`，使用 `opencv-fast`。
 3. 若超過門檻，再估算遮罩區域有多少比例屬於低紋理背景。
-4. 只有大遮罩例外仍然安全時才保留 `opencv-fast`，否則改用 `white-box`。
+4. 大遮罩例外仍然安全時保留 `opencv-fast`。
+5. 否則，若偵測到可用的 LaMa runtime（`onnxruntime` 套件可匯入、且 `--inpaint-model-root` 存在），改用 `lama-onnx`；偵測不到則改用 `white-box`。
 
 ## 輸出檔案
 
