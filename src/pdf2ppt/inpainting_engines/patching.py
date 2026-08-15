@@ -36,7 +36,10 @@ logger = logging.getLogger(__name__)
 
 
 def _prepare_lama_working_mask(mask_array: np.ndarray, *, close_px: int = DEFAULT_LAMA_MASK_CLOSE_PX) -> np.ndarray:
-    binary_mask = (mask_array > 0).astype(np.uint8)
+    # Annotated explicitly: cv2.morphologyEx's stub return type is wider (int/float dtype
+    # union) than the inferred uint8 dtype, and this local is conditionally reassigned to
+    # that result below.
+    binary_mask: np.ndarray = (mask_array > 0).astype(np.uint8)
     if not np.any(binary_mask):
         return mask_array
     if close_px > 0:
@@ -52,7 +55,7 @@ def _prepare_lama_working_mask(mask_array: np.ndarray, *, close_px: int = DEFAUL
 def _should_use_lama_patch_inpaint(mask_array: np.ndarray) -> bool:
     if mask_area_ratio(mask_array) > DEFAULT_LAMA_PATCH_INPAINT_MASK_RATIO_THRESHOLD:
         return True
-    component_count, _, _, _ = cv2.connectedComponentsWithStats((mask_array > 0).astype(np.uint8), 8)
+    component_count, _, _, _ = cv2.connectedComponentsWithStats((mask_array > 0).astype(np.uint8), 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     return component_count > DEFAULT_LAMA_PATCH_MAX_COMPONENTS_FOR_FULL_PAGE + 1
 
 
@@ -122,7 +125,7 @@ def _build_lama_patch_groups(
 ) -> list[tuple[int, int, int, int, np.ndarray]]:
     height, width = working_mask.shape[:2]
     binary_mask = (working_mask > 0).astype(np.uint8)
-    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask, 8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(binary_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     if component_count <= 1:
         return []
 
@@ -256,6 +259,9 @@ def _inpaint_lama_page_by_patches(
                 use_patch_hybrid,
             )
             batch_crops = [(job[4], job[5]) for job in lama_jobs]
+            # use_batch is only True when `run_crops_batch_inpaint is not None` (see its
+            # definition above); make that invariant explicit for the type checker.
+            assert run_crops_batch_inpaint is not None
             batch_restored = run_crops_batch_inpaint(batch_crops)
             if len(batch_restored) != len(lama_jobs):
                 raise BackgroundInpaintingError(

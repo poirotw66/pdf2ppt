@@ -11,11 +11,17 @@ defaults or algorithmic behavior were changed while splitting the file.
 from __future__ import annotations
 
 import math
+from typing import TypedDict
 
 import cv2
 import numpy as np
 from PIL import Image
 
+from ..inpainting_masks import (
+    DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX,
+    DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD,
+    DEFAULT_LOW_TEXTURE_STD_THRESHOLD,
+)
 from .base import (
     DEFAULT_RELAXED_QUADRATIC_COLOR_BIAS_MAX_DELTA,
     DEFAULT_RELAXED_QUADRATIC_EDGE_THRESHOLD,
@@ -52,11 +58,6 @@ from .base import (
     DEFAULT_TELEA_RADIUS_REFERENCE_SPAN_PX,
     DEFAULT_TELEA_SMALL_COMPONENT_MAX_SPAN_PX,
     BackgroundInpaintingEngine,
-)
-from ..inpainting_masks import (
-    DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX,
-    DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD,
-    DEFAULT_LOW_TEXTURE_STD_THRESHOLD,
 )
 
 
@@ -217,7 +218,7 @@ def _prefill_low_texture_regions(
     smooth_gradient_color_bias_residual_scale: float,
 ) -> tuple[np.ndarray, np.ndarray, list[tuple[int, int, int, int, np.ndarray, np.ndarray]]]:
     component_mask = (mask_array > 0).astype(np.uint8)
-    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     if component_count <= 1:
         return source, mask_array, []
 
@@ -289,7 +290,7 @@ def _inpaint_residual_components(
     group_proximity_max_scale: float,
 ) -> tuple[np.ndarray, list[dict[str, float | int]]]:
     component_mask = (residual_mask > 0).astype(np.uint8)
-    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     if component_count <= 1:
         return source, []
 
@@ -349,11 +350,14 @@ def _inpaint_residual_components(
         else:
             padding_scale = 2.0
         padding = max(2, int(math.ceil(component_radius * padding_scale)))
+        # source.shape is typed as the variable-length tuple[int, ...]; the crop-bounds
+        # helpers below take a fixed 2-tuple, so build one explicitly instead of slicing.
+        image_shape = (source.shape[0], source.shape[1])
         if protected_nearby and protected_line_mask is not None:
             x0, y0, x1, y1 = _resolve_protected_inpaint_crop_bounds(
                 protected_line_mask,
                 component_bbox=(x, y, width, height),
-                image_shape=source.shape[:2],
+                image_shape=image_shape,
                 base_padding=padding,
             )
         elif _is_compact_wide_residual_component(width=width, height=height, edge_density=edge_density):
@@ -361,7 +365,7 @@ def _inpaint_residual_components(
                 gray,
                 edges,
                 component_bbox=(x, y, width, height),
-                image_shape=source.shape[:2],
+                image_shape=image_shape,
                 base_padding=padding,
             )
         else:
@@ -389,6 +393,18 @@ def _inpaint_residual_components(
     return repaired, diagnostics
 
 
+class _SmallResidualComponent(TypedDict):
+    mask: np.ndarray
+    bbox: tuple[int, int, int, int]
+    span: int
+
+
+class _ResidualComponentGroup(TypedDict):
+    mask: np.ndarray
+    group_size: int
+    proximity_px: int
+
+
 def _build_residual_component_groups(
     labels: np.ndarray,
     *,
@@ -397,9 +413,9 @@ def _build_residual_component_groups(
     group_proximity_px: int,
     group_proximity_min_scale: float,
     group_proximity_max_scale: float,
-) -> list[dict[str, np.ndarray | int]]:
-    small_components: list[dict[str, np.ndarray | tuple[int, int, int, int] | int]] = []
-    groups: list[dict[str, np.ndarray | int]] = []
+) -> list[_ResidualComponentGroup]:
+    small_components: list[_SmallResidualComponent] = []
+    groups: list[_ResidualComponentGroup] = []
     for component_index in range(1, component_count):
         component = (labels == component_index).astype(np.uint8)
         points = cv2.findNonZero(component)
@@ -450,7 +466,7 @@ def _build_residual_component_groups(
             if _bbox_gap_px(left_bbox, right_bbox) <= adaptive_proximity:
                 union(left_index, right_index)
 
-    grouped_components: dict[int, list[dict[str, np.ndarray | tuple[int, int, int, int] | int]]] = {}
+    grouped_components: dict[int, list[_SmallResidualComponent]] = {}
     for index, component in enumerate(small_components):
         grouped_components.setdefault(find(index), []).append(component)
 
@@ -927,7 +943,7 @@ def _filter_structural_line_candidates(
     min_span_px: int,
 ) -> np.ndarray:
     component_mask = (line_mask > 0).astype(np.uint8)
-    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     if component_count <= 1:
         return line_mask
 
@@ -976,7 +992,7 @@ def _restore_low_texture_regions(
         return np.clip(blended, 0, 255).astype(np.uint8)
 
     component_mask = (mask_array > 0).astype(np.uint8)
-    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     if component_count <= 1:
         return repaired
 

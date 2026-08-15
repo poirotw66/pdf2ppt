@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import cv2
 import importlib.util
 import logging
 import math
 
+import cv2
 import fitz
 import numpy as np
 from PIL import Image
@@ -127,7 +127,7 @@ def render_overlay_background(
         }
         if mask_refinement.table_line_mask_image is not None:
             mask_debug_images["table_line_mask"] = mask_refinement.table_line_mask_image
-        if getattr(mask_refinement, "grid_line_mask_image", None) is not None:
+        if mask_refinement.grid_line_mask_image is not None:
             mask_debug_images["grid_line_mask"] = mask_refinement.grid_line_mask_image
         if np.any(protected_line_mask):
             mask_debug_images["protected_line_mask"] = Image.fromarray(
@@ -231,7 +231,7 @@ def _neutralize_protected_table_lines(
     source_rgb = np.array(page_image.convert("RGB"), dtype=np.uint8)
     sanitized = source_rgb.copy()
     component_mask = protected_line_mask.astype(np.uint8)
-    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     exclusion_mask = (mask_array > 0) | protected_line_mask
     for component_index in range(1, component_count):
         component = labels == component_index
@@ -754,7 +754,15 @@ def _blend_local_component_toward_ring(
     alpha = np.clip(alpha * blend_gain, 0.0, 1.0)[..., None]
     corrected = repaired_crop.astype(np.float32)
     corrected = corrected * (1.0 - alpha) + target_rgb[None, None, :] * alpha
-    delta = tuple(float(target_rgb[index] - component_mean[index]) for index in range(3))
+    # Written as an explicit 3-tuple literal (rather than tuple(<generator>)) so its type is
+    # the fixed-length tuple[float, float, float] the return annotation promises -- tuple()
+    # over a generator is only ever inferred as the variable-length tuple[float, ...], even
+    # though range(3) always yields exactly 3 items.
+    delta = (
+        float(target_rgb[0] - component_mean[0]),
+        float(target_rgb[1] - component_mean[1]),
+        float(target_rgb[2] - component_mean[2]),
+    )
     return np.clip(corrected, 0.0, 255.0).astype(np.uint8), delta
 
 

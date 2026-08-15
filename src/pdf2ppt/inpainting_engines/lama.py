@@ -216,6 +216,9 @@ def _shutdown_lama_pytorch_workers() -> None:
         with handle.lock:
             if handle.process.poll() is None:
                 try:
+                    # The worker's Popen is always constructed with stdin=subprocess.PIPE
+                    # (see the only call site below), so .stdin is never None here.
+                    assert handle.process.stdin is not None
                     handle.process.stdin.write("shutdown\n")
                     handle.process.stdin.flush()
                 except OSError:
@@ -367,7 +370,10 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
                         f"Official LaMa prediction did not produce the expected output under {outdir}."
                     )
 
-            restored_rgb = np.array(Image.open(output_path).convert("RGB"), dtype=np.uint8)
+            # Annotated explicitly: cv2.resize's stub return type is wider (int/float dtype union)
+            # than the inferred uint8 dtype, and this local is conditionally reassigned to that
+            # result below.
+            restored_rgb: np.ndarray = np.array(Image.open(output_path).convert("RGB"), dtype=np.uint8)
             if restored_rgb.shape[:2] != resized_rgb.shape[:2]:
                 raise BackgroundInpaintingError(
                     f"Official LaMa output shape {restored_rgb.shape[:2]} did not match input shape {resized_rgb.shape[:2]}."
@@ -457,7 +463,10 @@ class LamaPytorchInpaintingEngine(BackgroundInpaintingEngine):
                         raise BackgroundInpaintingError(
                             f"Official LaMa batch prediction did not produce output for {stem} under {outdir}."
                         )
-                restored_rgb = np.array(Image.open(output_path).convert("RGB"), dtype=np.uint8)
+                # Annotated explicitly: cv2.resize's stub return type is wider (int/float dtype union)
+                # than the inferred uint8 dtype, and this local is conditionally reassigned to that
+                # result below.
+                restored_rgb: np.ndarray = np.array(Image.open(output_path).convert("RGB"), dtype=np.uint8)
                 if restored_rgb.shape[:2] != item["resized_rgb"].shape[:2]:
                     raise BackgroundInpaintingError(
                         f"Official LaMa batch output shape {restored_rgb.shape[:2]} "

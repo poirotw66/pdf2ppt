@@ -53,9 +53,9 @@ where = ["src"]
 
 # --- Phase 2 static analysis gate -------------------------------------
 # Both tools are now blocking in CI (see .github/workflows/ci.yml). The
-# Phase 0 baseline (49 ruff findings, 29 mypy findings) has been cleared
-# everywhere except the inpainting_* modules below, which are excluded
-# on purpose -- see the note next to each exclusion.
+# Phase 0 baseline (49 ruff findings, 29 mypy findings) has been cleared,
+# and the inpainting modules (excluded while Phase 1 split them into a
+# package) have since been folded back in -- see Phase 2.2.
 
 [tool.ruff]
 line-length = 120
@@ -70,16 +70,6 @@ exclude = [
   # Patch files applied verbatim onto a cloned third-party LaMa repo by
   # scripts/apply_lama_patches.sh -- not our code to lint.
   "scripts/lama_patches",
-  # --- Pending: fold the inpainting modules into the blocking gate ------
-  # Phase 1 has landed (inpainting_engines.py is now a package), so the
-  # original "parallel session in flight" reason is gone. What remains is
-  # 126 ruff findings across the freshly-split 3,162-line package. Folding
-  # them in is its own tracked task: every change there must be re-verified
-  # against scripts/bench_inpaint.py, whose metrics must stay bit-identical.
-  "src/pdf2ppt/inpainting.py",
-  "src/pdf2ppt/inpainting_engines",
-  "src/pdf2ppt/inpainting_overlay.py",
-  "src/pdf2ppt/inpainting_masks.py",
 ]
 
 [tool.ruff.lint]
@@ -105,17 +95,3 @@ ignore_missing_imports = true
 check_untyped_defs = false
 disallow_untyped_defs = false
 warn_unused_ignores = false
-
-# --- Pending: fold the inpainting modules into the blocking mypy gate -----
-# Mirrors the ruff exclusion above (30 mypy findings, mostly cv2/PIL stub
-# interop in the freshly-split package). `exclude` alone is not enough --
-# mypy still follows imports into these modules from checked ones, so
-# `ignore_errors` on the modules themselves is what actually silences them.
-[[tool.mypy.overrides]]
-module = [
-  "pdf2ppt.inpainting",
-  "pdf2ppt.inpainting_engines.*",
-  "pdf2ppt.inpainting_overlay",
-  "pdf2ppt.inpainting_masks",
-]
-ignore_errors = true

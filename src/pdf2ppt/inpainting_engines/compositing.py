@@ -119,7 +119,10 @@ def _build_lama_composite_alpha(
     if not np.any(binary_mask):
         return None
 
-    expanded_mask = binary_mask
+    # Annotated explicitly: cv2.dilate's stub return type is wider (int/float dtype union)
+    # than binary_mask's inferred uint8 dtype, and this local is conditionally reassigned
+    # to that result below.
+    expanded_mask: np.ndarray = binary_mask
     if composite_dilate_px > 0:
         kernel_size = composite_dilate_px * 2 + 1
         expanded_mask = cv2.dilate(
