@@ -23,8 +23,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# CPU-only ONNX Runtime for the lama-onnx engine (Phase 1.1: this engine no longer requires a
+# GPU -- it falls back to CPUExecutionProvider automatically). Use `gpu` instead when a CUDA
+# provider is available and desired.
+cpu = [
+  "onnxruntime>=1.18.0,<2.0",
+]
 gpu = [
   "onnxruntime-gpu>=1.18.0,<2.0",
+]
+# Pinned exactly (not a range) so CI and local runs always see the same
+# ruff/mypy release -- these tools regularly add checks in minor/patch
+# releases, and the blocking lint gate must not go red from an upstream
+# release alone. Bump deliberately, in a commit that re-triages the diff.
+lint = [
+  "ruff==0.16.2",
+  "mypy==2.3.0",
 ]
 
 [project.scripts]
@@ -36,3 +50,48 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# --- Phase 2 static analysis gate -------------------------------------
+# Both tools are now blocking in CI (see .github/workflows/ci.yml). The
+# Phase 0 baseline (49 ruff findings, 29 mypy findings) has been cleared,
+# and the inpainting modules (excluded while Phase 1 split them into a
+# package) have since been folded back in -- see Phase 2.2.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+exclude = [
+  "frontend",
+  "tests/fixtures",
+  "lama",
+  "model",
+  "output",
+  "outputs",
+  # Patch files applied verbatim onto a cloned third-party LaMa repo by
+  # scripts/apply_lama_patches.sh -- not our code to lint.
+  "scripts/lama_patches",
+]
+
+[tool.ruff.lint]
+# Deliberately small, high-signal rule set for the report-only baseline:
+# pyflakes (F), a slice of pycodestyle (E/W), import sorting (I), and
+# pyupgrade (UP). Broader rule sets (bugbear, complexity, etc.) are a
+# later decision once the team has agreed on scope.
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+  "E501",  # line-length is handled by the formatter/line-length setting, not worth failing the report on
+]
+
+[tool.mypy]
+python_version = "3.11"
+exclude = ["frontend/", "tests/fixtures/", "lama/", "model/", "output/", "outputs/"]
+# Third-party stubs (fitz, cv2, PIL, pptx, fastapi, ...) are not installed
+# in CI; without this the run is 90%+ import-not-found noise instead of a
+# useful signal.
+ignore_missing_imports = true
+# The existing 8,100-line codebase predates any type-checking; being strict
+# here would just produce thousands of untyped-def warnings that drown out
+# the handful of real bugs mypy already finds.
+check_untyped_defs = false
+disallow_untyped_defs = false
+warn_unused_ignores = false

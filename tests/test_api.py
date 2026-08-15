@@ -397,7 +397,9 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         options = convert_pdf_mock.call_args.args[0]
-        self.assertEqual(options.inpaint_engine, "lama-onnx-cuda")
+        # "lama-onnx-cuda" is a backward-compatible alias that normalizes to the canonical
+        # "lama-onnx" engine identifier (Phase 1.1); the request itself keeps working unchanged.
+        self.assertEqual(options.inpaint_engine, "lama-onnx")
         self.assertEqual(options.inpaint_model_root, get_repo_root() / "custom-lama")
         self.assertEqual(options.inpaint_onnx_cuda_provider, "CUDAExecutionProvider")
         self.assertEqual(options.inpaint_onnx_execution_mode, "parallel")

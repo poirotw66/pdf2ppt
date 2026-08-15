@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field
 
 from .core import DEFAULT_OCR_BATCH_SIZE
 
-
 DEFAULT_DETECT_CONFIDENCE_THRESHOLD = 0.75
 
 
@@ -118,8 +117,10 @@ class ConvertRequest(BaseModel):
         "auto",
         "white-box",
         "opencv-fast",
+        "lama-onnx",
         "lama-onnx-cuda",
         "lama-pytorch",
+        "lama-onnx-hybrid",
         "lama-onnx-cuda-hybrid",
         "lama-pytorch-hybrid",
     ] = "opencv-fast"

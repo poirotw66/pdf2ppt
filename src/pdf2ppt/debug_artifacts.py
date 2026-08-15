@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TypedDict
 
 import fitz
 import numpy as np
 from PIL import Image, ImageDraw
 
 from .models import TextBlock
+
+
+class MaskShape(TypedDict, total=False):
+    """Debug-overlay shape: either a polygon (`points`) or a rectangle (`bbox`)."""
+
+    kind: str
+    points: list[tuple[int, int]]
+    bbox: tuple[int, int, int, int]
 
 
 def write_debug_artifacts(
@@ -75,11 +84,11 @@ def build_mask_shapes(
     text_blocks: list[TextBlock],
     image_size: tuple[int, int],
     page_rect: fitz.Rect,
-) -> list[dict[str, object]]:
+) -> list[MaskShape]:
     image_width, image_height = image_size
     scale_x = image_width / max(page_rect.width, 1.0)
     scale_y = image_height / max(page_rect.height, 1.0)
-    shapes: list[dict[str, object]] = []
+    shapes: list[MaskShape] = []
 
     for block in text_blocks:
         if block.image_polygon:

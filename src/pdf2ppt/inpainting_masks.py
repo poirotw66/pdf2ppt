@@ -10,7 +10,6 @@ from PIL import Image, ImageDraw
 from .debug_artifacts import build_mask_shapes
 from .models import TextBlock
 
-
 DEFAULT_LOW_TEXTURE_STD_THRESHOLD = 4.0
 DEFAULT_LOW_TEXTURE_EDGE_THRESHOLD = 0.01
 DEFAULT_LOW_TEXTURE_CONTEXT_DILATE_PX = 8
@@ -209,7 +208,7 @@ def _build_grid_line_mask(horizontal_line_mask: np.ndarray, vertical_line_mask: 
 
 def _filter_line_components(line_mask: np.ndarray, *, orientation: str, min_span_px: int) -> np.ndarray:
     component_mask = (line_mask > 0).astype(np.uint8)
-    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    component_count, labels, _, _ = cv2.connectedComponentsWithStats(component_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     if component_count <= 1:
         return line_mask
 
@@ -243,7 +242,7 @@ def _filter_text_overlapping_line_components(
         return line_mask
 
     component_mask = (line_mask > 0).astype(np.uint8)
-    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     if component_count <= 1:
         return line_mask
 
@@ -316,7 +315,7 @@ def estimate_low_texture_mask_fraction(
 ) -> float:
     mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
     component_mask = (mask_array > 0).astype(np.uint8)
-    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(component_mask, 8)  # type: ignore[call-overload]  # stub types arg 2 as `labels`, but the real binding dispatches a bare int here as `connectivity` (same stub gap as cv2.kmeans's bestLabels, db8002f)
     if component_count <= 1:
         return 0.0
 

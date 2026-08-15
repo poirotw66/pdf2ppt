@@ -27,6 +27,33 @@ jobs:
       - name: Run backend tests
         run: pytest -q
 
+  lint:
+    # Phase 2 (docs/optimization-roadmap.md): blocking static analysis.
+    # The Phase 0 baseline has been cleared except for the inpainting_*
+    # modules, which are temporarily excluded in pyproject.toml while a
+    # parallel Phase 1 session splits inpainting_engines.py into a package
+    # -- see the exclusion comments there for the removal plan.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[lint]"
+
+      - name: ruff check
+        run: python -m ruff check .
+
+      - name: mypy
+        run: python -m mypy src/pdf2ppt scripts/bench_inpaint.py
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -45,6 +72,9 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Lint frontend
+        run: npm run lint
 
       - name: Run frontend tests
         run: CI=1 npm test -- --watch=false

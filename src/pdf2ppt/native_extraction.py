@@ -18,7 +18,8 @@ def extract_native_text_blocks(page: fitz.Page) -> tuple[list[TextBlock], list[t
 
     for block_index, block in enumerate(text_dict.get("blocks", [])):
         block_type = block.get("type")
-        bbox = tuple(float(value) for value in block.get("bbox", (0, 0, 0, 0)))
+        bbox_x0, bbox_y0, bbox_x1, bbox_y1 = (float(value) for value in block.get("bbox", (0, 0, 0, 0)))
+        bbox = (bbox_x0, bbox_y0, bbox_x1, bbox_y1)
         if block_type == 1:
             image_boxes.append(bbox)
             continue
@@ -89,7 +90,7 @@ def extract_image_elements(
         if rect.width <= 1 or rect.height <= 1:
             continue
         pixmap = page.get_pixmap(clip=rect, dpi=dpi, alpha=False)
-        image = Image.frombytes("RGB", [pixmap.width, pixmap.height], pixmap.samples)
+        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
         image_elements.append(ImagePlacement(bbox=bbox, png_bytes=pil_to_png_bytes(image)))
     return image_elements
 
