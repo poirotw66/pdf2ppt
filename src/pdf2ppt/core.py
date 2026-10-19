@@ -50,6 +50,12 @@ class ConversionOptions:
     # Max drawings considered for vector nativization in ``auto`` mode.
     # ``aggressive`` uses ``max(threshold, 400)`` unless the caller sets higher.
     vector_complexity_threshold: int = 80
+    # P2 layout analysis. Default ``heuristic`` keeps CPU/CI paths free of model
+    # downloads. ``ppstructure`` opts into PP-StructureV3 / LayoutDetection and
+    # soft-falls back to heuristic when the model is unavailable.
+    layout_engine: str = "heuristic"
+    layout_model_root: Path | None = Path("model")
+    layout_skip_header_footer: bool = True
     lang: str = "ch"
     ocr_model_root: Path | None = Path("model")
     ocr_use_doc_orientation: bool = False

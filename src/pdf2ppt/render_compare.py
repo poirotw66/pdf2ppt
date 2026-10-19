@@ -108,6 +108,8 @@ class EditabilityMetrics:
     score: float
     # Non-empty native table cells counted as text units (P1).
     nonempty_table_cell_count: int = 0
+    # Non-empty paragraphs across text frames (P2: grouped lists count per item).
+    paragraph_count: int = 0
 
     def to_dict(self) -> dict[str, float | int]:
         return asdict(self)
@@ -584,11 +586,38 @@ def _count_nonempty_table_cells(shape: Any) -> int:
     return count
 
 
+def _count_text_frame_paragraphs(shape: Any) -> int:
+    """Count non-empty paragraphs (or bullet paras) inside a text-bearing shape."""
+
+    if not getattr(shape, "has_text_frame", False) or not shape.has_text_frame:
+        return 0
+    count = 0
+    for paragraph in shape.text_frame.paragraphs:
+        text = (paragraph.text or "").strip()
+        if text:
+            count += 1
+            continue
+        # Empty run text can still be a real bullet placeholder paragraph.
+        try:
+            p_pr = paragraph._p.pPr  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            p_pr = None
+        if p_pr is not None:
+            from pptx.oxml.ns import qn
+
+            if any(
+                child.tag in {qn("a:buChar"), qn("a:buAutoNum"), qn("a:buBlip")} for child in p_pr
+            ):
+                count += 1
+    return count
+
+
 def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int) -> EditabilityMetrics:
     """Count native objects and estimate raster-background coverage for one slide."""
 
     slide_area = float(max(1, slide_width) * max(1, slide_height))
     text_box_count = 0
+    paragraph_count = 0
     picture_count = 0
     auto_shape_count = 0
     table_count = 0
@@ -603,6 +632,7 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
         shape_type = shape.shape_type
         if shape_type == MSO_SHAPE_TYPE.TEXT_BOX:
             text_box_count += 1
+            paragraph_count += _count_text_frame_paragraphs(shape)
         elif shape_type == MSO_SHAPE_TYPE.PICTURE:
             picture_count += 1
             area_ratio = _shape_area_emu(shape) / slide_area
@@ -625,6 +655,7 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
                 text = (shape.text_frame.text or "").strip()
                 if text:
                     text_box_count += 1
+                    paragraph_count += _count_text_frame_paragraphs(shape)
                 else:
                     other_shape_count += 1
             else:
@@ -633,11 +664,10 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
     native_object_count = (
         text_box_count + auto_shape_count + table_count + line_count + group_count + chart_count
     )
-    # Composite in [0, 1]. Text units = text boxes + non-empty native table
-    # cells so a fully nativized table page is not penalized for absorbing
-    # cell text out of text boxes. Structure still rewards shapes/tables;
-    # weights (0.40 / 0.45 / 0.15) match the P1 editability formula.
-    text_units = text_box_count + nonempty_table_cell_count
+    # Composite in [0, 1]. Text units = paragraphs (not raw text boxes) +
+    # non-empty native table cells so grouped bullet lists are not penalized.
+    # Structure still rewards shapes/tables; weights (0.40 / 0.45 / 0.15) match P1.
+    text_units = max(paragraph_count, text_box_count) + nonempty_table_cell_count
     text_component = min(1.0, text_units / 6.0) * 0.40
     structure_units = (
         auto_shape_count + table_count * 4 + line_count * 0.5 + group_count + chart_count * 2
@@ -664,6 +694,7 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
         raster_background_area_ratio=round(min(1.0, raster_background_area), 6),
         score=round(score, 6),
         nonempty_table_cell_count=nonempty_table_cell_count,
+        paragraph_count=paragraph_count,
     )
 
 
@@ -868,6 +899,7 @@ def summarize_slide_scores(pages: list[SlideQualityScore]) -> dict[str, Any]:
                 sum(page.editability.raster_background_area_ratio for page in pages) / len(pages), 6
             ),
             "text_box_count_total": sum(page.editability.text_box_count for page in pages),
+            "paragraph_count_total": sum(page.editability.paragraph_count for page in pages),
             "nonempty_table_cell_count_total": sum(
                 page.editability.nonempty_table_cell_count for page in pages
             ),

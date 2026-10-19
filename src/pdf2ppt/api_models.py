@@ -154,6 +154,9 @@ class ConvertRequest(BaseModel):
     generative_max_attempts: int | None = Field(default=None, ge=1, le=50_000)
     vector_mode: Literal["off", "auto", "aggressive"] = "auto"
     vector_complexity_threshold: int = Field(default=80, ge=1, le=10_000)
+    layout_engine: Literal["heuristic", "ppstructure"] = "heuristic"
+    layout_model_root: str | None = "model"
+    layout_skip_header_footer: bool = True
     write_debug_artifacts: bool = False
 
 

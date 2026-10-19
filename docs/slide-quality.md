@@ -55,6 +55,19 @@ on mask cleanliness. The slide evaluator scores the **end-to-end PPTX**.
   minus a raster-background penalty. See also
   [`docs/vector-nativization.md`](vector-nativization.md).
 
+### Layout grouping (P2; no LibreOffice required)
+
+`pdf2ppt.layout_metrics` compares `PageResult` text boxes to optional
+`*.layout.json` ground truth:
+
+- box-count ratio vs ground-truth paragraphs
+- mean paragraph IoU, merge/split error counts
+- list detection precision / recall / F1
+- title detection correctness
+- PPTX helpers: real bullet paragraph count, title-placeholder presence
+
+See [`docs/layout-analysis.md`](layout-analysis.md) and `tests/test_layout.py`.
+
 ## System dependencies (optional)
 
 Conversion itself does not need these. Only evaluation does:

@@ -1,0 +1,67 @@
+{
+  "page_number": 1,
+  "expect_title": true,
+  "expect_list_item_count": 6,
+  "paragraphs": [
+    {
+      "id": "title",
+      "bbox": [48, 36, 800, 90],
+      "text": "Sprint Goals",
+      "role": "title"
+    },
+    {
+      "id": "li1",
+      "bbox": [72, 130, 880, 164],
+      "text": "Ship layout analysis for scanned decks",
+      "role": "list",
+      "list_level": 0
+    },
+    {
+      "id": "li2",
+      "bbox": [96, 170, 880, 204],
+      "text": "Detect multi-level bullets",
+      "role": "list",
+      "list_level": 1
+    },
+    {
+      "id": "li3",
+      "bbox": [96, 205, 880, 239],
+      "text": "Map titles to placeholders",
+      "role": "list",
+      "list_level": 1
+    },
+    {
+      "id": "li4",
+      "bbox": [72, 250, 880, 284],
+      "text": "Keep heuristic fallback for CI",
+      "role": "list",
+      "list_level": 0
+    },
+    {
+      "id": "li5",
+      "bbox": [96, 290, 880, 324],
+      "text": "No model download required",
+      "role": "list",
+      "list_level": 1
+    },
+    {
+      "id": "li6",
+      "bbox": [72, 340, 880, 374],
+      "text": "Report grouping metrics in the PR",
+      "role": "list",
+      "list_level": 0
+    },
+    {
+      "id": "footer",
+      "bbox": [48, 500, 400, 530],
+      "text": "Confidential",
+      "role": "footer"
+    },
+    {
+      "id": "page_number",
+      "bbox": [880, 500, 940, 530],
+      "text": "3",
+      "role": "page_number"
+    }
+  ]
+}

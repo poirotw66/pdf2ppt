@@ -62,6 +62,12 @@ from .generative_inpaint import (
     build_ocr_residual_checker,
     uses_generative_inpaint_engine,
 )
+from .layout import (
+    LayoutEngine,
+    apply_layout_to_page,
+    extract_figure_image_placements,
+    split_wide_multiline_blocks,
+)
 from .models import ConversionReport, ImagePlacement, PageResult, QualityScore, TextBlock
 from .native_extraction import (
     assign_block_roles,
@@ -146,6 +152,11 @@ def convert_pdf(
         drop_score=options.ocr_drop_score,
         return_word_box=options.ocr_return_word_box,
     )
+    layout_engine = LayoutEngine(
+        engine=str(getattr(options, "layout_engine", "heuristic")),
+        model_root=getattr(options, "layout_model_root", None) or options.ocr_model_root,
+        skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
+    )
     if uses_generative_inpaint_engine(options.inpaint_engine):
         if options.generative_budget is None:
             options.generative_budget = GenerativeBudget(
@@ -176,6 +187,7 @@ def convert_pdf(
                     page,
                     options,
                     ocr_engine,
+                    layout_engine=layout_engine,
                     precomputed_ocr_page_data=batched_ocr_page_data.get(page.number + 1),
                 )
             except (OcrInitializationError, OcrProcessingError, PageConversionError):
@@ -236,6 +248,7 @@ def analyze_page(
     options: ConversionOptions,
     ocr_engine: OcrEngine,
     *,
+    layout_engine: LayoutEngine | None = None,
     precomputed_ocr_page_data: tuple[Image.Image, OcrPageData] | None = None,
 ) -> PageResult:
     page_started_at = perf_counter()
@@ -322,6 +335,44 @@ def analyze_page(
         apply_header_cell_fills(table, page)
     text_blocks = filter_text_blocks_outside_tables(text_blocks, vector_result.absorbed_text_block_ids)
 
+    # P2 layout analysis: group lines, bullets, titles, figures; skip headers/footers.
+    if layout_engine is None:
+        layout_engine = LayoutEngine(
+            engine=str(getattr(options, "layout_engine", "heuristic")),
+            model_root=getattr(options, "layout_model_root", None) or options.ocr_model_root,
+            skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
+        )
+    layout_image = ocr_reference_image
+    if layout_image is None and layout_engine.requested_engine == "ppstructure":
+        layout_render_started_at = perf_counter()
+        layout_image = render_page_image(page, dpi=render_dpi)
+        if page_image is None:
+            page_image = layout_image
+        background_render_seconds += perf_counter() - layout_render_started_at
+    text_blocks = split_wide_multiline_blocks(text_blocks, page_width=float(page.rect.width))
+    layout_page = layout_engine.analyze(
+        layout_image,
+        page_width=float(page.rect.width),
+        page_height=float(page.rect.height),
+        text_blocks=text_blocks,
+        page_number=page_number,
+        shape_bboxes=[shape.bbox for shape in vector_result.shapes],
+        table_bboxes=[table.bbox for table in vector_result.tables],
+    )
+    layout_applied = apply_layout_to_page(
+        text_blocks,
+        layout_page,
+        page_width=float(page.rect.width),
+        page_height=float(page.rect.height),
+        page_image=layout_image,
+        table_elements=vector_result.tables,
+        shape_elements=vector_result.shapes,
+        skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
+        page_number=page_number,
+    )
+    text_blocks = layout_applied.text_blocks
+    layout_figure_images = list(layout_applied.figure_images)
+
     has_remaining_visuals = remaining_visuals_after_nativization(
         image_boxes=image_boxes,
         drawing_count=signals.drawing_count,
@@ -359,8 +410,10 @@ def analyze_page(
     background_inpaint_engine: str | None = None
     background_inpaint_note: str | None = None
     mask_image: Any | None = None
+    background_result: BackgroundRenderResult | None = None
     if background_mode == "elements":
         image_elements = extract_image_elements(page, image_boxes, options.render_dpi)
+        image_elements = _merge_layout_figures(image_elements, layout_figure_images)
     else:
         effective_background_render_dpi = render_dpi if background_mode == "overlay" else background_render_dpi
         has_ocr_reference_image = ocr_reference_image is not None
@@ -439,6 +492,29 @@ def analyze_page(
                 note = background_inpaint_note or ""
                 erase_note = f"erased {len(erase_regions)} nativized vector/table region(s)"
                 background_inpaint_note = f"{note}; {erase_note}".strip("; ")
+        if layout_figure_images or layout_applied.regions:
+            # Re-crop figures from the text-erased raster so OCR labels aren't
+            # doubled under editable text boxes (scanned_vector_shapes).
+            if background_mode == "overlay" and layout_applied.regions:
+                layout_figure_images = extract_figure_image_placements(
+                    layout_applied.regions,
+                    page_image=background_image,
+                    page_width=float(page.rect.width),
+                    page_height=float(page.rect.height),
+                    shape_elements=vector_result.shapes,
+                    table_elements=vector_result.tables,
+                )
+            if layout_figure_images:
+                image_elements = _merge_layout_figures(image_elements, layout_figure_images)
+                figure_erase = [placement.bbox for placement in layout_figure_images]
+                if figure_erase and background_mode == "overlay":
+                    background_image = erase_regions_from_image(
+                        background_image,
+                        figure_erase,
+                        page_width=float(page.rect.width),
+                        page_height=float(page.rect.height),
+                        fill_color=resolve_erase_fill_color(vector_result.shapes, background_image),
+                    )
         background_encode_started_at = perf_counter()
         background_image_format = options.background_image_format
         if background_mode == "overlay":
@@ -472,7 +548,11 @@ def analyze_page(
             page_rect=page.rect,
             engine_name=background_inpaint_engine,
             engine_note=background_inpaint_note,
-            extra_images=background_result.debug_images if background_mode == "overlay" else None,
+            extra_images=(
+                background_result.debug_images
+                if background_mode == "overlay" and background_result is not None
+                else None
+            ),
         )
         write_text_fit_debug_report(
             debug_dir=options.debug_dir,
@@ -512,9 +592,40 @@ def analyze_page(
         image_elements=image_elements,
         shape_elements=vector_result.shapes if emit_native else [],
         table_elements=vector_result.tables if emit_native else [],
+        layout_regions=layout_applied.regions if emit_native else [],
         vector_mode=str(getattr(options, "vector_mode", "auto")),
         vector_fallback_reason=vector_result.fallback_reason,
+        layout_engine=layout_applied.engine,
+        layout_fallback_reason=layout_applied.fallback_reason,
     )
+
+
+def _merge_layout_figures(
+    existing: list[ImagePlacement],
+    layout_figures: list[ImagePlacement],
+) -> list[ImagePlacement]:
+    """Append layout-cropped figures that do not heavily overlap existing images."""
+
+    if not layout_figures:
+        return existing
+    merged = list(existing)
+    for figure in layout_figures:
+        overlaps = False
+        for prior in merged:
+            inter = max(
+                0.0,
+                min(figure.bbox[2], prior.bbox[2]) - max(figure.bbox[0], prior.bbox[0]),
+            ) * max(
+                0.0,
+                min(figure.bbox[3], prior.bbox[3]) - max(figure.bbox[1], prior.bbox[1]),
+            )
+            figure_area = max(1.0, (figure.bbox[2] - figure.bbox[0]) * (figure.bbox[3] - figure.bbox[1]))
+            if inter / figure_area >= 0.6:
+                overlaps = True
+                break
+        if not overlaps:
+            merged.append(figure)
+    return merged
 
 
 def prepare_batched_ocr_page_data(

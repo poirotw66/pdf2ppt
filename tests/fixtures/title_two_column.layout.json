@@ -1,0 +1,24 @@
+{
+  "page_number": 1,
+  "expect_title": true,
+  "paragraphs": [
+    {
+      "id": "title",
+      "bbox": [60, 40, 900, 100],
+      "text": "Platform Overview",
+      "role": "title"
+    },
+    {
+      "id": "left",
+      "bbox": [60, 140, 450, 460],
+      "text": "Left column covers ingestion",
+      "role": "body"
+    },
+    {
+      "id": "right",
+      "bbox": [510, 140, 900, 460],
+      "text": "Right column covers native rendering",
+      "role": "body"
+    }
+  ]
+}

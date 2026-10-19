@@ -331,8 +331,7 @@ class TableStyleAndSchemaTests(unittest.TestCase):
         self.assertTrue(all(cell.font_color for cell in page.table_elements[0].cells))
 
         presentation = Presentation(str(pptx_path))
-        table = presentation.slides[0].shapes[1].table  # page bg shape then table (or reverse)
-        # Find the table shape regardless of z-order.
+        # Find the table shape regardless of z-order / title-placeholder layout.
         table = next(shape.table for shape in presentation.slides[0].shapes if shape.has_table)
         self.assertFalse(table.first_row)
         self.assertFalse(table.horz_banding)
