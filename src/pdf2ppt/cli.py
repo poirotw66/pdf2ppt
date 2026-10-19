@@ -310,9 +310,32 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=4.0,
         help=(
-            "If the generative patch's heavily-blurred masked MAE versus opencv-fast "
-            "exceeds this value (0-255), reject the patch and fall back locally. "
-            "Set a negative value to disable."
+            "Base low-frequency MAE gate vs opencv-fast (0-255). Scaled up on "
+            "textured surroundings and skipped when the outside ring is highly "
+            "textured. Set negative to disable. Flat rings skip the API entirely."
+        ),
+    )
+    parser.add_argument(
+        "--generative-flat-ring-luma-std",
+        type=float,
+        default=4.0,
+        help=(
+            "When the outside-mask ring luma std is at or below this value, skip the "
+            "generative API and use opencv-fast (smooth backgrounds)."
+        ),
+    )
+    parser.add_argument(
+        "--no-generative-skip-flat-ring",
+        action="store_true",
+        help="Always call the generative API even when the outside ring is flat.",
+    )
+    parser.add_argument(
+        "--generative-textured-ring-luma-std",
+        type=float,
+        default=16.0,
+        help=(
+            "Outside-ring luma std at/above this disables the low-frequency MAE gate "
+            "(photo / textured pages where generative is preferred)."
         ),
     )
     parser.add_argument(
@@ -321,7 +344,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help=(
             "Retry count for nondeterministic copyright/recitation (and similar) "
-            "safety blocks before falling back to opencv-fast. Blocked attempts are free."
+            "safety blocks before falling back to opencv-fast. Blocked attempts are free "
+            "and do not consume --generative-max-calls."
+        ),
+    )
+    parser.add_argument(
+        "--generative-max-attempts",
+        type=int,
+        default=None,
+        help=(
+            "Hard cap on total provider attempts including free safety blocks. "
+            "Defaults to 3× --generative-max-calls."
         ),
     )
     parser.add_argument(
@@ -384,7 +417,11 @@ def main(argv: list[str] | None = None) -> int:
         generative_timeout_s=args.generative_timeout_s,
         generative_verify_ocr=not args.no_generative_verify_ocr,
         generative_low_freq_mae_threshold=args.generative_low_freq_mae_threshold,
+        generative_skip_flat_ring=not args.no_generative_skip_flat_ring,
+        generative_flat_ring_luma_std=args.generative_flat_ring_luma_std,
+        generative_textured_ring_luma_std=args.generative_textured_ring_luma_std,
         generative_safety_block_retries=args.generative_safety_block_retries,
+        generative_max_attempts=args.generative_max_attempts,
     )
     report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
     print(

@@ -1004,6 +1004,7 @@ def resolve_background_inpainting_engine(
             budget = GenerativeBudget(
                 max_calls=options.generative_max_calls,
                 max_cost_usd=options.generative_max_cost_usd,
+                max_attempts=options.generative_max_attempts,
             )
             options.generative_budget = budget
         engine = GenerativeInpaintingEngine(
@@ -1019,6 +1020,10 @@ def resolve_background_inpainting_engine(
             budget=budget,
             low_freq_mae_threshold=options.generative_low_freq_mae_threshold,
             safety_block_retries=options.generative_safety_block_retries,
+            skip_flat_ring=options.generative_skip_flat_ring,
+            flat_ring_luma_std=options.generative_flat_ring_luma_std,
+            textured_ring_luma_std=options.generative_textured_ring_luma_std,
+            max_attempts=options.generative_max_attempts,
         )
         if not engine.is_configured():
             # Explicit generative request without credentials: soft-degrade to the

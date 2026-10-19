@@ -24,9 +24,15 @@ from ..inpainting_engines.patching import (
     _should_use_lama_patch_inpaint,
 )
 from .blend import (
+    DEFAULT_CONTEXT_RING_PX,
+    DEFAULT_FLAT_RING_LUMA_STD,
     DEFAULT_LOW_FREQ_BLUR_SIGMA,
     DEFAULT_LOW_FREQ_MAE_THRESHOLD,
+    DEFAULT_LOW_FREQ_STD_SCALE_REF,
+    DEFAULT_TEXTURED_RING_LUMA_STD,
     GENERATIVE_COMPOSITE_EDGE_FEATHER_PX,
+    context_ring_luma_std,
+    effective_low_freq_mae_threshold,
     low_frequency_masked_mae,
     seamless_clone_masked_edit,
 )
@@ -126,6 +132,12 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         low_freq_mae_threshold: float = DEFAULT_LOW_FREQ_MAE_THRESHOLD,
         low_freq_blur_sigma: float = DEFAULT_LOW_FREQ_BLUR_SIGMA,
         safety_block_retries: int = DEFAULT_SAFETY_BLOCK_RETRIES,
+        skip_flat_ring: bool = True,
+        flat_ring_luma_std: float = DEFAULT_FLAT_RING_LUMA_STD,
+        textured_ring_luma_std: float = DEFAULT_TEXTURED_RING_LUMA_STD,
+        low_freq_std_scale_ref: float = DEFAULT_LOW_FREQ_STD_SCALE_REF,
+        context_ring_px: int = DEFAULT_CONTEXT_RING_PX,
+        max_attempts: int | None = None,
     ) -> None:
         resolved_provider: GenerativeImageEditProvider
         if isinstance(provider, str):
@@ -145,7 +157,11 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         resolved_model = model or configured or self._provider.default_model
         self._model: str = str(resolved_model)
         self._cache = GenerativeInpaintCache(cache_dir)
-        self._budget = budget or GenerativeBudget(max_calls=max_calls, max_cost_usd=max_cost_usd)
+        self._budget = budget or GenerativeBudget(
+            max_calls=max_calls,
+            max_cost_usd=max_cost_usd,
+            max_attempts=max_attempts,
+        )
         self._verify_ocr = verify_ocr
         self._residual_checker = residual_checker
         self._prompt = prompt or DEFAULT_TEXT_REMOVAL_PROMPT
@@ -155,6 +171,11 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         self._low_freq_mae_threshold = float(low_freq_mae_threshold)
         self._low_freq_blur_sigma = float(low_freq_blur_sigma)
         self._safety_block_retries = max(0, int(safety_block_retries))
+        self._skip_flat_ring = bool(skip_flat_ring)
+        self._flat_ring_luma_std = float(flat_ring_luma_std)
+        self._textured_ring_luma_std = float(textured_ring_luma_std)
+        self._low_freq_std_scale_ref = float(low_freq_std_scale_ref)
+        self._context_ring_px = max(1, int(context_ring_px))
 
     @property
     def budget(self) -> GenerativeBudget:
@@ -310,7 +331,8 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         note = (
             f"generative patch-mode groups={len(patch_groups)} "
             f"generative={generative_count} fallback={fallback_count} "
-            f"budget_calls={self._budget.calls}/{self._budget.max_calls} "
+            f"budget_billed={self._budget.billed_calls}/{self._budget.max_calls} "
+            f"attempts={self._budget.attempts}/{self._budget.resolved_max_attempts} "
             f"est_cost_usd={self._budget.estimated_cost_usd:.4f}"
         )
         return result, note
@@ -322,6 +344,20 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
     ) -> tuple[np.ndarray, str]:
         crop_image = Image.fromarray(crop_source, mode="RGB")
         mask_image = Image.fromarray(crop_mask, mode="L")
+        ring_std = context_ring_luma_std(
+            crop_source,
+            crop_mask,
+            ring_px=self._context_ring_px,
+        )
+        # Flat surroundings: opencv-fast is more accurate and free — skip the API.
+        if self._skip_flat_ring and ring_std <= self._flat_ring_luma_std:
+            self._budget.record_fallback(
+                f"flat context ring (luma std {ring_std:.2f} <= "
+                f"{self._flat_ring_luma_std:.2f}); skipped generative API",
+                kind="flat_ring",
+            )
+            return self._local_inpaint(crop_source, crop_mask), "local-flat-ring"
+
         estimate = self._provider.estimate_cost_usd(
             model=self._model,
             width=crop_image.width,
@@ -354,16 +390,13 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
                 crop_mask,
                 composited,
                 mask_image,
+                ring_luma_std=ring_std,
             )
             if accepted is not None:
                 return accepted, "generative-cache"
             if reject_path is not None:
                 return reject_path
             self._budget.record_fallback("cache rejected by OCR safety", kind="cache_reject")
-
-        if not self._budget.can_afford(estimate):
-            self._budget.record_fallback("budget exhausted", kind="budget")
-            return self._local_inpaint(crop_source, crop_mask), "local-budget"
 
         request = GenerativeEditRequest(
             image=crop_image,
@@ -375,6 +408,9 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         last_error: GenerativeProviderError | None = None
         attempts = 1 + self._safety_block_retries
         for attempt in range(attempts):
+            if not self._budget.can_afford(estimate):
+                self._budget.record_fallback("budget exhausted", kind="budget")
+                return self._local_inpaint(crop_source, crop_mask), "local-budget"
             try:
                 edit_result = self._provider.edit(request)
                 last_error = None
@@ -423,6 +459,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
             crop_mask,
             composited,
             mask_image,
+            ring_luma_std=ring_std,
         )
         if accepted is not None:
             self._cache.put(cache_key, edit_result.image.convert("RGB"))
@@ -438,6 +475,8 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         crop_mask: np.ndarray,
         composited: Image.Image,
         mask_image: Image.Image,
+        *,
+        ring_luma_std: float,
     ) -> tuple[np.ndarray | None, tuple[np.ndarray, str] | None]:
         """Return (accepted_rgb, None), (None, fallback_path), or (None, None) for OCR reject."""
 
@@ -445,17 +484,24 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
             return None, None
         local_rgb = self._local_inpaint(crop_source, crop_mask)
         generative_rgb = np.array(composited, dtype=np.uint8)
-        if self._low_freq_mae_threshold >= 0:
+        effective = effective_low_freq_mae_threshold(
+            self._low_freq_mae_threshold,
+            ring_luma_std,
+            textured_std=self._textured_ring_luma_std,
+            scale_ref_std=self._low_freq_std_scale_ref,
+        )
+        if effective is not None:
             mae = low_frequency_masked_mae(
                 generative_rgb,
                 local_rgb,
                 crop_mask,
                 blur_sigma=self._low_freq_blur_sigma,
             )
-            if mae > self._low_freq_mae_threshold:
+            if mae > effective:
                 self._budget.record_fallback(
                     f"low-frequency MAE {mae:.2f} exceeded threshold "
-                    f"{self._low_freq_mae_threshold:.2f}",
+                    f"{effective:.2f} (base {self._low_freq_mae_threshold:.2f}, "
+                    f"ring_std {ring_luma_std:.2f})",
                     kind="low_freq",
                 )
                 return None, (local_rgb, "local-low-freq")

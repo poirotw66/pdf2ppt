@@ -6,16 +6,75 @@ import logging
 
 import cv2
 import numpy as np
-from PIL import Image
 
 from ..inpainting_engines.compositing import _composite_lama_restoration_with_inference_mask
-from ..inpainting_masks import estimate_low_texture_mask_fraction
 
 logger = logging.getLogger(__name__)
 
 GENERATIVE_COMPOSITE_EDGE_FEATHER_PX = 3
 DEFAULT_LOW_FREQ_BLUR_SIGMA = 12.0
 DEFAULT_LOW_FREQ_MAE_THRESHOLD = 4.0
+# Surrounding-ring luma std at or below this → treat as flat (skip generative API).
+DEFAULT_FLAT_RING_LUMA_STD = 4.0
+DEFAULT_CONTEXT_RING_PX = 8
+# When ring std reaches this, skip the low-freq gate (photo / textured pages).
+DEFAULT_TEXTURED_RING_LUMA_STD = 16.0
+# Scale low-freq threshold as max(1, ring_std / this) when between flat and textured.
+DEFAULT_LOW_FREQ_STD_SCALE_REF = 4.0
+
+
+def context_ring_mask(
+    mask_array: np.ndarray,
+    *,
+    ring_px: int = DEFAULT_CONTEXT_RING_PX,
+) -> np.ndarray:
+    """Boolean ring just outside the mask (destination context for routing)."""
+
+    binary = (mask_array > 0).astype(np.uint8)
+    if not np.any(binary) or ring_px <= 0:
+        return np.zeros(binary.shape, dtype=bool)
+    kernel = np.ones((ring_px * 2 + 1, ring_px * 2 + 1), dtype=np.uint8)
+    dilated = cv2.dilate(binary, kernel, iterations=1)
+    return (dilated > 0) & (binary == 0)
+
+
+def context_ring_luma_std(
+    source_rgb: np.ndarray,
+    mask_array: np.ndarray,
+    *,
+    ring_px: int = DEFAULT_CONTEXT_RING_PX,
+) -> float:
+    """Luma standard deviation on the outside ring around the mask."""
+
+    ring = context_ring_mask(mask_array, ring_px=ring_px)
+    if not np.any(ring):
+        return 0.0
+    gray = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    return float(np.std(gray[ring]))
+
+
+def effective_low_freq_mae_threshold(
+    base_threshold: float,
+    ring_luma_std: float,
+    *,
+    textured_std: float = DEFAULT_TEXTURED_RING_LUMA_STD,
+    scale_ref_std: float = DEFAULT_LOW_FREQ_STD_SCALE_REF,
+) -> float | None:
+    """Return the effective low-freq MAE threshold, or ``None`` to skip the gate.
+
+    Flat/near-flat surroundings keep the base threshold. Highly textured rings
+    (photo backgrounds) disable the gate so generative fills are not rejected for
+    differing high-frequency content. Mid-range std scales the threshold up.
+    """
+
+    if base_threshold < 0:
+        return None
+    if ring_luma_std >= textured_std:
+        return None
+    if scale_ref_std <= 0:
+        return base_threshold
+    scale = max(1.0, ring_luma_std / scale_ref_std)
+    return float(base_threshold) * scale
 
 
 def low_frequency_masked_mae(
@@ -55,9 +114,9 @@ def seamless_clone_masked_edit(
 ) -> np.ndarray:
     """Poisson-blend ``edited_rgb`` into ``source_rgb`` through ``mask_array``.
 
-    Uses ``cv2.seamlessClone`` (NORMAL_CLONE on low-texture masks, MIXED_CLONE
-    otherwise). Falls back to distance-feather compositing when OpenCV rejects
-    the clone (e.g. mask touching the crop border with no interior).
+    Defaults to ``NORMAL_CLONE``. ``MIXED_CLONE`` must not be auto-selected from
+    the original (text-filled) crop: it keeps the stronger of source/destination
+    gradients and pulls glyph edges back into a clean generative fill.
     """
 
     if source_rgb.shape != edited_rgb.shape:
@@ -69,10 +128,7 @@ def seamless_clone_masked_edit(
         return source_rgb.copy()
 
     if clone_mode is None:
-        source_image = Image.fromarray(source_rgb, mode="RGB")
-        mask_image = Image.fromarray(binary * 255, mode="L")
-        low_texture = estimate_low_texture_mask_fraction(source_image, mask_image)
-        clone_mode = cv2.NORMAL_CLONE if low_texture >= 0.75 else cv2.MIXED_CLONE
+        clone_mode = cv2.NORMAL_CLONE
 
     # seamlessClone is unstable when the mask touches the image border; inset by
     # 1px when possible so the solver has a valid exterior ring.
@@ -127,9 +183,16 @@ def seamless_clone_masked_edit(
 
 
 __all__ = [
+    "DEFAULT_CONTEXT_RING_PX",
+    "DEFAULT_FLAT_RING_LUMA_STD",
     "DEFAULT_LOW_FREQ_BLUR_SIGMA",
     "DEFAULT_LOW_FREQ_MAE_THRESHOLD",
+    "DEFAULT_LOW_FREQ_STD_SCALE_REF",
+    "DEFAULT_TEXTURED_RING_LUMA_STD",
     "GENERATIVE_COMPOSITE_EDGE_FEATHER_PX",
+    "context_ring_luma_std",
+    "context_ring_mask",
+    "effective_low_freq_mae_threshold",
     "low_frequency_masked_mae",
     "seamless_clone_masked_edit",
 ]

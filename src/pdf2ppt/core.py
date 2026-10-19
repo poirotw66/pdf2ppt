@@ -89,9 +89,17 @@ class ConversionOptions:
     generative_verify_ocr: bool = True
     # Reject generative patches whose low-frequency content differs from the
     # local opencv-fast result by more than this masked MAE (0–255). Set <0 to disable.
+    # On textured surroundings the threshold is scaled up / skipped.
     generative_low_freq_mae_threshold: float = 4.0
+    # When the outside ring is this flat (luma std), skip the generative API entirely.
+    generative_skip_flat_ring: bool = True
+    generative_flat_ring_luma_std: float = 4.0
+    # Ring luma std at/above this disables the low-freq gate (photo textures).
+    generative_textured_ring_luma_std: float = 16.0
     # Retry once on nondeterministic copyright/recitation blocks before local fallback.
     generative_safety_block_retries: int = 1
+    # Cap on total provider attempts including free safety blocks (None → 3× max_calls).
+    generative_max_attempts: int | None = None
     generative_budget: Any | None = field(default=None, repr=False)
     generative_residual_checker: Any | None = field(default=None, repr=False)
 

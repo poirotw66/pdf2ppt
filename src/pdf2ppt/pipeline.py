@@ -139,6 +139,7 @@ def convert_pdf(
             options.generative_budget = GenerativeBudget(
                 max_calls=options.generative_max_calls,
                 max_cost_usd=options.generative_max_cost_usd,
+                max_attempts=options.generative_max_attempts,
             )
         if options.generative_verify_ocr and options.generative_residual_checker is None:
             options.generative_residual_checker = build_ocr_residual_checker(ocr_engine)

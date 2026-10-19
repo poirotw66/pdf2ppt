@@ -67,14 +67,21 @@ staying on a single full-page call). This applies to **all** inpaint engines.
 
 ### Poisson blending and low-frequency fallback
 
-Generative patches are composited with `cv2.seamlessClone` (NORMAL_CLONE on
-low-texture masks, MIXED_CLONE otherwise) instead of a single mean color match
-on a 4px ring. After compositing, pdf2ppt compares a **heavily blurred**
-generative result to the local `opencv-fast` fill inside the mask. If that
-low-frequency MAE exceeds `--generative-low-freq-mae-threshold` (default
-**4.0** on a 0–255 scale; set negative to disable), the generative patch is
-rejected and the opencv-fast result is kept. The conversion report records
-these under `low_freq_fallbacks`.
+Generative patches are composited with `cv2.seamlessClone` using
+**`NORMAL_CLONE`** (not `MIXED_CLONE`). Mixed mode keeps the stronger of
+source/destination gradients and was pulling original glyph edges back into
+clean generative fills, which then failed the OCR residual check. After
+compositing, pdf2ppt applies a **texture-aware** low-frequency gate:
+
+- If the **outside ring** around the mask is flat (luma std ≤
+  `--generative-flat-ring-luma-std`, default **4.0**), the generative API is
+  **skipped entirely** and opencv-fast is used (`flat_ring_skips` in the report).
+  Smooth slides are where classic inpainting already wins — no spend.
+- On mid-range rings the base `--generative-low-freq-mae-threshold` (default
+  **4.0**) is scaled up by surrounding variance.
+- On highly textured rings (luma std ≥
+  `--generative-textured-ring-luma-std`, default **16.0**) the low-freq gate is
+  skipped so photo backgrounds are not rejected for high-frequency mismatch.
 
 ## Safety, budget, and cache
 
@@ -89,18 +96,23 @@ After each generative patch:
   not API outages. Because these blocks are nondeterministic, pdf2ppt **retries
   once** by default (`--generative-safety-block-retries`, default 1) before
   falling back. Official responses that say the request is not charged are
-  recorded at **0 USD**; retries are counted in `safety_block_retries`.
-- **Low-frequency quality gate** (above) can also fall back to opencv-fast.
+  recorded at **0 USD**; retries are counted in `safety_block_retries` and
+  **do not consume** `--generative-max-calls` (only billed calls do).
+- **Flat-ring skip** and **low-frequency quality gate** (above) can also fall
+  back to opencv-fast.
 - Local fallback results are **re-composited through the mask** so unmasked
   pixels stay unchanged even when `opencv-fast` would otherwise touch them.
-- **Per-run budget**: `--generative-max-calls` (default 50) and
-  `--generative-max-cost-usd` (default 5.0). Further patches fall back locally.
+- **Per-run budget**: `--generative-max-calls` (default 50) counts **billed**
+  calls only; `--generative-max-attempts` (default 3× max_calls) caps total
+  provider attempts including free safety blocks; `--generative-max-cost-usd`
+  (default 5.0) caps estimated USD.
 - **Disk cache**: keyed by `sha256(provider + model + prompt + image + mask)` under
   `--generative-cache-dir` (default `.pdf2ppt_cache/generative_inpaint`).
 
-Call counts, cache hits, fallbacks (`safety_block_fallbacks`,
-`api_error_fallbacks`, `low_freq_fallbacks`), `safety_block_retries`, estimated
-USD cost, and `cost_uncertain` are written into the conversion report under
+Call counts (`billed_calls` / `attempts`), cache hits, fallbacks
+(`safety_block_fallbacks`, `api_error_fallbacks`, `low_freq_fallbacks`,
+`flat_ring_skips`), `safety_block_retries`, estimated USD cost, and
+`cost_uncertain` are written into the conversion report under
 `generative_inpaint`.
 
 ## Cost and non-determinism
