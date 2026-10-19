@@ -44,6 +44,9 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
   mode (no full-page raster).
 - Otherwise → `overlay` / `full-page` as today, but nativized shape/table regions
   are solid-filled out of the background so they are not duplicated.
+- Translucent solid fills are **un-composited** from the raster
+  (`bg = (pix − α·fill) / (1 − α)`) before the native shape is drawn, so
+  caption boxes over photos are not darkened twice.
 - `--vector-mode off` restores the pre-P1 path exactly for regression.
 
 ## CLI / API

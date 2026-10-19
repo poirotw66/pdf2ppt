@@ -193,7 +193,19 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
         ppt_cell = ppt_table.cell(cell.row, cell.col)
         # Borders before fills so tcPr child order matches ECMA-376.
         if table.border_color:
-            _set_cell_borders(ppt_cell, table.border_color, table.border_width or 1.0)
+            _set_cell_borders(
+                ppt_cell,
+                table.border_color,
+                table.border_width or 1.0,
+                row=cell.row,
+                col=cell.col,
+                row_count=table.row_count,
+                col_count=table.col_count,
+                rowspan=cell.rowspan,
+                colspan=cell.colspan,
+                outer_width=table.outer_border_width,
+                inner_width=table.inner_border_width,
+            )
         if cell.fill_color:
             try:
                 ppt_cell.fill.solid()
@@ -219,6 +231,8 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
                 except ValueError:
                     run.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A)
                 run.font.bold = cell.bold
+                if cell.font_name:
+                    run.font.name = cell.font_name
 
 
 def apply_shape_style(shape: Any, element: ShapeElement) -> None:
@@ -291,8 +305,21 @@ def _set_line_alpha(shape: Any, opacity: float) -> None:
         logger.debug("Could not set line alpha", exc_info=True)
 
 
-def _set_cell_borders(cell: Any, color_hex: str, width_pt: float) -> None:
-    """Set uniform thin borders on a table cell via OOXML.
+def _set_cell_borders(
+    cell: Any,
+    color_hex: str,
+    width_pt: float,
+    *,
+    row: int = 0,
+    col: int = 0,
+    row_count: int = 1,
+    col_count: int = 1,
+    rowspan: int = 1,
+    colspan: int = 1,
+    outer_width: float | None = None,
+    inner_width: float | None = None,
+) -> None:
+    """Set cell borders via OOXML, with optional outer vs inner rule widths.
 
     ECMA-376 ``CT_TableCellProperties`` requires borders (lnL…lnB, diagonals,
     cell3D) **before** any fill element. Inserting after an existing solidFill
@@ -302,12 +329,23 @@ def _set_cell_borders(cell: Any, color_hex: str, width_pt: float) -> None:
     try:
         tc = cell._tc  # noqa: SLF001
         tc_pr = tc.get_or_add_tcPr()
-        for edge in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
+        default = max(0.25, width_pt)
+        outer = max(0.25, outer_width) if outer_width is not None else default
+        inner = max(0.25, inner_width) if inner_width is not None else default
+        end_row = min(row_count - 1, row + max(1, rowspan) - 1)
+        end_col = min(col_count - 1, col + max(1, colspan) - 1)
+        edge_widths = {
+            "a:lnL": outer if col == 0 else inner,
+            "a:lnR": outer if end_col >= col_count - 1 else inner,
+            "a:lnT": outer if row == 0 else inner,
+            "a:lnB": outer if end_row >= row_count - 1 else inner,
+        }
+        for edge, edge_width in edge_widths.items():
             for child in list(tc_pr):
                 if child.tag == qn(edge):
                     tc_pr.remove(child)
             line = OxmlElement(edge)
-            line.set("w", str(int(round(max(0.25, width_pt) * EMU_PER_PT))))
+            line.set("w", str(int(round(edge_width * EMU_PER_PT))))
             solid = OxmlElement("a:solidFill")
             srgb = OxmlElement("a:srgbClr")
             srgb.set("val", color_hex.lstrip("#").upper())

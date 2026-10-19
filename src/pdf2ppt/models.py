@@ -78,6 +78,7 @@ class TableCell:
     fill_color: str | None = None
     font_size: float | None = None
     font_color: str | None = None
+    font_name: str | None = None
     bold: bool = False
     # "left" | "center" | "right"
     horizontal_align: str = "left"
@@ -102,6 +103,9 @@ class TableElement:
     row_heights: list[float]
     border_color: str | None = None
     border_width: float | None = None
+    # Optional distinct outer vs inner rule widths (PDF ruled tables).
+    outer_border_width: float | None = None
+    inner_border_width: float | None = None
     z_order: int = 0
     provenance: str = "native_table"
     confidence: float = 0.9

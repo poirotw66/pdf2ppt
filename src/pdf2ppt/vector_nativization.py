@@ -250,7 +250,6 @@ def extract_tables(
         return []
 
     span_index = _collect_page_spans(page)
-    border_color, border_width = _infer_table_border_style(page)
     tables: list[TableElement] = []
     for table_index, table in enumerate(getattr(finder, "tables", []) or []):
         element = _table_to_element(
@@ -259,8 +258,7 @@ def extract_tables(
             page_number=page_number,
             table_index=table_index,
             span_index=span_index,
-            border_color=border_color,
-            border_width=border_width,
+            page=page,
         )
         if element is not None:
             tables.append(element)
@@ -575,22 +573,65 @@ def _looks_like_arrow(items: list[tuple[Any, ...]], bbox: BBox) -> bool:
 
 
 def _infer_arrow_direction(points: list[tuple[float, float]], bbox: BBox) -> ArrowDirection:
-    """Pick the MSO arrow facing the sharp tip of a closed arrow polygon."""
+    """Pick the MSO arrow facing the sharp tip of a closed arrow polygon.
 
-    if len(points) < 3:
+    Along the long axis, the tip is the end with fewer vertices (typically a
+    single extreme point). Counting by distance-from-centroid fails when a
+    fat tail corner is farther from centre than the tip (vector_shapes.pdf).
+    """
+
+    unique = _unique_points(points)
+    if len(unique) < 3:
         width = bbox[2] - bbox[0]
         height = bbox[3] - bbox[1]
         return "right" if width >= height else "down"
 
-    cx = (bbox[0] + bbox[2]) / 2.0
-    cy = (bbox[1] + bbox[3]) / 2.0
-    # Tip is the vertex farthest from the bbox center along the long axis.
-    tip = max(points, key=lambda point: math.hypot(point[0] - cx, point[1] - cy))
-    dx = tip[0] - cx
-    dy = tip[1] - cy
-    if abs(dx) >= abs(dy):
-        return "right" if dx >= 0 else "left"
-    return "down" if dy >= 0 else "up"
+    width = max(1e-6, bbox[2] - bbox[0])
+    height = max(1e-6, bbox[3] - bbox[1])
+    horizontal = width >= height
+    # Band thickness for "at this end" — a few percent of the long axis.
+    band = max(2.0, (width if horizontal else height) * 0.08)
+
+    if horizontal:
+        left_count = sum(1 for x, _y in unique if abs(x - bbox[0]) <= band)
+        right_count = sum(1 for x, _y in unique if abs(x - bbox[2]) <= band)
+        if right_count < left_count:
+            return "right"
+        if left_count < right_count:
+            return "left"
+        # Tie-break: end whose extreme vertex is closer to mid-height (sharper tip).
+        mid_y = (bbox[1] + bbox[3]) / 2.0
+        left_pts = [p for p in unique if abs(p[0] - bbox[0]) <= band]
+        right_pts = [p for p in unique if abs(p[0] - bbox[2]) <= band]
+        left_score = min(abs(p[1] - mid_y) for p in left_pts) if left_pts else 1e9
+        right_score = min(abs(p[1] - mid_y) for p in right_pts) if right_pts else 1e9
+        return "right" if right_score <= left_score else "left"
+
+    top_count = sum(1 for _x, y in unique if abs(y - bbox[1]) <= band)
+    bottom_count = sum(1 for _x, y in unique if abs(y - bbox[3]) <= band)
+    if bottom_count < top_count:
+        return "down"
+    if top_count < bottom_count:
+        return "up"
+    mid_x = (bbox[0] + bbox[2]) / 2.0
+    top_pts = [p for p in unique if abs(p[1] - bbox[1]) <= band]
+    bottom_pts = [p for p in unique if abs(p[1] - bbox[3]) <= band]
+    top_score = min(abs(p[0] - mid_x) for p in top_pts) if top_pts else 1e9
+    bottom_score = min(abs(p[0] - mid_x) for p in bottom_pts) if bottom_pts else 1e9
+    return "down" if bottom_score <= top_score else "up"
+
+
+def _unique_points(
+    points: list[tuple[float, float]],
+    *,
+    tol: float = 1e-3,
+) -> list[tuple[float, float]]:
+    unique: list[tuple[float, float]] = []
+    for point in points:
+        if any(math.hypot(point[0] - other[0], point[1] - other[1]) <= tol for other in unique):
+            continue
+        unique.append(point)
+    return unique
 
 
 def _table_to_element(
@@ -600,8 +641,7 @@ def _table_to_element(
     page_number: int,
     table_index: int,
     span_index: list[dict[str, Any]],
-    border_color: str | None,
-    border_width: float | None,
+    page: fitz.Page,
 ) -> TableElement | None:
     row_count = int(getattr(table, "row_count", 0) or 0)
     col_count = int(getattr(table, "col_count", 0) or 0)
@@ -697,6 +737,7 @@ def _table_to_element(
         return None
 
     column_widths, row_heights = _estimate_table_geometry(rows, bbox, row_count, col_count)
+    border_color, border_width, outer_width, inner_width = _infer_table_border_style(page, bbox)
     return TableElement(
         id=f"table_{page_number}_{table_index}",
         bbox=bbox,
@@ -707,6 +748,8 @@ def _table_to_element(
         row_heights=row_heights,
         border_color=border_color or "#4D4D4D",
         border_width=border_width if border_width is not None else 1.0,
+        outer_border_width=outer_width,
+        inner_border_width=inner_width,
         z_order=10_000 + table_index,
         confidence=0.9,
     )
@@ -771,6 +814,7 @@ def _build_table_cell(
         fill_color=None,
         font_size=style["font_size"],
         font_color=style["font_color"],
+        font_name=style.get("font_name"),
         bold=bool(style["bold"]),
         horizontal_align=str(style["horizontal_align"]),
         vertical_anchor=str(style["vertical_anchor"]),
@@ -815,10 +859,26 @@ def _collect_page_spans(page: fitz.Page) -> list[dict[str, Any]]:
                         "text": text,
                         "size": float(span.get("size", 0.0) or 0.0),
                         "font_color": font_color,
+                        "font_name": font_name or None,
                         "bold": "bold" in font_name.lower(),
                     }
                 )
     return spans
+
+
+def map_pdf_font_to_pptx(font_name: str | None) -> str | None:
+    """Map common PDF Base-14 / CJK faces to PowerPoint-safe typefaces."""
+
+    if not font_name:
+        return None
+    lower = font_name.lower()
+    if lower.startswith("helv") or "helvetica" in lower or lower in {"arial", "sans"}:
+        return "Arial"
+    if lower.startswith("timo") or "times" in lower:
+        return "Times New Roman"
+    if lower.startswith("cour") or "courier" in lower:
+        return "Courier New"
+    return font_name
 
 
 def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict[str, Any]:
@@ -838,6 +898,7 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
         return {
             "font_size": None,
             "font_color": None,
+            "font_name": None,
             "bold": False,
             "horizontal_align": "left",
             "vertical_anchor": "middle",
@@ -845,6 +906,7 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
 
     sizes = [float(span["size"]) for span in matched if span["size"] > 0]
     colors = [span["font_color"] for span in matched if span["font_color"]]
+    fonts = [span["font_name"] for span in matched if span.get("font_name")]
     bold = any(bool(span["bold"]) for span in matched)
 
     # Union of matched span boxes for alignment heuristics.
@@ -866,31 +928,51 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
     else:
         horizontal_align = "left"
 
-    if abs(top_gap - bottom_gap) <= cell_height * 0.2:
+    # Ruled table cells are usually vertically centred; prefer middle unless
+    # the text is clearly packed against one edge.
+    if abs(top_gap - bottom_gap) <= cell_height * 0.35:
         vertical_anchor = "middle"
-    elif top_gap < bottom_gap:
+    elif top_gap + cell_height * 0.1 < bottom_gap and top_gap < cell_height * 0.12:
         vertical_anchor = "top"
-    else:
+    elif bottom_gap + cell_height * 0.1 < top_gap and bottom_gap < cell_height * 0.12:
         vertical_anchor = "bottom"
+    else:
+        vertical_anchor = "middle"
 
     return {
         "font_size": float(median(sizes)) if sizes else None,
         "font_color": Counter(colors).most_common(1)[0][0] if colors else None,
+        "font_name": map_pdf_font_to_pptx(
+            Counter(fonts).most_common(1)[0][0] if fonts else None
+        ),
         "bold": bold,
         "horizontal_align": horizontal_align,
         "vertical_anchor": vertical_anchor,
     }
 
 
-def _infer_table_border_style(page: fitz.Page) -> tuple[str | None, float | None]:
-    """Most common stroke color/width among line drawings (table rules)."""
+def _infer_table_border_style(
+    page: fitz.Page,
+    table_bbox: BBox,
+) -> tuple[str | None, float | None, float | None, float | None]:
+    """Stroke color plus outer/inner widths from ruled lines near the table."""
 
     colors: list[str] = []
-    widths: list[float] = []
+    outer_widths: list[float] = []
+    inner_widths: list[float] = []
+    all_widths: list[float] = []
     try:
         drawings = page.get_drawings()
     except Exception:  # noqa: BLE001
-        return None, None
+        return None, None, None, None
+
+    pad = 2.0
+    outer = (
+        table_bbox[0] - pad,
+        table_bbox[1] - pad,
+        table_bbox[2] + pad,
+        table_bbox[3] + pad,
+    )
     for path in drawings:
         if path.get("type") not in {"s", "fs"}:
             continue
@@ -901,14 +983,34 @@ def _infer_table_border_style(page: fitz.Page) -> tuple[str | None, float | None
         width = path.get("width")
         if color is None or width is None:
             continue
-        # Prefer thin ruled lines over thick decorative strokes.
-        if float(width) > 4.0:
+        width_f = float(width)
+        if width_f > 4.0:
+            continue
+        rect = path.get("rect")
+        if rect is None:
+            continue
+        line_bbox = _rect_to_bbox(rect)
+        if not _bbox_center_inside(line_bbox, outer, padding=pad):
             continue
         colors.append(color)
-        widths.append(float(width))
+        all_widths.append(width_f)
+        # Outer frame: segment hugs the table perimeter.
+        on_left = abs(line_bbox[0] - table_bbox[0]) <= pad and abs(line_bbox[2] - table_bbox[0]) <= pad
+        on_right = abs(line_bbox[0] - table_bbox[2]) <= pad and abs(line_bbox[2] - table_bbox[2]) <= pad
+        on_top = abs(line_bbox[1] - table_bbox[1]) <= pad and abs(line_bbox[3] - table_bbox[1]) <= pad
+        on_bottom = abs(line_bbox[1] - table_bbox[3]) <= pad and abs(line_bbox[3] - table_bbox[3]) <= pad
+        if on_left or on_right or on_top or on_bottom:
+            outer_widths.append(width_f)
+        else:
+            inner_widths.append(width_f)
+
     if not colors:
-        return None, None
-    return Counter(colors).most_common(1)[0][0], float(median(widths))
+        return None, None, None, None
+    border_color = Counter(colors).most_common(1)[0][0]
+    border_width = float(median(all_widths))
+    outer_width = float(median(outer_widths)) if outer_widths else border_width
+    inner_width = float(median(inner_widths)) if inner_widths else border_width
+    return border_color, border_width, outer_width, inner_width
 
 
 def _estimate_table_geometry(

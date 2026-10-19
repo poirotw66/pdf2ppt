@@ -105,6 +105,66 @@ class ShapeExtractionTests(unittest.TestCase):
         self.assertIn("line", kinds)
         self.assertTrue({"ellipse", "round_rect", "arrow", "polygon", "freeform"} & kinds)
 
+    @unittest.skipUnless((FIXTURES_DIR / "vector_shapes.pdf").exists(), "fixture missing")
+    def test_vector_shapes_arrow_points_right(self) -> None:
+        # Fat tail corner is farther from centroid than the tip; tip must still
+        # be the long-axis end with fewer vertices (right), not left.
+        with fitz.open(FIXTURES_DIR / "vector_shapes.pdf") as document:
+            page = document[0]
+            result = extract_vector_content(page, [], vector_mode="auto", page_kind="digital")
+        arrows = [shape for shape in result.shapes if shape.kind == "arrow"]
+        self.assertEqual(len(arrows), 1)
+        self.assertEqual(arrows[0].arrow_direction, "right")
+
+
+class ArrowDirectionTests(unittest.TestCase):
+    def test_synthetic_cardinal_arrows(self) -> None:
+        from pdf2ppt.vector_nativization import _infer_arrow_direction
+
+        right = [
+            (320, 340),
+            (480, 340),
+            (480, 310),
+            (560, 370),
+            (480, 430),
+            (480, 400),
+            (320, 400),
+        ]
+        self.assertEqual(_infer_arrow_direction(right, (320, 310, 560, 430)), "right")
+
+        left = [
+            (560, 340),
+            (400, 340),
+            (400, 310),
+            (320, 370),
+            (400, 430),
+            (400, 400),
+            (560, 400),
+        ]
+        self.assertEqual(_infer_arrow_direction(left, (320, 310, 560, 430)), "left")
+
+        up = [
+            (340, 400),
+            (340, 280),
+            (310, 280),
+            (370, 200),
+            (430, 280),
+            (400, 280),
+            (400, 400),
+        ]
+        self.assertEqual(_infer_arrow_direction(up, (310, 200, 430, 400)), "up")
+
+        down = [
+            (340, 200),
+            (340, 320),
+            (310, 320),
+            (370, 400),
+            (430, 320),
+            (400, 320),
+            (400, 200),
+        ]
+        self.assertEqual(_infer_arrow_direction(down, (310, 200, 430, 400)), "down")
+
 
 class TableExtractionTests(unittest.TestCase):
     @unittest.skipUnless((FIXTURES_DIR / "table.pdf").exists(), "fixture missing")
@@ -311,6 +371,31 @@ class TableStyleAndSchemaTests(unittest.TestCase):
         header = next(cell for cell in table.cells if cell.colspan > 1 or "Combined" in cell.text)
         self.assertEqual(header.horizontal_align, "center")
 
+    @unittest.skipUnless((FIXTURES_DIR / "merged_table.pdf").exists(), "fixture missing")
+    def test_merged_table_outer_inner_border_widths_and_font(self) -> None:
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.ppt_render import EMU_PER_PT
+
+        pptx_path, report = _convert("merged_table")
+        table = report.pages[0].table_elements[0]
+        self.assertAlmostEqual(table.outer_border_width or 0.0, 1.5, places=2)
+        self.assertAlmostEqual(table.inner_border_width or 0.0, 1.0, places=2)
+        self.assertTrue(all(cell.font_name == "Arial" for cell in table.cells if cell.text.strip()))
+        self.assertTrue(any(cell.vertical_anchor == "middle" for cell in table.cells if cell.text.strip()))
+
+        presentation = Presentation(str(pptx_path))
+        ppt_table = next(shape for shape in presentation.slides[0].shapes if shape.has_table).table
+        corner = ppt_table.cell(0, 0)._tc.tcPr  # noqa: SLF001
+        ln_l = next(child for child in corner if child.tag == qn("a:lnL"))
+        self.assertEqual(int(ln_l.get("w")), int(round(1.5 * EMU_PER_PT)))
+        # Interior edge of a non-corner cell should use the thinner rule.
+        body = ppt_table.cell(1, 1)._tc.tcPr  # noqa: SLF001
+        ln_t = next(child for child in body if child.tag == qn("a:lnT"))
+        self.assertEqual(int(ln_t.get("w")), int(round(1.0 * EMU_PER_PT)))
+        run = ppt_table.cell(0, 0).text_frame.paragraphs[0].runs[0]
+        self.assertEqual(run.font.name, "Arial")
+
 
 class ShadowClearingTests(unittest.TestCase):
     @unittest.skipUnless((FIXTURES_DIR / "vector_shapes.pdf").exists(), "fixture missing")
@@ -367,17 +452,54 @@ class TransparentEraseTests(unittest.TestCase):
         )
         self.assertEqual(regions, [])
 
+    def test_uncomposite_restores_pre_tint_luma(self) -> None:
+        import numpy as np
+        from PIL import Image
+
+        from pdf2ppt.background_erase import uncomposite_translucent_shapes_from_image
+        from pdf2ppt.models import ShapeElement
+
+        # Synthetic: true bg luma 100, black @ 35% → composited luma 65.
+        true_bg = np.full((40, 80, 3), 100, dtype=np.uint8)
+        alpha = 0.35
+        composited = np.clip(
+            ((1.0 - alpha) * true_bg.astype(np.float32) + alpha * 0.0).round(),
+            0,
+            255,
+        ).astype(np.uint8)
+        image = Image.fromarray(composited, mode="RGB")
+        shape = ShapeElement(
+            id="cap",
+            kind="rect",
+            bbox=(10, 5, 70, 35),
+            fill_color="#000000",
+            fill_opacity=alpha,
+        )
+        restored = uncomposite_translucent_shapes_from_image(
+            image,
+            [shape],
+            page_width=80.0,
+            page_height=40.0,
+        )
+        patch = np.asarray(restored)[8:32, 15:65]
+        self.assertAlmostEqual(float(patch.mean()), 100.0, delta=1.5)
+
     @unittest.skipUnless((FIXTURES_DIR / "photo_texture.pdf").exists(), "fixture missing")
     def test_photo_texture_keeps_raster_under_transparent_caption(self) -> None:
-        import fitz
+        import numpy as np
 
-        from pdf2ppt.background_erase import erase_regions_from_image, regions_for_background_erase
+        from pdf2ppt.background_erase import (
+            erase_regions_from_image,
+            regions_for_background_erase,
+            uncomposite_translucent_shapes_from_image,
+        )
         from pdf2ppt.block_analysis import render_page_image
         from pdf2ppt.native_extraction import extract_native_text_blocks
         from pdf2ppt.vector_nativization import extract_vector_content
 
         # Unit-level regression without OCR: transparent caption over a photo
-        # must not be listed for solid background erase.
+        # must not be solid-erased; un-compositing peels the tint so a native
+        # 35% box can sit on top without double-darkening.
         with fitz.open(FIXTURES_DIR / "photo_texture.pdf") as document:
             page = document[0]
             text_blocks, image_boxes = extract_native_text_blocks(page)
@@ -387,27 +509,53 @@ class TransparentEraseTests(unittest.TestCase):
                 vector_mode="auto",
                 page_kind="hybrid",
             )
-            self.assertTrue(any(shape.fill_opacity < 0.99 for shape in result.shapes))
+            translucent = [shape for shape in result.shapes if shape.fill_opacity < 0.99]
+            self.assertTrue(translucent)
             erase_regions = regions_for_background_erase(
                 result.shapes,
                 [table.bbox for table in result.tables],
                 image_boxes=image_boxes,
             )
             self.assertEqual(erase_regions, [])
-            background = render_page_image(page, dpi=72)
+            original = render_page_image(page, dpi=72)
             erased = erase_regions_from_image(
-                background,
+                original,
                 erase_regions,
                 page_width=float(page.rect.width),
                 page_height=float(page.rect.height),
                 fill_color=(128, 100, 80),
             )
-            # No erase → identical pixels under the caption box.
+            # No solid erase → identical pixels under the caption box.
             cx, cy = erased.width // 3, int(erased.height * 0.72)
-            self.assertEqual(background.getpixel((cx, cy)), erased.getpixel((cx, cy)))
+            self.assertEqual(original.getpixel((cx, cy)), erased.getpixel((cx, cy)))
+
+            caption = max(translucent, key=lambda shape: (shape.bbox[2] - shape.bbox[0]))
+            restored = uncomposite_translucent_shapes_from_image(
+                original,
+                result.shapes,
+                page_width=float(page.rect.width),
+                page_height=float(page.rect.height),
+            )
+            scale_x = original.width / float(page.rect.width)
+            scale_y = original.height / float(page.rect.height)
+            left = int(caption.bbox[0] * scale_x) + 4
+            top = int(caption.bbox[1] * scale_y) + 4
+            right = int(caption.bbox[2] * scale_x) - 4
+            bottom = int(caption.bbox[3] * scale_y) - 4
+            orig_patch = np.asarray(original.convert("RGB"))[top:bottom, left:right]
+            rest_patch = np.asarray(restored.convert("RGB"))[top:bottom, left:right]
+            # After un-composite, mean luma inside the box rises toward the
+            # pre-tint photo (original composited mean is ~65.9).
+            orig_luma = float(orig_patch.mean())
+            rest_luma = float(rest_patch.mean())
+            self.assertGreater(rest_luma, orig_luma + 8.0)
+            # Re-applying the same alpha must recover the original composite luma.
+            alpha = float(caption.fill_opacity)
+            recomposed = (1.0 - alpha) * rest_patch.astype(np.float32)
+            self.assertAlmostEqual(float(recomposed.mean()), orig_luma, delta=2.0)
             # Keep a textured neighbourhood (not a flat painted region).
             patch = [
-                erased.getpixel((cx + dx, cy + dy))
+                restored.getpixel((cx + dx, cy + dy))
                 for dx in range(-6, 7)
                 for dy in range(-6, 7)
             ]

@@ -26,7 +26,12 @@ from .background import (
     resolve_background_inpainting_engine,
     write_debug_artifacts,
 )
-from .background_erase import erase_regions_from_image, regions_for_background_erase, resolve_erase_fill_color
+from .background_erase import (
+    erase_regions_from_image,
+    regions_for_background_erase,
+    resolve_erase_fill_color,
+    uncomposite_translucent_shapes_from_image,
+)
 from .block_analysis import (
     bbox_area,
     choose_background_mode,
@@ -409,6 +414,14 @@ def analyze_page(
             background_inpaint_note = background_result.note
             mask_image = background_result.mask_image
         if has_native_vectors:
+            # Peel translucent solid fills off the raster before native shapes
+            # re-apply the same alpha (avoids double-darkening caption boxes).
+            background_image = uncomposite_translucent_shapes_from_image(
+                background_image,
+                vector_result.shapes,
+                page_width=float(page.rect.width),
+                page_height=float(page.rect.height),
+            )
             erase_regions = regions_for_background_erase(
                 vector_result.shapes,
                 [table.bbox for table in vector_result.tables],

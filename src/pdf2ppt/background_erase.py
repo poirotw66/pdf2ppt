@@ -5,21 +5,26 @@ also remain baked into the page background image. For digital pages we fill thos
 regions with a solid page-background color (sampled from a page-fill shape or
 from unmasked corners) so the native objects are not duplicated.
 
-Transparent shapes and shapes that sit over embedded images are **not** erased:
-painting a solid fill under them would destroy the photo/texture underneath
-(see ``photo_texture`` regression).
+Opaque shapes that sit over embedded images are **not** solid-erased: painting a
+flat fill under them would destroy the photo/texture underneath. Translucent
+solid fills are instead **un-composited** from the raster
+(``bg = (pix - α·fill) / (1 - α)``) so a native translucent shape can sit on top
+without double-darkening (see ``photo_texture`` regression).
 """
 
 from __future__ import annotations
 
 import math
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from .models import BBox, ShapeElement
 
 # Shapes at or above this fill opacity may safely replace their raster underlay.
 OPAQUE_FILL_OPACITY = 0.99
+# Below this, un-compositing is a no-op / unstable; leave pixels alone.
+MIN_UNCOMPOSITE_OPACITY = 0.02
 # Overlap ratio vs an image box that means "this shape sits on a photo".
 IMAGE_OVERLAP_RATIO = 0.25
 
@@ -91,6 +96,59 @@ def erase_regions_from_image(
             continue
         draw.rectangle((left, top, right, bottom), fill=fill_color)
     return result
+
+
+def shape_should_uncomposite_background(shape: ShapeElement) -> bool:
+    """Whether a nativized translucent solid fill must be peeled off the raster."""
+
+    if shape.fill_color is None:
+        return False
+    if shape.fill_opacity >= OPAQUE_FILL_OPACITY:
+        return False
+    if shape.fill_opacity < MIN_UNCOMPOSITE_OPACITY:
+        return False
+    return True
+
+
+def uncomposite_translucent_shapes_from_image(
+    image: Image.Image,
+    shapes: list[ShapeElement],
+    *,
+    page_width: float,
+    page_height: float,
+    padding_px: int = 0,
+) -> Image.Image:
+    """Reverse ``out = (1-α)·bg + α·fill`` inside each translucent shape bbox.
+
+    Native PowerPoint will re-apply the same translucent fill, so the raster must
+    hold the pre-tint background. Skipping this step double-darkens caption boxes
+    over photos (photo_texture).
+    """
+
+    targets = [shape for shape in shapes if shape_should_uncomposite_background(shape)]
+    if not targets:
+        return image
+
+    result = image.convert("RGB").copy()
+    pixels = np.asarray(result, dtype=np.float32)
+    scale_x = result.width / max(page_width, 1.0)
+    scale_y = result.height / max(page_height, 1.0)
+
+    for shape in targets:
+        alpha = float(shape.fill_opacity)
+        fill_rgb = _hex_to_rgb(shape.fill_color or "#000000", default=(0, 0, 0))
+        left = max(0, int(shape.bbox[0] * scale_x) - padding_px)
+        top = max(0, int(shape.bbox[1] * scale_y) - padding_px)
+        right = min(result.width, int(math.ceil(shape.bbox[2] * scale_x)) + padding_px)
+        bottom = min(result.height, int(math.ceil(shape.bbox[3] * scale_y)) + padding_px)
+        if right <= left or bottom <= top:
+            continue
+        region = pixels[top:bottom, left:right]
+        fill = np.asarray(fill_rgb, dtype=np.float32)
+        restored = (region - alpha * fill) / max(1e-6, 1.0 - alpha)
+        pixels[top:bottom, left:right] = np.clip(restored, 0.0, 255.0)
+
+    return Image.fromarray(np.round(pixels).astype(np.uint8), mode="RGB")
 
 
 def _hex_to_rgb(color: str, *, default: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -167,4 +225,6 @@ __all__ = [
     "resolve_erase_fill_color",
     "sample_corner_color",
     "shape_should_erase_background",
+    "shape_should_uncomposite_background",
+    "uncomposite_translucent_shapes_from_image",
 ]
