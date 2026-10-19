@@ -40,6 +40,10 @@ lint = [
   "ruff==0.16.2",
   "mypy==2.3.0",
 ]
+# Slide-quality evaluation (docs/slide-quality.md) needs LibreOffice + fonts
+# on the host; there is no extra pip package. Declared here so installers see
+# the optional group name next to cpu/gpu/lint.
+slide-quality = []
 
 [project.scripts]
 pdf2ppt = "pdf2ppt.cli:main"

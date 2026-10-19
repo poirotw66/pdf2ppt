@@ -107,6 +107,12 @@ Phase 2 再收緊為阻斷式。
 **驗收**：`python scripts/bench_inpaint.py` 能對全部樣本跑完 `white-box` / `opencv-fast`
 兩個引擎並輸出可比較的 JSON。
 
+**後續補齊（投影片級評估器）**：除 inpaint 引擎基準外，另見
+`src/pdf2ppt/render_compare.py`、`scripts/bench_slide.py`、`docs/slide-quality.md`。
+以 LibreOffice → PDF → PNG 對輸出 PPTX 與原頁做 SSIM／像素誤差／邊緣 F1／文字 F1，
+並分開回報 editability（原生物件數、背景點陣面積占比）。CI 的 `slide-quality`
+job 為 report-only，不阻擋合併。
+
 **規模**：中。**風險**：低（純新增，不動既有邏輯）。
 
 ---
