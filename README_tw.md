@@ -1,27 +1,10 @@
 # pdf2ppt
 
-`pdf2ppt` 是一個開源工具，用來把 PDF 投影片轉成可編輯的 PowerPoint (`.pptx`)。
+[![CI](https://github.com/poirotw66/pdf2ppt/actions/workflows/ci.yml/badge.svg)](https://github.com/poirotw66/pdf2ppt/actions/workflows/ci.yml)
 
-它主要面向簡報型文件，目標是在保留原稿視覺風格的同時，盡可能還原可編輯文字、版面與可重用頁面元素。
+[English](README.md) | **繁體中文**
 
-核心流程：
-
-- 能直接從 PDF 抽文字與版面的情況，優先使用原生解析。
-- 掃描頁或圖片型頁面，再交給 PaddleOCR。
-- OCR 偵測後會自動做**同行文字框合併**，減少標題被拆成多個碎框，同時避免多欄版面被併成單一大框。
-- 先判斷頁面類型（`digital`、`scanned`、`hybrid`），再決定最合適的輸出方式。
-- 只有在需要時才做背景重建，而不是一律整頁抹字。
-- OCR 文字會額外估算字級、字色與粗體。
-
-## 專案狀態
-
-- 目前建議優先使用的背景引擎：`opencv-fast`
-- 可選的生成式背景引擎：`lama-onnx`（舊名 `lama-onnx-cuda`，保留為向後相容別名），適合在本機有
-  LaMa ONNX 模型時做較高品質的 overlay 修補。預設走 CPU，若已安裝 ONNX Runtime GPU 且 GPU 可用則自動使用（第 1.1 階段）。
-  - `lama-pytorch`：透過官方 [advimman/lama](https://github.com/advimman/lama) PyTorch checkpoint（`big-lama`）做較高品質的 overlay 修補
-- `diffusion-local` 已移除，因為地端 diffusion inpainting 速度慢且效果不穩定
-- 大多數文件建議先從 `opencv-fast` 開始。`auto` 路由在遮罩過大時會回退到 `white-box`，但若偵測到
-  `lama-onnx` 可用的 runtime，則會優先改用 `lama-onnx`（第 1.4 階段）
+`pdf2ppt` 把 PDF 投影片轉成可編輯的 PowerPoint (`.pptx`)。面向簡報型文件：能抽就抽原生文字與版面，掃描或圖片頁交給 OCR，並只在需要時重建被抹掉文字後方的背景。
 
 ## 成果展示
 
@@ -32,473 +15,97 @@
 
 <p align="center"><em>左側是原始 PDF，右側是轉換後可編輯的 PowerPoint。</em></p>
 
-## 主要功能
+## 功能概要
 
-- 將 PDF 轉成可編輯的 PPTX。
-- 優先保留原生 PDF 文字。
-- 將掃描頁文字重建為 PowerPoint 文字方塊。
-- 支援多種背景重建引擎：
-  - `white-box`
-  - `opencv-fast`（建議優先使用）
-  - `lama-onnx`（可選 CPU/GPU 路徑，需明確指定；`lama-onnx-cuda` 為向後相容別名）
-  - `lama-pytorch`（可選 GPU 路徑，透過官方 LaMa repo 與 PyTorch checkpoint，需明確指定）
-  - `generative-openai` / `generative-gemini`（可選雲端影像編輯後端，需明確指定與 API key；見 [`docs/generative-inpaint.md`](docs/generative-inpaint.md)）
-  - `auto` 自動路由（大遮罩時，若偵測到可用的 LaMa runtime，會優先用 `lama-onnx` 而非 `white-box`）
-- 每次轉換都可輸出 JSON 報告。
-- 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
-- OCR 後處理：預設合併同一文字行的相鄰偵測框；可選 `--ocr-return-word-box` 改回 PaddleOCR 字級框（除錯用）。
-- CLI 會顯示逐頁轉換進度條。
+- 優先原生 PDF 解析；掃描／圖片頁使用 PaddleOCR
+- 同行文字框合併，減少標題碎框，並盡量維持多欄版面
+- 可選版面分析：區域類型、閱讀順序、真實項目符號、標題 placeholder（[`docs/layout-analysis.md`](docs/layout-analysis.md)）
+- 數位 PDF 上的簡單向量圖與有格線表格可轉成原生 PPT 形狀／表格（[`docs/vector-nativization.md`](docs/vector-nativization.md)）
+- 背景引擎：`opencv-fast`（建議預設）、`white-box`、可選 `lama-onnx`／`lama-pytorch`，以及雲端生成式後端（[`docs/background-engines.md`](docs/background-engines.md)）
+- JSON 轉換報告、debug 產物，以及可選的 OCR 審框 UI
 
-## 環境需求
+## 安裝
 
-- Python 3.11 以上
-- 建議使用 Linux
-- 依賴套件定義於 `pyproject.toml`
-- 若要使用 OCR，建議使用獨立的 Conda 環境並固定 `numpy<2`
-- OCR 需要：
-  - PaddleOCR 執行環境與模型下載
-
-## 安裝方式
-
-建議的 OCR 執行環境：
+需求：Python 3.11 以上，建議 Linux。OCR 請使用獨立環境並固定 `numpy<2`（PaddleOCR / PaddleX 較穩定）。
 
 ```bash
+cd pdf2ppt
 conda create -n ppocr python=3.12 numpy=1.26.4 -y
 conda activate ppocr
+# 或使用 venv：python -m venv .venv && source .venv/bin/activate
 python -m pip install -e .
 ```
 
-建議這樣安裝的原因：
-
-- `PaddleOCR` / `PaddleX` 目前在 `numpy<2` 的環境下較穩定。
-- 使用獨立 Conda 環境，可降低 `pyarrow`、`scikit-learn` 等全域套件相依衝突。
-
-如果你已經有現成環境，至少請先確認符合 `pyproject.toml` 中的 NumPy 限制：
+若已有環境：
 
 ```bash
 python -m pip install "numpy<2"
 python -m pip install -e .
 ```
 
-開發與執行時請一律使用 **`pip install -e .` 安裝的 `src/pdf2ppt`**，不要手動把 `PYTHONPATH` 指到 repo 內的 `build/lib/`。`build/lib/` 只是舊的 setuptools 建置殘留，可能缺少最新程式碼，且已列入 `.gitignore`、不應納入版控。
+請一律使用本 repo 的 editable 安裝（`pip install -e .`），不要把 `PYTHONPATH` 指到 `build/lib/`——那是過期的 setuptools 殘留，且已列入 `.gitignore`。
 
-如果你要執行測試，請另外安裝：
-
-```bash
-python -m pip install pytest
-```
-
-快速確認環境是否正常：
-
-```bash
-python - <<'PY'
-import numpy
-print(numpy.__version__)
-PY
-python -m pdf2ppt input.pdf output.pptx
-```
+選用：測試可安裝 `python -m pip install pytest`。OCR 模型預設放在 `./model`（可用 `--ocr-model-root` 覆寫）。
 
 ## 快速開始
 
-基本轉換：
-
 ```bash
 pdf2ppt input.pdf output.pptx
+pdf2ppt input.pdf output.pptx --report output.report.json --debug-dir output_debug
+pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
 ```
 
-指定 report 輸出路徑：
+### Review UI（選用）
 
 ```bash
-pdf2ppt input.pdf output.pptx --report output.report.json
-```
-
-輸出 debug 檔案：
-
-```bash
-pdf2ppt input.pdf output.pptx --debug-dir output_debug
-```
-
-使用 OpenCV 快速背景重建：
-
-```bash
-pdf2ppt input.pdf output.pptx \
-  --inpaint-engine opencv-fast \
-  --report output.report.json \
-  --debug-dir output_debug
-```
-
-### `opencv-fast` 的技術原理
-
-`opencv-fast` 是本專案在 `overlay` 頁面上使用的輕量級背景重建路徑。
-
-### 可選引擎：`lama-onnx`（預設 CPU，GPU 可用時自動使用）
-
-`lama-onnx` 是額外提供的顯式選用引擎，只用在 `overlay` 背景重建（`lama-onnx-cuda` 是同一個引擎與識別碼的向後相容別名；`lama-onnx-cuda-hybrid` / `lama-onnx-hybrid` 則是對應的 hybrid 模式別名）。自第 1.1 階段起不再要求 GPU：
-
-- 先安裝選用相依：`pip install .[cpu]`（純 CPU 版 `onnxruntime`）或 `pip install .[gpu]`（`onnxruntime-gpu`，供 CUDA 使用）
-- 將本地 ONNX 模型放在 `model/lama/`，或用 `--inpaint-model-root` 直接指向某個 `.onnx` 檔
-- `--inpaint-onnx-cuda-provider`（預設 `CUDAExecutionProvider`）在可用時會被使用；不可用時會自動回退到 `CPUExecutionProvider`，不會直接報錯
-- 當你明確指定 `--inpaint-engine lama-onnx` 時，若完全沒有 `onnxruntime` 套件或模型缺失，仍會直接報錯，不會默默回退到 `opencv-fast`
-- 為了降低記憶體壓力，過大的 overlay 影像會先依 `--inpaint-max-side-px` 等比例縮小再做推論
-
-第 1.4 階段起，`auto` 路由在遇到大遮罩、且偵測到可用的 LaMa runtime（`onnxruntime` 套件可匯入、且 `--inpaint-model-root` 存在）時，也會改用 `lama-onnx` 而非 `white-box`。若偵測不到 runtime（多數安裝的預設情況，因為 `onnxruntime` 是選用相依），`auto` 路由行為與第 1.4 階段之前完全相同。
-
-### 可選 GPU 引擎：`lama-pytorch`
-
-`lama-pytorch` 是額外提供的顯式選用引擎，透過獨立的 Python 環境執行官方 LaMa PyTorch checkpoint。與 `lama-onnx` 一樣，目前不納入 `auto` 路由的「顯式指定」路徑（但 `auto` 的大遮罩後備選項只會考慮 `lama-onnx`）。
-
-前置需求：
-
-- 將官方 LaMa 原始碼放在 `./lama`
-- 將 `big-lama` checkpoint 解壓到 `./lama/big-lama`，並包含 `config.yaml` 與 `models/best.ckpt`
-- 建立專用的 LaMa Conda 環境（與執行 pdf2ppt 的 `ppocr` 環境分開）
-
-建議的 LaMa 環境安裝方式：
-
-```bash
-bash scripts/setup_lama_env.sh
-conda activate lama
-```
-
-安裝腳本會建立名為 `lama` 的 Conda 環境，安裝 PyTorch CUDA、固定 `numpy<2`，並安裝 LaMa repo 所需相依套件。可用 `LAMA_CONDA_ENV=my-lama-env` 覆寫環境名稱。
-
-典型轉換指令：
-
-```bash
-conda activate ppocr
-pdf2ppt input.pdf output.pptx \
-  --inpaint-engine lama-pytorch \
-  --inpaint-model-root lama/big-lama \
-  --inpaint-lama-repo-root lama \
-  --inpaint-lama-device cuda
-```
-
-Python 解譯器選擇：
-
-- 預設會尋找 `~/miniconda3/envs/lama/bin/python`，或讀取環境變數 `PDF2PPT_LAMA_PYTHON`
-- 也可用 `--inpaint-lama-python /path/to/python` 明確指定
-- `ppocr` 環境負責執行 pdf2ppt；`lama` 環境只負責 LaMa 推論
-
-效能特性：
-
-- pdf2ppt 會啟動常駐 LaMa worker（`lama/bin/pdf2ppt_predict_server.py`），在同一個轉換流程中只載入一次 checkpoint
-- 第一個 overlay 頁面需要負擔模型載入成本（GPU 上常見約 10 秒）
-- 後續頁面會重用已載入的模型，速度明顯更快（常見約 1 到 2 秒）
-- 過大的頁面會先依 `--inpaint-max-side-px` 等比例縮小推論，再放大回原頁尺寸
-
-注意事項：
-
-- `lama-pytorch` 與 `lama-onnx` 使用的模型格式不同：
-  - `lama-pytorch` 需要解壓後的 PyTorch checkpoint 目錄（`lama/big-lama`）
-  - `lama-onnx` 需要 `model/lama/` 底下的 `.onnx` 檔
-- 明確指定 `--inpaint-engine lama-pytorch` 時，若 repo、checkpoint 或 LaMa 執行環境缺失，會直接報錯
-- 若你已有本地 ONNX 匯出且更重視速度，可優先考慮 `lama-onnx`
-
-它的設計目標是：
-
-- 不需要下載模型
-- 不需要 GPU
-- 直接在本機用 OpenCV 完成
-- 對純色、漸層、簡單紋理的投影片背景通常效果最好
-
-技術流程如下：
-
-1. 先找出之後要重建成可編輯 PowerPoint 文字的文字區塊。
-2. 透過 `build_text_mask_image()` 把這些文字區域轉成二值遮罩。
-3. 可利用 `--inpaint-padding-px` 擴張遮罩，蓋住抗鋸齒邊緣與 OCR 框略小的情況。
-4. `OpenCvFastInpaintingEngine` 會把頁面影像轉成 NumPy / OpenCV 格式。
-5. 對明顯屬於低紋理或平滑漸層的遮罩元件，會先根據外圍 ring pixels 直接擬合局部背景曲面。
-6. 只有剩下無法可靠擬合的遮罩區塊，才會回退到 `cv2.inpaint(..., cv2.INPAINT_TELEA)`，並先把彼此很近的小 residual components 合併，再依群組尺寸與周圍 edge density 調整 Telea 半徑。
-7. 最後再做一次局部 blend，讓重建區塊的邊界更平順，再作為 PowerPoint 背景。
-
-實作細節：
-
-- 修補演算法：局部曲面擬合加 OpenCV Telea fallback（`cv2.INPAINT_TELEA`）
-- Telea 基準半徑：`3.0`，之後會依 residual component 尺寸與周圍 edge density 自適應縮放
-- 遮罩格式：8-bit 單通道二值 mask
-- 影像流程：PIL RGB -> OpenCV BGR -> 平滑區塊先做 surface-fit 預填 -> 剩餘遮罩再做 Telea 修補 -> 邊界 blend -> PIL RGB
-
-為什麼它很快：
-
-- 它是傳統影像處理，不是生成式模型。
-- 對平滑背景，很多區塊可以直接用鄰近背景擬合，不必先對整塊遮罩做迭代式修補。
-- Telea fallback 仍然會從遮罩邊界往內推估周邊顏色與結構。
-- 主要成本來自影像尺寸與遮罩大小，不需要模型載入與神經網路推論。
-
-適合的情境：
-
-- 純色背景簡報
-- 輕微漸層背景
-- 文字後方只有簡單紋理或幾何圖形
-- 想快速迭代、快速預覽轉換結果
-
-效果較差的情境：
-
-- 文字後方是密集插圖或照片
-- 遮罩區域很大
-- 複雜圖案無法只靠鄰近像素合理補回
-- 被移除的文字剛好壓在重要邊線、圖示或細線圖表上
-
-它與 `auto` 路由的關係：
-
-- `auto` 先看的是文字遮罩面積比例，不是單純看背景複雜度。
-- 如果遮罩面積比例不超過 `--inpaint-max-area-ratio`，就直接使用 `opencv-fast`。
-- 如果遮罩超過這個門檻，有一種例外：遮罩雖然稍大，但大部分遮罩區域都落在低紋理背景時，仍可能保留 `opencv-fast`（這個大遮罩例外還有內部上限，因此非常大的遮罩不會套用此例外）。
-- 否則（第 1.4 階段起），若偵測到可用的 LaMa runtime（`onnxruntime` 套件可匯入、且 `--inpaint-model-root` 存在），`auto` 會改用 `lama-onnx`；偵測不到才會回退到 `white-box`。
-- 背景複雜度仍會被估算並寫進 debug note，但它不再是主要分支條件。
-
-常用參數：
-
-- `--inpaint-engine opencv-fast`：強制指定使用此引擎
-- `--inpaint-engine lama-onnx`：強制指定使用可選 ONNX 引擎（預設 CPU，GPU 可用時自動使用；`lama-onnx-cuda` 為向後相容別名）
-- `--inpaint-engine lama-pytorch`：強制指定使用可選 PyTorch GPU 引擎
-- `--inpaint-padding-px`：先擴張文字遮罩再修補
-- `--inpaint-max-area-ratio`：當遮罩過大時避免使用局部修補
-- `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx` 的目錄 / `.onnx` 模型檔
-- `--inpaint-lama-repo-root`：`lama-pytorch` 使用的官方 LaMa repo 根目錄，預設 `./lama`
-- `--inpaint-lama-device`：傳給 LaMa PyTorch 推論的裝置，預設 `cuda`
-- `--inpaint-lama-python`：`lama-pytorch` 使用的 Python 解譯器；預設讀取 `PDF2PPT_LAMA_PYTHON` 或現有的 `lama` Conda 環境
-- `--inpaint-onnx-cuda-provider`：`lama-onnx` 使用的 ONNX Runtime provider 名稱；不可用時會自動回退到 CPU
-- `--inpaint-onnx-execution-mode`：`lama-onnx` 使用的 ONNX Runtime execution mode
-- `--inpaint-max-side-px`：送進 LaMa 引擎前允許的最大邊長
-- `--debug-dir`：輸出 mask 與背景決策結果方便檢查
-
-實務建議：
-
-- 一般簡報 PDF 可以先從 `opencv-fast` 開始
-- 如果文字邊緣殘留白邊或光暈，可小幅提高 `--inpaint-padding-px`
-- 如果 `opencv-fast` 不適合目前的遮罩範圍，改用 `white-box` 會比生成式回填更穩定。
-
-## CLI 參數
-
-主要參數：
-
-- `input_pdf`：輸入 PDF 路徑
-- `output_pptx`：輸出 PPTX 路徑
-- `--report`：JSON report 輸出路徑
-- `--mode`：`editable`、`fidelity`、`fast`
-- `--lang`：PaddleOCR 語言代碼，預設為 `ch`
-- `--ocr-det-thresh`：PaddleOCR 文字偵測門檻，可選；省略時使用 PaddleOCR 官方預設
-- `--ocr-det-box-thresh`：PaddleOCR 偵測框門檻，可選；省略時使用 PaddleOCR 官方預設
-- `--ocr-drop-score`：PaddleOCR 辨識分數門檻，可選；省略時使用 PaddleOCR 官方預設
-- `--ocr-return-word-box`：啟用 PaddleOCR 字級框；預設關閉，改由 pdf2ppt 在偵測後合併同一文字行的框
-- `--ocr-batch-size`：整頁 OCR 時一次處理的頁數，預設 `3`
-- `--dpi`：OCR 主要使用的頁面渲染 DPI
-- `--background-dpi`：嵌入到 PPTX 的整頁背景與 overlay 背景 DPI
-- `--background-format`：背景圖輸出格式，`jpeg` 或 `png`；`jpeg` 體積較小
-- `--background-jpeg-quality`：當 `--background-format=jpeg` 時使用的 JPEG 品質
-- `--debug-dir`：逐頁 debug 圖與分析檔輸出資料夾
-- `--enable-doc-unwarping`：啟用 PaddleOCR UVDoc 去扭曲
-
-OCR 行合併（預設啟用，無需額外參數）：
-
-- 在 PP-OCRv5 `det` 產生多個碎框後，依垂直對齊、水平間距與欄位間 x 重疊規則，把同一文字行的框合併成一個 `TextBlock`。
-- 適用於 CLI、API `detect`、整頁 OCR 與審框前端顯示的候選框。
-- 多欄簡報（例如三欄並排）會盡量維持分欄，不會只因垂直位置接近就橫向併成整頁大框。
-- 除錯時若需查看 Paddle 原始字級框，可加上 `--ocr-return-word-box`；一般不建議在正式轉換時開啟。
-
-背景重建相關：
-
-- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`lama-onnx`（別名 `lama-onnx-cuda`）、`lama-pytorch`、`generative-openai`、`generative-gemini`
-- `--inpaint-padding-px`：在 inpainting 前擴張文字遮罩
-- `--inpaint-max-area-ratio`：`auto` 停止使用 opencv-fast 的遮罩面積門檻（後續行為見上方 `auto` 路由說明）
-- `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx` 的本地目錄 / `.onnx` 檔案
-- `--inpaint-lama-repo-root`：`lama-pytorch` 使用的官方 LaMa repo 根目錄
-- `--inpaint-lama-device`：`lama-pytorch` 使用的裝置，預設 `cuda`
-- `--inpaint-lama-python`：`lama-pytorch` 使用的 Python 解譯器
-- `--inpaint-onnx-cuda-provider`：`lama-onnx` 使用的 ONNX Runtime provider 名稱；不可用時自動回退到 CPU
-- `--inpaint-onnx-execution-mode`：`lama-onnx` 使用的 ONNX Runtime execution mode
-- `--inpaint-max-side-px`：LaMa 推論前的等比例縮圖保護上限
-
-診斷相關：
-
-- `--log-level`：`DEBUG`、`INFO`、`WARNING`、`ERROR`
-
-輸出體積調整建議：
-
-- 完整頁背景仍預設以 `JPEG`、品質 `82`、`110 DPI` 嵌入，通常能有效降低 PPTX 大小。
-- `overlay` 背景現在會自動改用無損 `PNG`，避免擦字後的邊緣被 JPEG 壓出灰邊。
-- 如果你更重視畫質，可以再提高 `--background-dpi`。
-- 如果檔案仍偏大，可以再降低 `--background-jpeg-quality`。
-
-## 轉換模式
-
-- `editable`：在可編輯性與視覺相似度之間取得平衡
-- `fidelity`：更保守，優先維持視覺接近原稿
-- `fast`：用較低成本快速產出結果
-
-## 背景重建策略
-
-本專案不會一律對整頁做去字。
-
-實際上會根據頁面狀況選擇不同模式：
-
-- `elements`：盡量保留可編輯元素，不生成整頁背景圖
-- `overlay`：只重建可編輯文字下方的背景
-- `full-page`：當風險太高時，回退成整頁圖片
-
-在 `overlay` 模式下，`auto` 會依條件選擇：
-
-- `opencv-fast`：當遮罩面積仍在設定門檻內時優先使用
-- `opencv-fast`：少數遮罩稍大但大多落在低紋理區域的情況下仍會保留
-- `lama-onnx`：遮罩過大且偵測到可用的 LaMa runtime 時使用（第 1.4 階段）
-- `white-box`：當遮罩過大、局部修補風險過高、且沒有可用的 LaMa runtime 時作為保底方案
-
-實際判斷順序可以簡化成：
-
-1. 先量測文字遮罩的面積比例。
-2. 若不超過 `--inpaint-max-area-ratio`，使用 `opencv-fast`。
-3. 若超過門檻，再估算遮罩區域有多少比例屬於低紋理背景。
-4. 大遮罩例外仍然安全時保留 `opencv-fast`。
-5. 否則，若偵測到可用的 LaMa runtime（`onnxruntime` 套件可匯入、且 `--inpaint-model-root` 存在），改用 `lama-onnx`；偵測不到則改用 `white-box`。
-
-## 輸出檔案
-
-常見輸出如下：
-
-- `output.pptx`：可編輯簡報
-- `output.report.json`：結構化轉換報告
-- `output_debug/`：可選的 debug 輸出
-
-JSON report 會包含：
-
-- 頁面類型判斷
-- 背景模式
-- 品質分數
-- 實際使用的背景重建引擎
-- OCR / 原生文字區塊與估算樣式
-
-## 注意事項與限制
-
-- OCR 頁面的重建本質上仍是估算，不是完整語意還原。
-- 複雜圖表與向量圖目前較偏向保留外觀，而非完整還原成可編輯圖表物件。
-- OCR 的粗體與顏色恢復屬 heuristic 判斷。
-
-## 開發
-
-執行測試：
-
-```bash
-python -m pytest -q
-```
-
-## 如何啟用 Review UI
-
-如果目前這個 Conda 環境還沒有安裝專案，先執行一次：
-
-```bash
-cd /home/justin/pdf2ppt
-source /home/justin/miniconda3/etc/profile.d/conda.sh
-conda activate ppocr
-python -m pip install -e .
-```
-
-先在第一個 terminal 啟動後端：
-
-```bash
-cd /home/justin/pdf2ppt
-source /home/justin/miniconda3/etc/profile.d/conda.sh
-conda activate ppocr
+# Terminal 1 — API
+cd pdf2ppt
+conda activate ppocr   # 或：source .venv/bin/activate
 python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
-```
 
-再在第二個 terminal 啟動前端：
-
-```bash
-cd /home/justin/pdf2ppt/frontend
-npm install
+# Terminal 2 — 前端
+cd pdf2ppt/frontend
+npm install            # 第一次或前端依賴變更後
 npm run dev
 ```
 
-之後用瀏覽器開啟 `http://127.0.0.1:5173`。
+瀏覽器開啟 `http://127.0.0.1:5173`。完整流程、job 儲存與 API 說明見
+[`docs/review-ui.md`](docs/review-ui.md)。
 
-補充說明：
+## 架構
 
-- `npm install` 只有第一次安裝或前端依賴變動後才需要重新執行。
-- `npm install` 必須在 `frontend/` 目錄下執行，不能在家目錄執行。
-- 前端會把 `/jobs/*` 代理到 `8008` port 的 FastAPI 後端。
-- 如果同一個 Conda 環境裡還裝了 `iopaint`，或其他較舊的 `gradio` / `fastapi` 套件組合，可能會把 API 相依套件弄壞。遇到這種情況，請重新安裝 `pydantic`、`pydantic-core`、`fastapi`、`starlette`，或直接為 `pdf2ppt` 分出獨立環境。
-- 如果你只想跑 CLI 轉檔，不需要啟動這個 review UI。
-
-啟動 review 後端：
-
-```bash
-conda activate ppocr
-python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
+```text
+PDF → 頁面分類（digital / scanned / hybrid）
+    → 原生抽取與／或 OCR（含行合併、可選版面分析）
+    → 可選向量／表格原生化
+    → 條件式背景（elements / overlay / full-page）
+    → PPTX + JSON 報告
 ```
 
-啟動 review 前端：
+| 元件 | 角色 |
+| --- | --- |
+| `src/pdf2ppt/cli.py` | CLI 入口 |
+| `src/pdf2ppt/pipeline.py` | 轉換編排 |
+| `src/pdf2ppt/api.py` | Review UI 後端 |
+| `frontend/` | OCR 審框前端 |
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+背景策略摘要：能保留原生元素就保留；overlay 頁在 `auto` 下優先 `opencv-fast`，偵測到 LaMa runtime 時改用 `lama-onnx`，否則回退 `white-box`。細節見
+[`docs/background-engines.md`](docs/background-engines.md)。
 
-之後用瀏覽器開啟 `http://127.0.0.1:5173`。Vite dev server 會把 `/jobs/*` 代理到 `8008` port 的 FastAPI 後端。
+## 更多文件
 
-## Review Workflow
+| 文件 | 內容 |
+| --- | --- |
+| [`docs/cli-reference.md`](docs/cli-reference.md) | 參數、模式、輸出、限制 |
+| [`docs/background-engines.md`](docs/background-engines.md) | 背景引擎與 `auto` 路由 |
+| [`docs/review-ui.md`](docs/review-ui.md) | Review UI 與 API |
+| [`docs/layout-analysis.md`](docs/layout-analysis.md) | Heuristic／PP-Structure 版面 |
+| [`docs/vector-nativization.md`](docs/vector-nativization.md) | 形狀與表格原生化 |
+| [`docs/generative-inpaint.md`](docs/generative-inpaint.md) | 雲端生成式後端 |
+| [`docs/slide-quality.md`](docs/slide-quality.md) | 畫質／可編輯性評估 |
 
-目前專案已包含一個輕量的 OCR 審框前端，適合用在原始 OCR detection 還需要人工複查後，才進入 inpaint 與 PPT 生成的情境。
-
-完整流程如下：
-
-1. 在網頁上傳 PDF，建立 job。
-2. 執行 OCR detect，取得候選文字框與預覽 URL。
-3. 逐頁檢查並修改要核准的 boxes。
-4. 把 approved boxes 存回後端。
-5. 執行 convert，讓 pipeline 優先使用 approved boxes；若手動新增框沒有文字，則在 convert 階段做逐框 recognition，最後輸出 PPTX 與 report。
-
-job 儲存與清理：
-
-- 預設會把上傳 PDF、OCR detection payload、approved boxes payload、轉檔輸出存到 `.pdf2ppt_jobs/`。
-- 頁面預覽不再持久化成 artifact。`GET /jobs/{job_id}/pages/{page_number}.jpg` 會從原始 PDF 按需重新 render，並以 JPEG 回傳。
-- 每次建立新 job 時都會執行一次自動清理，刪除 `updated_at` 超過保留期限的 job 目錄。
-- 可用 `PDF2PPT_JOB_ROOT=/path/to/jobs` 指定 job 儲存根目錄。
-- 可用 `PDF2PPT_JOB_RETENTION_HOURS=24` 設定保留時間；設成 `0` 可停用自動清理。
-- 可呼叫 `DELETE /jobs/{job_id}` 立即刪除單一 job 與其所有 artifacts。
-
-目前前端已支援：
-
-- 在空白區拖曳建立新框。
-- 直接拖曳既有框做平移。
-- 用四角 resize handles 視覺化調整框大小。
-- 透過 zoom、數值 bbox 欄位與 nudge 按鈕做精細修正。
-- 在 inspector 內編輯文字、source、confidence。
-- 複製或刪除目前選取的框。
-- 若希望手動新增框在 convert 時再做 OCR，可把文字留空。
-
-相關後端 API：
-
-- `POST /jobs`
-- `POST /jobs/{job_id}/detect`，可選 `ocr_batch_size` 與 `confidence_threshold`
-- `PUT /jobs/{job_id}/boxes`
-- `POST /jobs/{job_id}/convert`，可選 `ocr_batch_size`
-- `GET /jobs/{job_id}/pages/{page_number}.jpg`
-- `GET /jobs/{job_id}/output.pptx`
-- `GET /jobs/{job_id}/report.json`
-- `DELETE /jobs/{job_id}`
-
-detect 請求參數補充：
-
-- `confidence_threshold` 會在回應前先過濾掉低於指定信心分數的 OCR 框。
-- 預設值：`0.75`
-- `return_word_box`：對應 CLI 的 `--ocr-return-word-box`，預設 `false`。
-- 後端在回傳 boxes 前會套用與 CLI 相同的**行合併**後處理；修改程式後請重啟 API 並重新執行 detect，舊 job 的 detection payload 不會自動更新。
-
-主要檔案：
-
-- CLI：`src/pdf2ppt/cli.py`
-- 核心流程：`src/pdf2ppt/pipeline.py`
-- OCR 與行合併：`src/pdf2ppt/ocr.py`
-- API / 審框後端：`src/pdf2ppt/api.py`
-- 資料模型：`src/pdf2ppt/models.py`
-
-## 文件語言版本
-
-- English：`README.md`
-- 繁體中文：`README_tw.md`
+CI（`.github/workflows/ci.yml`）會跑 pytest、ruff + mypy、前端測試與建置，以及僅報告用的 slide-quality bench。
 
 ## 授權
 
-本專案採用 MIT License，詳見 `LICENSE`。
+MIT，詳見 [`LICENSE`](LICENSE)。
