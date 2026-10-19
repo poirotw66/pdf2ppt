@@ -31,7 +31,7 @@ the renderer cannot express yet.
 
 ```
 deck.slideir.json
-deck.slideir.assets/
+deck.slideir.json.assets/
   pages/
     001/
       background.jpg   # optional
@@ -39,7 +39,7 @@ deck.slideir.assets/
 ```
 
 - `assets_dir` in the JSON names the sibling directory (default:
-  `{ir_filename}.assets`).
+  `{ir_filename}.assets`, e.g. `deck.slideir.json.assets`).
 - Asset `path` values are relative to that directory (e.g.
   `pages/001/background.jpg`).
 - Paths must not contain `..` or be absolute.
@@ -70,6 +70,8 @@ apply to `emit-ir` the same way as `convert`.
 |----------|-----------|
 | `POST /jobs/{id}/convert` with `emit_ir` / `ir_only` | Same convert options; optionally write SlideIR |
 | `POST /jobs/{id}/emit-ir` | Analysis → SlideIR only (approved boxes optional) |
+| `GET /jobs/{id}/slideir.json` | Download emitted SlideIR JSON |
+| `GET /jobs/{id}/slideir-assets.zip` | Download the sibling assets directory as a zip |
 | `POST /from-ir` | Multipart: `ir_file` + optional `assets_zip` → PPTX download |
 
 Defaults leave existing convert behaviour unchanged.
@@ -77,7 +79,9 @@ Defaults leave existing convert behaviour unchanged.
 ## Agent workflow
 
 1. `emit-ir` on a PDF → valid SlideIR + assets.
-2. Edit JSON (grouping hints, roles, planner metadata) without rewriting text.
+2. Edit JSON (roles, reading order, styles the renderer already supports)
+   without rewriting text. `groups` / `plan_metadata` are forward-compatible
+   for P3 only — they are not rendered today.
 3. `from-ir` → schema-valid PPTX via `ppt_render`.
 
 See `skills/pdf2ppt/SKILL.md` for a Codex/Claude-oriented skill pack.

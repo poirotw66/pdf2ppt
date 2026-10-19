@@ -15,8 +15,8 @@ tools around **SlideIR** (JSON + sibling asset files):
 2. **from-ir** — load IR and render native PPTX (no PDF).
 
 Do **not** invent text; keep `text_blocks[].text` as ground truth. Prefer
-editing structure (`groups`, `plan_metadata`, roles, reading order) over
-rewriting strings.
+editing roles, reading order, and renderer-supported styles over rewriting
+strings.
 
 ## Prerequisites
 
@@ -38,11 +38,11 @@ pdf2ppt emit-ir INPUT.pdf OUTPUT.slideir.json \
   --layout-engine heuristic
 ```
 
-Produces:
+Produces (assets dir is `{ir_filename}.assets`):
 
 ```
 OUTPUT.slideir.json
-OUTPUT.slideir.assets/pages/001/...
+OUTPUT.slideir.json.assets/pages/001/...
 ```
 
 ### Emit IR + PPTX
@@ -57,13 +57,18 @@ pdf2ppt INPUT.pdf OUTPUT.pptx --emit-ir OUTPUT.slideir.json
 pdf2ppt from-ir OUTPUT.slideir.json REBUILT.pptx
 ```
 
-Keep the `.assets` directory next to the JSON (or zip it with the same layout
-for `POST /from-ir`).
+Keep the `{ir_filename}.assets` directory next to the JSON (or zip it with the
+same layout for `POST /from-ir`).
 
 ## Editing rules
 
-- **Safe:** adjust `reading_order`, `block_role`, `layout_label`, `groups`,
-  `plan_metadata`; tweak shape/table styling the renderer already supports.
+- **Safe (affects PPTX today):** adjust `reading_order`, `block_role`,
+  `layout_label`; tweak shape/table/text styling fields the renderer already
+  supports (colors, sizes, bboxes it already maps).
+- **Forward-compatible only (not rendered today):** `groups` and
+  `plan_metadata` are reserved for P3 planners. You may leave or add them for
+  later tools, but `from-ir` / `ppt_render` currently ignore them — editing
+  them will not change the PPTX.
 - **Unsafe:** fabricate new text content; invent shape kinds outside the schema
   enum; point `asset.path` outside `assets_dir`.
 - After edits, re-run `from-ir` and visually QA the PPTX.
@@ -71,6 +76,7 @@ for `POST /from-ir`).
 ## HTTP (optional)
 
 - `POST /jobs/{id}/emit-ir` — IR only  
+- `GET /jobs/{id}/slideir.json` / `GET /jobs/{id}/slideir-assets.zip` — download emit-ir artifacts  
 - `POST /jobs/{id}/convert` with `{"emit_ir": true, "ir_only": false}`  
 - `POST /from-ir` — multipart `ir_file` (+ optional `assets_zip`) → PPTX
 

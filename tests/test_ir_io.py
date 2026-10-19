@@ -88,6 +88,12 @@ class SlideIrSchemaTests(unittest.TestCase):
         self.assertEqual(schema["title"], "pdf2ppt SlideIR")
         self.assertEqual(schema["properties"]["schema_version"]["const"], SLIDEIR_SCHEMA_VERSION)
 
+    def test_default_assets_dir_uses_full_filename(self) -> None:
+        self.assertEqual(
+            default_assets_dir_name(Path("deck.slideir.json")),
+            "deck.slideir.json.assets",
+        )
+
     def test_validate_payload_reports_missing_pages(self) -> None:
         issues = validate_slide_ir_payload({"schema_version": "1.0"})
         self.assertTrue(any("pages" in issue for issue in issues))

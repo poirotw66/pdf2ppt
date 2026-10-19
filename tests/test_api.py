@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,10 +11,13 @@ from unittest.mock import patch
 import fitz
 from fastapi.testclient import TestClient
 from PIL import Image
+from pptx import Presentation
 
 from pdf2ppt.api import app
 from pdf2ppt.core import OcrInitializationError, PageConversionError
+from pdf2ppt.ir_io import default_assets_dir_name, write_slide_ir
 from pdf2ppt.job_store import JobStore
+from pdf2ppt.models import ImagePlacement, PageResult, QualityScore, ShapeElement, TextBlock
 from pdf2ppt.paths import get_repo_root
 
 
@@ -671,6 +675,143 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(emit_response.status_code, 200)
         self.assertIsNotNone(emit_response.json().get("slideir_path"))
         self.assertFalse(convert_pdf_mock.call_args.kwargs["write_pptx"])
+
+    def test_from_ir_with_assets_zip_returns_pptx_and_cleans_work_dir(self) -> None:
+        ir_bytes, zip_bytes = build_slideir_upload_pair(self.temp_dir.name)
+        before = {path.name for path in self.job_store.root.glob("pdf2ppt-from-ir-*")}
+
+        response = self.client.post(
+            "/from-ir",
+            files={
+                "ir_file": ("deck.slideir.json", ir_bytes, "application/json"),
+                "assets_zip": ("assets.zip", zip_bytes, "application/zip"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "presentationml.presentation",
+            response.headers.get("content-type", ""),
+        )
+        pptx_bytes = response.content
+        self.assertGreater(len(pptx_bytes), 1000)
+        presentation = Presentation(io.BytesIO(pptx_bytes))
+        self.assertEqual(len(presentation.slides), 1)
+
+        after = {path.name for path in self.job_store.root.glob("pdf2ppt-from-ir-*")}
+        self.assertEqual(after, before)
+
+    def test_from_ir_without_assets_zip_returns_400(self) -> None:
+        ir_bytes, _zip_bytes = build_slideir_upload_pair(self.temp_dir.name)
+        response = self.client.post(
+            "/from-ir",
+            files={"ir_file": ("deck.slideir.json", ir_bytes, "application/json")},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"]["code"], "slideir-error")
+        leftover = list(self.job_store.root.glob("pdf2ppt-from-ir-*"))
+        self.assertEqual(leftover, [])
+
+    def test_from_ir_zip_path_traversal_rejected(self) -> None:
+        ir_bytes, _zip_bytes = build_slideir_upload_pair(self.temp_dir.name)
+        evil_outside = Path(self.temp_dir.name) / "evil-outside.txt"
+        self.assertFalse(evil_outside.exists())
+
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as archive:
+            archive.writestr("../evil-outside.txt", b"pwned")
+            archive.writestr("../../evil-outside.txt", b"pwned")
+        zip_bytes = zip_buffer.getvalue()
+
+        response = self.client.post(
+            "/from-ir",
+            files={
+                "ir_file": ("deck.slideir.json", ir_bytes, "application/json"),
+                "assets_zip": ("assets.zip", zip_bytes, "application/zip"),
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"]["code"], "input-error")
+        self.assertFalse(evil_outside.exists())
+        # Also ensure nothing escaped next to the job store root.
+        sibling_evil = self.job_store.root.parent / "evil-outside.txt"
+        self.assertFalse(sibling_evil.exists())
+        leftover = list(self.job_store.root.glob("pdf2ppt-from-ir-*"))
+        self.assertEqual(leftover, [])
+
+    def test_slideir_download_endpoints(self) -> None:
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        job_dir = self.job_store.job_dir(job_id)
+        ir_path = job_dir / "output.slideir.json"
+        page = _api_slideir_page()
+        write_slide_ir([page], ir_path, slide_width_pt=320.0, slide_height_pt=240.0)
+        self.job_store.update_job(job_id, status="ir-emitted", report_path=str(job_dir / "output.slideir.report.json"))
+
+        json_response = self.client.get(f"/jobs/{job_id}/slideir.json")
+        self.assertEqual(json_response.status_code, 200)
+        self.assertEqual(json_response.json()["schema_version"], "1.0")
+
+        zip_response = self.client.get(f"/jobs/{job_id}/slideir-assets.zip")
+        self.assertEqual(zip_response.status_code, 200)
+        self.assertEqual(zip_response.headers.get("content-type"), "application/zip")
+        with zipfile.ZipFile(io.BytesIO(zip_response.content)) as archive:
+            names = archive.namelist()
+        self.assertTrue(any(name.startswith("pages/") for name in names))
+
+
+def _tiny_png() -> bytes:
+    return (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f"
+        b"\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+
+def _api_slideir_page() -> PageResult:
+    return PageResult(
+        page_number=1,
+        page_kind="digital",
+        background_mode="elements",
+        width_pt=320.0,
+        height_pt=240.0,
+        text_blocks=[
+            TextBlock(
+                id="t1",
+                source="native",
+                bbox=(40.0, 40.0, 200.0, 80.0),
+                text="Hello API IR",
+                confidence=1.0,
+                font_size=18.0,
+                reading_order=0,
+            )
+        ],
+        quality_score=QualityScore(1.0, 1.0, 1.0, 1.0),
+        fallback_reason=None,
+        image_elements=[ImagePlacement(bbox=(10.0, 100.0, 60.0, 150.0), png_bytes=_tiny_png())],
+        shape_elements=[
+            ShapeElement(id="s1", kind="rect", bbox=(20.0, 20.0, 80.0, 60.0), fill_color="#336699")
+        ],
+    )
+
+
+def build_slideir_upload_pair(temp_root: str) -> tuple[bytes, bytes]:
+    """Build SlideIR JSON bytes + zip of its assets_dir contents (pages/...)."""
+    work = Path(temp_root) / "slideir-build"
+    work.mkdir(parents=True, exist_ok=True)
+    ir_path = work / "deck.slideir.json"
+    write_slide_ir([_api_slideir_page()], ir_path, slide_width_pt=320.0, slide_height_pt=240.0)
+    assets_dir = work / default_assets_dir_name(ir_path)
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as archive:
+        for path in sorted(assets_dir.rglob("*")):
+            if path.is_file():
+                archive.write(path, arcname=str(path.relative_to(assets_dir)))
+    return ir_path.read_bytes(), zip_buffer.getvalue()
 
 
 def build_sample_pdf_bytes() -> bytes:

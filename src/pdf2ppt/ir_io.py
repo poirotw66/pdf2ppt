@@ -2,8 +2,9 @@
 
 SlideIR is a versioned JSON deck representation covering what P1/P2 already
 build in memory (text, shapes, tables, pictures, layout regions, background).
-Raster assets are stored as files under ``{ir_stem}.assets/`` next to the IR
-JSON; paths inside the JSON are relative to that assets directory.
+Raster assets are stored as files under ``{ir_filename}.assets/`` next to the
+IR JSON (e.g. ``deck.slideir.json.assets/``); paths inside the JSON are
+relative to that assets directory.
 
 This module is MIT-original; it does not copy AGPL third-party code.
 """
@@ -95,7 +96,7 @@ def load_slideir_schema() -> dict[str, Any]:
 
 
 def default_assets_dir_name(ir_path: Path) -> str:
-    """Convention: ``deck.slideir.json`` → ``deck.slideir.assets``."""
+    """Convention: ``deck.slideir.json`` → ``deck.slideir.json.assets``."""
     return f"{ir_path.name}{DEFAULT_ASSETS_DIR_SUFFIX}"
 
 

@@ -23,7 +23,7 @@
     },
     "assets_dir": {
       "type": "string",
-      "description": "Directory name (relative to the IR file) holding cropped images and backgrounds."
+      "description": "Directory name (relative to the IR file) holding cropped images and backgrounds. Default convention: {ir_filename}.assets (e.g. deck.slideir.json.assets)."
     },
     "slide_width_pt": { "type": "number", "exclusiveMinimum": 0 },
     "slide_height_pt": { "type": "number", "exclusiveMinimum": 0 },

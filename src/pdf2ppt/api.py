@@ -3,6 +3,9 @@ from __future__ import annotations
 import io
 import json
 import logging
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,7 @@ from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
+from starlette.background import BackgroundTask
 
 from .api_models import (
     ApprovedBoxesRequest,
@@ -45,6 +49,10 @@ from .pipeline import build_notebooklm_watermark_mask_block, convert_from_ir, co
 from .upload_input import SUPPORTED_UPLOAD_SUFFIXES, is_raster_image_upload, normalize_upload_to_pdf_bytes
 
 logger = logging.getLogger(__name__)
+
+# Caps for POST /from-ir uploads (agent-facing; keep modest for local job store).
+MAX_FROM_IR_FILE_BYTES = 50 * 1024 * 1024
+MAX_FROM_IR_ZIP_MEMBERS = 10_000
 
 app = FastAPI(title="pdf2ppt API", version="0.1.0")
 app.add_middleware(
@@ -238,16 +246,18 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
     if slideir_path is not None:
         assets_dir = str(job_dir / default_assets_dir_name(slideir_path))
 
-    job_store.update_job(
-        job_id,
-        status="converted",
-        output_pptx_path=str(output_pptx_path) if write_pptx else None,
-        report_path=str(report_path),
-    )
+    # Preserve any prior PPTX path on ir_only converts (do not clear the field).
+    update_fields: dict[str, object] = {
+        "status": "converted",
+        "report_path": str(report_path),
+    }
+    if write_pptx:
+        update_fields["output_pptx_path"] = str(output_pptx_path)
+    job_store.update_job(job_id, **update_fields)
     return ConvertResponse(
         job_id=job_id,
         status="converted",
-        output_pptx_path=str(output_pptx_path) if write_pptx else "",
+        output_pptx_path=str(output_pptx_path) if write_pptx else (record.output_pptx_path or ""),
         report_path=str(report_path),
         page_count=len(report.pages),
         slideir_path=str(slideir_path) if slideir_path is not None else None,
@@ -328,10 +338,6 @@ async def from_ir_upload(
     ),
 ) -> FileResponse:
     """Render an uploaded SlideIR JSON (+ optional assets zip) and return the PPTX."""
-    import shutil
-    import tempfile
-    import zipfile
-
     if not ir_file.filename:
         raise _http_exception(400, "input-error", "SlideIR upload must have a filename.")
 
@@ -339,17 +345,21 @@ async def from_ir_upload(
     try:
         ir_path = work / Path(ir_file.filename).name
         ir_bytes = await ir_file.read()
+        _reject_oversized_upload(len(ir_bytes), label="SlideIR JSON")
         ir_path.write_bytes(ir_bytes)
 
         if assets_zip is not None and assets_zip.filename:
             zip_bytes = await assets_zip.read()
+            _reject_oversized_upload(len(zip_bytes), label="assets zip")
             zip_path = work / "assets.zip"
             zip_path.write_bytes(zip_bytes)
             try:
                 with zipfile.ZipFile(zip_path) as archive:
-                    archive.extractall(work)
+                    _safe_extract_zip(archive, work)
             except zipfile.BadZipFile as error:
                 raise _to_http_exception(InputValidationError(f"Invalid assets zip: {error}")) from error
+            except InputValidationError as error:
+                raise _to_http_exception(error) from error
 
             try:
                 payload = json.loads(ir_bytes.decode("utf-8"))
@@ -368,22 +378,57 @@ async def from_ir_upload(
         try:
             convert_from_ir(ir_path, output_pptx, report_path=report_path)
         except SlideIrError as error:
-            raise _to_http_exception(error) from error
+            raise _to_http_exception(_scrub_slideir_error(error)) from error
         except Exception as error:
-            raise _to_http_exception(PageConversionError(0, f"from-ir failed: {error}")) from error
+            raise _to_http_exception(PageConversionError(0, "from-ir failed during render.")) from error
 
         download_name = f"{Path(ir_file.filename).stem}.pptx"
         return FileResponse(
             output_pptx,
             media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             filename=download_name,
+            background=BackgroundTask(shutil.rmtree, work, ignore_errors=True),
         )
     except HTTPException:
         shutil.rmtree(work, ignore_errors=True)
         raise
+    except (InputValidationError, SlideIrError) as error:
+        shutil.rmtree(work, ignore_errors=True)
+        raise _to_http_exception(error) from error
     except Exception:
         shutil.rmtree(work, ignore_errors=True)
         raise
+
+
+@app.get("/jobs/{job_id}/slideir.json", responses={404: COMMON_ERROR_RESPONSES[404]})
+def download_slideir_json(job_id: str) -> FileResponse:
+    record = _load_job_or_404(job_id)
+    slideir_path = _resolve_job_slideir_path(record)
+    if slideir_path is None or not slideir_path.exists():
+        raise _http_exception(404, "not-found", "SlideIR JSON not found for this job.")
+    return FileResponse(
+        slideir_path,
+        media_type="application/json",
+        filename=f"{Path(record.original_filename).stem}.slideir.json",
+    )
+
+
+@app.get("/jobs/{job_id}/slideir-assets.zip", responses={404: COMMON_ERROR_RESPONSES[404]})
+def download_slideir_assets_zip(job_id: str) -> FileResponse:
+    record = _load_job_or_404(job_id)
+    slideir_path = _resolve_job_slideir_path(record)
+    if slideir_path is None or not slideir_path.exists():
+        raise _http_exception(404, "not-found", "SlideIR JSON not found for this job.")
+    assets_dir = job_store.job_dir(job_id) / default_assets_dir_name(slideir_path)
+    if not assets_dir.is_dir():
+        raise _http_exception(404, "not-found", "SlideIR assets directory not found for this job.")
+    zip_path = job_store.job_dir(job_id) / "slideir-assets.zip"
+    _zip_directory(assets_dir, zip_path)
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"{Path(record.original_filename).stem}.slideir.assets.zip",
+    )
 
 
 @app.get("/jobs/{job_id}/pages/{page_number}.jpg", responses={404: COMMON_ERROR_RESPONSES[404]})
@@ -438,6 +483,71 @@ def download_report_json(job_id: str) -> FileResponse:
 
 def run() -> None:
     uvicorn.run("pdf2ppt.api:app", host="0.0.0.0", port=8008, reload=False)
+
+
+def _reject_oversized_upload(size: int, *, label: str) -> None:
+    if size > MAX_FROM_IR_FILE_BYTES:
+        raise _to_http_exception(
+            InputValidationError(
+                f"{label} exceeds the {MAX_FROM_IR_FILE_BYTES // (1024 * 1024)} MiB upload limit."
+            )
+        )
+
+
+def _safe_extract_zip(archive: zipfile.ZipFile, dest: Path) -> None:
+    """Extract a zip into ``dest``, rejecting path-traversal members."""
+    dest_resolved = dest.resolve()
+    members = archive.infolist()
+    if len(members) > MAX_FROM_IR_ZIP_MEMBERS:
+        raise InputValidationError(
+            f"assets zip has too many members (limit {MAX_FROM_IR_ZIP_MEMBERS})."
+        )
+    for info in members:
+        name = info.filename
+        if not name or name.endswith("/"):
+            continue
+        path = Path(name)
+        if path.is_absolute() or ".." in path.parts:
+            raise InputValidationError("Unsafe path in assets zip.")
+        target = (dest / path).resolve()
+        try:
+            target.relative_to(dest_resolved)
+        except ValueError as error:
+            raise InputValidationError("Unsafe path in assets zip.") from error
+    archive.extractall(dest)
+
+
+def _scrub_slideir_error(error: SlideIrError) -> SlideIrError:
+    """Rewrite SlideIR errors so absolute local paths are not returned to clients."""
+    message = str(error)
+    scrubbed = message
+    # Drop common absolute-path prefixes that leak host layout.
+    for marker in ("Missing SlideIR asset: ", "Path escapes assets root: ", "SlideIR file does not exist: "):
+        if marker in scrubbed:
+            scrubbed = marker + Path(scrubbed.split(marker, 1)[1]).name
+            break
+    if scrubbed == message:
+        return error
+    return SlideIrError(scrubbed)
+
+
+def _resolve_job_slideir_path(record: JobRecord) -> Path | None:
+    job_dir = job_store.job_dir(record.job_id)
+    candidates = (
+        job_dir / "output.slideir.json",
+        Path(record.report_path).with_name("output.slideir.json") if record.report_path else None,
+    )
+    for candidate in candidates:
+        if candidate is not None and candidate.exists():
+            return candidate
+    return None
+
+
+def _zip_directory(source_dir: Path, zip_path: Path) -> None:
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(source_dir.rglob("*")):
+            if path.is_file():
+                archive.write(path, arcname=str(path.relative_to(source_dir)))
 
 
 def _conversion_options_from_request(
