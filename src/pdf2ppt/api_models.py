@@ -127,6 +127,7 @@ class ConvertRequest(BaseModel):
         "generative-gemini",
     ] = "opencv-fast"
     inpaint_padding_px: int = Field(default=6, ge=0, le=128)
+    inpaint_mask_dilate_px: int = Field(default=2, ge=0, le=32)
     inpaint_max_area_ratio: float = Field(default=0.12, ge=0.0, le=1.0)
     inpaint_model_root: str | None = "model/lama"
     inpaint_onnx_cuda_provider: str = "CUDAExecutionProvider"

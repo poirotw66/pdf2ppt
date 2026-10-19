@@ -59,6 +59,10 @@ class ConversionOptions:
     use_doc_unwarping: bool = False
     inpaint_engine: str = "opencv-fast"
     inpaint_padding_px: int = 6
+    # Extra morphological dilation after mask build to cover anti-aliased glyph
+    # fringes that sit just outside OCR/PDF boxes. Default 2 is intentional and
+    # slightly expands the inpainted region for all engines (see bench_slide).
+    inpaint_mask_dilate_px: int = 2
     inpaint_max_area_ratio: float = 0.12
     inpaint_model_root: Path | None = Path("model/lama")
     inpaint_onnx_cuda_provider: str = "CUDAExecutionProvider"

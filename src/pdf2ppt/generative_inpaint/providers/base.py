@@ -32,6 +32,8 @@ class GenerativeEditResult:
     estimated_cost_usd: float
     usage: dict[str, object] | None = None
     raw_response_note: str | None = None
+    cost_source: str = "estimate"  # "usage" | "estimate" | "zero"
+    cost_uncertain: bool = False
 
 
 class GenerativeImageEditProvider(Protocol):
@@ -51,14 +53,37 @@ class GenerativeImageEditProvider(Protocol):
 
 
 class GenerativeProviderError(RuntimeError):
-    """Raised when a provider call fails or returns an unusable payload."""
+    """Raised when a provider call fails or returns an unusable payload.
+
+    ``may_have_been_billed`` is True when the HTTP call likely completed enough
+    for the vendor to charge (e.g. response parse failure after HTTP 200).
+    ``is_expected_safety_block`` is True for copyright/recitation/policy blocks
+    that should be treated as expected local fallbacks, not API outages.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        may_have_been_billed: bool = False,
+        is_expected_safety_block: bool = False,
+        estimated_cost_usd: float | None = None,
+        cost_uncertain: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.may_have_been_billed = may_have_been_billed
+        self.is_expected_safety_block = is_expected_safety_block
+        self.estimated_cost_usd = estimated_cost_usd
+        self.cost_uncertain = cost_uncertain
 
 
+# Neutral wording: phrases like "remove logos/watermarks" trigger Gemini safety
+# filters. Keep the instruction focused on continuing the slide background.
 DEFAULT_TEXT_REMOVAL_PROMPT = (
-    "Remove all text, glyphs, logos made of letters, and watermarks from the "
-    "masked region. Fill the erased area so it seamlessly continues the "
-    "surrounding background, texture, lighting, and perspective. Do not add "
-    "any new text, letters, numbers, captions, UI chrome, or watermarks."
+    "This is a crop of a presentation slide background. Fill the masked "
+    "(blacked-out) areas so they seamlessly continue the surrounding "
+    "background, texture, gradient, lighting, and perspective. Keep the result "
+    "clean: no letters, numbers, captions, or other new elements in the filled areas."
 )
 
 DEFAULT_IMAGE_RESTORE_PROMPT = (
@@ -68,6 +93,25 @@ DEFAULT_IMAGE_RESTORE_PROMPT = (
 )
 
 
+def is_expected_safety_block_message(message: str) -> bool:
+    """True for copyright/recitation and similar content-policy blocks."""
+
+    lowered = message.lower()
+    markers = (
+        "copyright/recitation",
+        "copyright",
+        "recitation",
+        "safety violation",
+        "safety violations",
+        "image generation blocked",
+        "blocked due to",
+        "unable to show the generated image",
+        "could not generate the image based on the prompt",
+        "you will not be charged for this request",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 __all__ = [
     "DEFAULT_IMAGE_RESTORE_PROMPT",
     "DEFAULT_TEXT_REMOVAL_PROMPT",
@@ -75,4 +119,5 @@ __all__ = [
     "GenerativeEditResult",
     "GenerativeImageEditProvider",
     "GenerativeProviderError",
+    "is_expected_safety_block_message",
 ]

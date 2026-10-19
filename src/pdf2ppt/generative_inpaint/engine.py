@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -41,6 +42,9 @@ GENERATIVE_ENGINE_PROVIDER = {
     "generative-openai": "openai",
     "generative-gemini": "gemini",
 }
+# Feather + mild boundary color match reduce visible rectangle seams on gradients.
+GENERATIVE_COMPOSITE_EDGE_FEATHER_PX = 3
+GENERATIVE_BOUNDARY_COLOR_MATCH_RING_PX = 4
 
 
 def uses_generative_inpaint_engine(engine: str) -> bool:
@@ -51,10 +55,50 @@ def provider_name_for_engine(engine: str) -> str | None:
     return GENERATIVE_ENGINE_PROVIDER.get(engine)
 
 
+def _color_match_restored_to_boundary(
+    source_rgb: np.ndarray,
+    restored_rgb: np.ndarray,
+    mask_array: np.ndarray,
+    *,
+    ring_px: int = GENERATIVE_BOUNDARY_COLOR_MATCH_RING_PX,
+) -> np.ndarray:
+    """Nudge restored colors near the mask edge toward the source boundary ring.
+
+    Softens faint rectangle seams on gradients without recoloring the whole
+    patched interior (which would erase intentional fill differences).
+    """
+
+    binary = (mask_array > 0).astype(np.uint8)
+    if not np.any(binary) or ring_px <= 0:
+        return restored_rgb
+    kernel = np.ones((ring_px * 2 + 1, ring_px * 2 + 1), dtype=np.uint8)
+    dilated = cv2.dilate(binary, kernel, iterations=1)
+    outside_ring = (dilated > 0) & (binary == 0)
+    if not np.any(outside_ring):
+        return restored_rgb
+    eroded = cv2.erode(binary, np.ones((3, 3), dtype=np.uint8), iterations=1)
+    inner_edge = (binary > 0) & (eroded == 0)
+    if not np.any(inner_edge):
+        return restored_rgb
+    src_mean = source_rgb[outside_ring].astype(np.float32).mean(axis=0)
+    dst_mean = restored_rgb[inner_edge].astype(np.float32).mean(axis=0)
+    delta = src_mean - dst_mean
+    distance = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    # Full correction at the mask edge; fade to zero ``ring_px`` inward.
+    weight = np.clip(1.0 - distance / float(ring_px), 0.0, 1.0)
+    weight[binary == 0] = 0.0
+    matched = restored_rgb.astype(np.float32)
+    matched += delta.reshape(1, 1, 3) * weight[..., None]
+    return np.clip(matched, 0, 255).astype(np.uint8)
+
+
 def composite_masked_edit(
     source: Image.Image,
     edited: Image.Image,
     mask_image: Image.Image,
+    *,
+    edge_feather_px: int = GENERATIVE_COMPOSITE_EDGE_FEATHER_PX,
+    color_match: bool = True,
 ) -> Image.Image:
     """Force unmasked pixels to stay identical to ``source`` after a generative edit."""
 
@@ -67,11 +111,13 @@ def composite_masked_edit(
     if mask_array.shape[:2] != source_rgb.shape[:2]:
         mask_image = mask_image.convert("L").resize(source.size, Image.Resampling.NEAREST)
         mask_array = np.array(mask_image, dtype=np.uint8)
+    if color_match:
+        edited_rgb = _color_match_restored_to_boundary(source_rgb, edited_rgb, mask_array)
     blended = _composite_lama_restoration_with_inference_mask(
         source_rgb,
         edited_rgb,
         mask_array,
-        edge_feather_px=2,
+        edge_feather_px=edge_feather_px,
     )
     result = Image.fromarray(blended, mode="RGB")
     assert_unmasked_pixels_unchanged(source, result, mask_image)
@@ -195,18 +241,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         try:
             edit_result = self._provider.edit(request)
         except GenerativeProviderError as error:
-            self._budget.record_call(
-                GenerativeCallRecord(
-                    provider=self._provider.name,
-                    model=self._model,
-                    width=image.width,
-                    height=image.height,
-                    estimated_cost_usd=0.0,
-                    cache_hit=False,
-                    success=False,
-                    note=str(error),
-                )
-            )
+            self._record_provider_failure(error, width=image.width, height=image.height)
             raise BackgroundInpaintingError(str(error)) from error
 
         self._budget.record_call(
@@ -219,6 +254,8 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
                 cache_hit=False,
                 success=True,
                 note="image-restore",
+                cost_source=edit_result.cost_source,
+                cost_uncertain=edit_result.cost_uncertain,
             )
         )
         restored = edit_result.image.convert("RGB")
@@ -263,7 +300,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
                 result[y0:y1, x0:x1],
                 restored_crop,
                 crop_working_mask,
-                edge_feather_px=2,
+                edge_feather_px=GENERATIVE_COMPOSITE_EDGE_FEATHER_PX,
             )
         note = (
             f"generative patch-mode groups={len(patch_groups)} "
@@ -303,15 +340,16 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
                     estimated_cost_usd=0.0,
                     cache_hit=True,
                     success=True,
+                    cost_source="zero",
                 )
             )
             composited = composite_masked_edit(crop_image, cached, mask_image)
             if self._passes_safety(composited, mask_image):
                 return np.array(composited, dtype=np.uint8), "generative-cache"
-            self._budget.record_fallback("cache rejected by OCR safety")
+            self._budget.record_fallback("cache rejected by OCR safety", kind="cache_reject")
 
         if not self._budget.can_afford(estimate):
-            self._budget.record_fallback("budget exhausted")
+            self._budget.record_fallback("budget exhausted", kind="budget")
             return self._local_inpaint(crop_source, crop_mask), "local-budget"
 
         request = GenerativeEditRequest(
@@ -323,21 +361,8 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         try:
             edit_result = self._provider.edit(request)
         except GenerativeProviderError as error:
-            logger.warning("Generative provider failed; using local fallback: %s", error)
-            self._budget.record_call(
-                GenerativeCallRecord(
-                    provider=self._provider.name,
-                    model=self._model,
-                    width=crop_image.width,
-                    height=crop_image.height,
-                    estimated_cost_usd=0.0,
-                    cache_hit=False,
-                    success=False,
-                    note=str(error),
-                )
-            )
-            self._budget.record_fallback(str(error))
-            return self._local_inpaint(crop_source, crop_mask), "local-api-error"
+            path = self._handle_provider_error(error, crop_image=crop_image, crop_source=crop_source, crop_mask=crop_mask)
+            return path
 
         self._budget.record_call(
             GenerativeCallRecord(
@@ -349,15 +374,76 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
                 cache_hit=False,
                 success=True,
                 note=edit_result.raw_response_note,
+                cost_source=edit_result.cost_source,
+                cost_uncertain=edit_result.cost_uncertain,
             )
         )
         composited = composite_masked_edit(crop_image, edit_result.image, mask_image)
         if not self._passes_safety(composited, mask_image):
-            self._budget.record_fallback("OCR safety rejected generative patch")
+            self._budget.record_fallback("OCR safety rejected generative patch", kind="ocr_safety")
             return self._local_inpaint(crop_source, crop_mask), "local-ocr-safety"
 
         self._cache.put(cache_key, edit_result.image.convert("RGB"))
         return np.array(composited, dtype=np.uint8), "generative"
+
+    def _record_provider_failure(
+        self,
+        error: GenerativeProviderError,
+        *,
+        width: int,
+        height: int,
+    ) -> None:
+        if error.is_expected_safety_block or not error.may_have_been_billed:
+            cost = float(error.estimated_cost_usd or 0.0)
+            uncertain = False
+            source = "zero"
+        else:
+            cost = float(
+                error.estimated_cost_usd
+                if error.estimated_cost_usd is not None
+                else self._provider.estimate_cost_usd(model=self._model, width=width, height=height)
+            )
+            uncertain = True if error.cost_uncertain or cost > 0 else False
+            source = "estimate" if cost > 0 else "zero"
+        if error.estimated_cost_usd == 0.0 and error.is_expected_safety_block:
+            cost = 0.0
+            uncertain = False
+            source = "zero"
+        self._budget.record_call(
+            GenerativeCallRecord(
+                provider=self._provider.name,
+                model=self._model,
+                width=width,
+                height=height,
+                estimated_cost_usd=cost,
+                cache_hit=False,
+                success=False,
+                note=str(error),
+                cost_source=source,
+                cost_uncertain=uncertain,
+                fallback_kind="safety_block" if error.is_expected_safety_block else "api_error",
+            )
+        )
+
+    def _handle_provider_error(
+        self,
+        error: GenerativeProviderError,
+        *,
+        crop_image: Image.Image,
+        crop_source: np.ndarray,
+        crop_mask: np.ndarray,
+    ) -> tuple[np.ndarray, str]:
+        if error.is_expected_safety_block:
+            logger.info("Generative safety block; using local fallback: %s", error)
+            kind = "safety_block"
+            path = "local-safety-block"
+        else:
+            logger.warning("Generative provider failed; using local fallback: %s", error)
+            kind = "api_error"
+            path = "local-api-error"
+        self._record_provider_failure(error, width=crop_image.width, height=crop_image.height)
+        self._budget.record_fallback(str(error), kind=kind)
+        return self._local_inpaint(crop_source, crop_mask), path
 
     def _passes_safety(self, image: Image.Image, mask_image: Image.Image) -> bool:
         if not self._verify_ocr:
@@ -370,7 +456,16 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
     def _local_inpaint(self, crop_source: np.ndarray, crop_mask: np.ndarray) -> np.ndarray:
         crop_page = Image.fromarray(crop_source, mode="RGB")
         crop_mask_image = Image.fromarray(crop_mask, mode="L")
-        return np.array(self._local_fallback.inpaint(crop_page, crop_mask_image), dtype=np.uint8)
+        restored = np.array(self._local_fallback.inpaint(crop_page, crop_mask_image), dtype=np.uint8)
+        # opencv-fast may touch pixels outside the mask (surface prefill / dilated
+        # Telea groups). Re-apply the mask lock so the engine-level invariant
+        # (assert_unmasked_pixels_unchanged) holds for fallback patches too.
+        return _composite_lama_restoration_with_inference_mask(
+            crop_source,
+            restored,
+            crop_mask,
+            edge_feather_px=GENERATIVE_COMPOSITE_EDGE_FEATHER_PX,
+        )
 
 
 __all__ = [

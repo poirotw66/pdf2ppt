@@ -36,6 +36,7 @@ from .providers import (
     GenerativeProviderError,
     OpenAIImageEditProvider,
     create_provider,
+    is_expected_safety_block_message,
 )
 from .safety import (
     build_ocr_residual_checker,
@@ -61,6 +62,7 @@ __all__ = [
     "composite_masked_edit",
     "compute_generative_cache_key",
     "create_provider",
+    "is_expected_safety_block_message",
     "provider_name_for_engine",
     "residual_text_overlap_ratio",
     "uses_generative_inpaint_engine",
