@@ -80,6 +80,8 @@ describe("JobSidebar", () => {
       "white-box",
       "lama-pytorch-hybrid",
       "lama-pytorch",
+      "generative-openai",
+      "generative-gemini",
     ]);
     expect(inpaintSelects[0].value).toBe("lama-pytorch");
   });

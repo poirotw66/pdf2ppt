@@ -123,6 +123,8 @@ class ConvertRequest(BaseModel):
         "lama-onnx-hybrid",
         "lama-onnx-cuda-hybrid",
         "lama-pytorch-hybrid",
+        "generative-openai",
+        "generative-gemini",
     ] = "opencv-fast"
     inpaint_padding_px: int = Field(default=6, ge=0, le=128)
     inpaint_max_area_ratio: float = Field(default=0.12, ge=0.0, le=1.0)
@@ -132,6 +134,12 @@ class ConvertRequest(BaseModel):
     inpaint_max_side_px: int = Field(default=1536, ge=256, le=8192)
     inpaint_lama_repo_root: str | None = "lama"
     inpaint_lama_device: str = "cuda"
+    generative_model: str | None = None
+    generative_max_calls: int = Field(default=50, ge=0, le=10_000)
+    generative_max_cost_usd: float = Field(default=5.0, ge=0.0, le=10_000.0)
+    generative_cache_dir: str | None = ".pdf2ppt_cache/generative_inpaint"
+    generative_timeout_s: float = Field(default=120.0, ge=1.0, le=600.0)
+    generative_verify_ocr: bool = True
     write_debug_artifacts: bool = False
 
 

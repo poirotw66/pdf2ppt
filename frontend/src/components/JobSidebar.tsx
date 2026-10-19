@@ -126,6 +126,13 @@ export function JobSidebar({
                 ))}
               </select>
             </label>
+            {(inpaintEngine === "generative-openai" || inpaintEngine === "generative-gemini") && (
+              <span className="muted step-hint" data-testid="generative-inpaint-hint">
+                Generative inpaint is opt-in and non-deterministic. Set OPENAI_API_KEY or
+                GEMINI_API_KEY on the API server. Without a key, conversion falls back to local
+                inpainting. Use Convert to regenerate backgrounds for the current review pass.
+              </span>
+            )}
             <div className="workflow-actions">
               <button onClick={onSaveBoxes} disabled={isBusy || !hasJob || !hasPages}>Save Boxes</button>
               <button onClick={onConvert} disabled={isBusy || !hasJob || !hasPages}>Convert PPTX</button>
