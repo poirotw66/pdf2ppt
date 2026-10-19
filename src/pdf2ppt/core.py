@@ -99,7 +99,7 @@ class ConversionOptions:
     # Thresholds apply to the selected measure (historical CLI names keep "luma_std").
     generative_flat_ring_luma_std: float = 2.0
     # Ring texture score at/above this disables the low-freq gate (photo textures).
-    generative_textured_ring_luma_std: float = 16.0
+    generative_textured_ring_luma_std: float = 4.0
     # Retry once on nondeterministic copyright/recitation blocks before local fallback.
     generative_safety_block_retries: int = 1
     # Cap on total provider attempts including free safety blocks (None → 3× max_calls).

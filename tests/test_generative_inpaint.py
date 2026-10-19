@@ -6,6 +6,7 @@ import base64
 import io
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -273,6 +274,39 @@ class GenerativeHelpersTests(unittest.TestCase):
         self.assertIsNone(
             effective_low_freq_mae_threshold(4.0, textured_score, textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD)
         )
+
+    def test_highpass_textured_threshold_calibrated_to_v5_bench(self) -> None:
+        """v5 Gemini bench: flat ≤ 1.04, photo_texture 6.27, geometric patch 14.91."""
+
+        # Soft photo ring must disable the low-freq gate (legacy textured=16 did not).
+        self.assertIsNone(
+            effective_low_freq_mae_threshold(
+                4.0,
+                6.27,
+                textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+                scale_ref_std=2.0,
+            )
+        )
+        # Mid geometric_chart patch (~14.9) is clearly textured → gate off.
+        self.assertIsNone(
+            effective_low_freq_mae_threshold(
+                4.0,
+                14.91,
+                textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+                scale_ref_std=2.0,
+            )
+        )
+        # Gradient rings stay below flat; mid-band (2–4) still scales the gate.
+        self.assertLessEqual(1.04, DEFAULT_FLAT_RING_TEXTURE_STD)
+        scaled = effective_low_freq_mae_threshold(
+            4.0,
+            3.0,
+            textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+            scale_ref_std=2.0,
+        )
+        self.assertIsNotNone(scaled)
+        assert scaled is not None
+        self.assertAlmostEqual(scaled, 6.0, places=5)
 
     def test_cache_roundtrip(self) -> None:
         import tempfile
@@ -702,6 +736,90 @@ class GenerativeEngineTests(unittest.TestCase):
         self.assertEqual(budget.billed_calls, 1)
         self.assertEqual(budget.flat_ring_skips, 0)
 
+    def test_soft_photo_highpass_keeps_generative_despite_low_freq_mae(self) -> None:
+        """v5 photo_texture regression: highpass ≈ 6.27, low-freq MAE ≈ 14.33.
+
+        With the legacy textured threshold (16), the gate stayed on at 12.54 and
+        rejected Gemini after a billed call. Recalibrated textured=4 skips the gate.
+        """
+
+        provider = FakeProvider(fill_color=(90, 95, 100))
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+            low_freq_mae_threshold=4.0,
+            skip_flat_ring=True,
+            ring_texture_measure="highpass",
+            flat_ring_luma_std=DEFAULT_FLAT_RING_TEXTURE_STD,
+            textured_ring_luma_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+            low_freq_std_scale_ref=2.0,
+        )
+        source = _solid_rgb((64, 64), (120, 110, 100))
+        mask = _rect_mask((64, 64), (16, 16, 48, 48))
+        with (
+            patch(
+                "pdf2ppt.generative_inpaint.engine.context_ring_texture_score",
+                return_value=6.27,
+            ),
+            patch(
+                "pdf2ppt.generative_inpaint.engine.low_frequency_masked_mae",
+                return_value=14.33,
+            ),
+        ):
+            # Legacy textured=16 would keep a loosened gate at 12.54 and reject.
+            legacy = effective_low_freq_mae_threshold(
+                4.0, 6.27, textured_std=16.0, scale_ref_std=2.0
+            )
+            self.assertIsNotNone(legacy)
+            assert legacy is not None
+            self.assertAlmostEqual(legacy, 12.54, places=2)
+            self.assertGreater(14.33, legacy)
+
+            result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(budget.billed_calls, 1)
+        self.assertEqual(budget.low_freq_fallbacks, 0)
+        self.assertEqual(budget.flat_ring_skips, 0)
+        self.assertIn("generative", engine.last_debug_note or "")
+
+    def test_geometric_mid_highpass_patch_skips_low_freq_gate(self) -> None:
+        """v5 geometric_chart patch at highpass ≈ 14.91 stays on the generative path."""
+
+        provider = FakeProvider(fill_color=(200, 200, 200))
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+            low_freq_mae_threshold=4.0,
+            skip_flat_ring=True,
+            ring_texture_measure="highpass",
+            textured_ring_luma_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+        )
+        source = _solid_rgb((112, 64), (240, 240, 240))
+        mask = _rect_mask((112, 64), (20, 16, 92, 48))
+        with (
+            patch(
+                "pdf2ppt.generative_inpaint.engine.context_ring_texture_score",
+                return_value=14.91,
+            ),
+            patch(
+                "pdf2ppt.generative_inpaint.engine.low_frequency_masked_mae",
+                return_value=20.0,
+            ),
+        ):
+            result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(budget.low_freq_fallbacks, 0)
+        self.assertEqual(budget.flat_ring_skips, 0)
+        self.assertIn("generative", engine.last_debug_note or "")
+
     def test_safety_blocks_do_not_consume_billed_budget(self) -> None:
         error = GenerativeProviderError(
             "Image generation blocked due to copyright/recitation. "
@@ -1101,7 +1219,7 @@ class MaskDilateOptionTests(unittest.TestCase):
         self.assertEqual(options.generative_ring_texture_measure, "highpass")
         self.assertEqual(options.generative_ring_texture_blur_sigma, 5.0)
         self.assertEqual(options.generative_flat_ring_luma_std, 2.0)
-        self.assertEqual(options.generative_textured_ring_luma_std, 16.0)
+        self.assertEqual(options.generative_textured_ring_luma_std, 4.0)
         self.assertEqual(options.generative_safety_block_retries, 1)
 
     def test_line_height_dilate_scales_and_merges(self) -> None:

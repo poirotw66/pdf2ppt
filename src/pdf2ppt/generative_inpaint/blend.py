@@ -31,11 +31,13 @@ DEFAULT_FLAT_RING_TEXTURE_STD = 2.0
 # Alias kept for callers/CLI that still use the historical "luma_std" name.
 DEFAULT_FLAT_RING_LUMA_STD = DEFAULT_FLAT_RING_TEXTURE_STD
 # When ring texture score reaches this, skip the low-freq gate (photo / textured pages).
-# Kept relatively high so mild compression banding on gradient slides does not
-# disable the gate; clear photo/noise rings still exceed it.
-DEFAULT_TEXTURED_RING_TEXTURE_STD = 16.0
+# Tuned for highpass against the Gemini v5 bench: max flat ring ≈ 1.04
+# (gradient_radial), min photo-like ring ≈ 6.27 (photo_texture). Midpoint ≈ 4
+# disables the gate for soft photo texture while gradients stay flat-skipped.
+DEFAULT_TEXTURED_RING_TEXTURE_STD = 4.0
 DEFAULT_TEXTURED_RING_LUMA_STD = DEFAULT_TEXTURED_RING_TEXTURE_STD
-# Scale low-freq threshold as max(1, score / this) when between flat and textured.
+# Scale low-freq threshold as max(1, score / this) in the narrow band between
+# flat (2.0) and textured (4.0). Matches the flat-ring threshold.
 DEFAULT_LOW_FREQ_STD_SCALE_REF = 2.0
 
 

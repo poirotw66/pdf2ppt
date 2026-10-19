@@ -351,11 +351,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--generative-textured-ring-luma-std",
         type=float,
-        default=16.0,
+        default=4.0,
         help=(
             "Outside-ring texture score at/above this disables the low-frequency MAE "
             "gate (photo / textured pages where generative is preferred). Threshold "
-            "applies to --generative-ring-texture-measure."
+            "applies to --generative-ring-texture-measure (default highpass ≈ 4)."
         ),
     )
     parser.add_argument(

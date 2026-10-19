@@ -93,8 +93,9 @@ gradients must stay flat.
 - On mid-range rings the base `--generative-low-freq-mae-threshold` (default
   **4.0**) is scaled up by the ring texture score.
 - On highly textured rings (score ≥
-  `--generative-textured-ring-luma-std`, default **16.0**) the low-freq gate is
-  skipped so photo backgrounds are not rejected for high-frequency mismatch.
+  `--generative-textured-ring-luma-std`, default **4.0** for highpass) the
+  low-freq gate is skipped so soft photo backgrounds (bench highpass ≈ 6) are
+  not rejected when generative and opencv disagree on high-frequency detail.
   Report field `ring_texture_measure` records which measure was used.
 
 ## Safety, budget, and cache
