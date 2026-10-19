@@ -29,19 +29,23 @@ python -m pip install -e ".[layout]"
 1. **Text-box grouping** — lines that share a text/list region become one
    paragraph box. Side-by-side flowchart labels (**Collect Info** vs **Verify**)
    stay separate even when their y-ranges overlap.
-2. **Bullets** — list regions emit real PowerPoint bullets / indent levels
-   (`a:buChar`) instead of literal `•` / `◦` characters in the run text.
+2. **Bullets** — list regions emit real PowerPoint bullets / auto-numbers
+   (`a:buChar` / `a:buAutoNum`) with hanging indent instead of literal glyphs.
 3. **Titles** — title regions map to the slide **title placeholder** when a
-   Title Only (or equivalent) layout is available; otherwise they remain a
-   free text box with `block_role=title`.
+   Title Only layout is available; the placeholder is raised above the
+   background picture/shape in z-order (PDF boldness preserved, no forced wrap).
 4. **Reading order** — region order becomes z/tab order for text boxes
    (column-aware: left column then right when both sides have content).
 5. **Figures** — figure/chart regions are cropped into discrete picture
-   elements (and erased from overlay backgrounds when present).
-6. **Tables** — table regions **defer to the P1 native table path**. Text that
-   already belongs to a P1 table is not double-emitted as a text box.
-7. **Headers / footers / page numbers** — skipped by default
-   (`--keep-header-footer` to retain them).
+   elements unless they overlap already-nativized P1 shapes/tables (avoids
+   double ink on flowcharts/charts).
+6. **Tables** — table regions **defer to the P1 native table path**. When no
+   native table exists (scanned pages), lines stay as separate text boxes
+   instead of one overflowing merge.
+7. **Headers / footers / page numbers** — OCR HF skipped by default (stay in
+   the raster background). Native digital HF stay visible as text boxes.
+   Chart axis labels are not treated as footers (`y0 >= 0.93H` + tiny/page-number,
+   and never when a shape/table sits within 40pt above).
 
 Works for **digital PDFs** (PyMuPDF spans + layout regions) and **scanned
 pages** (OCR lines + layout regions).

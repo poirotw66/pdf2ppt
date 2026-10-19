@@ -103,11 +103,27 @@ class HeuristicLayoutTests(unittest.TestCase):
         # Literal bullet glyphs stripped from paragraph text.
         self.assertFalse(any(para.text.startswith(("•", "◦", "-", "*")) for para in paragraphs))
 
-    def test_skips_footer_and_page_number(self) -> None:
+    def test_skips_ocr_footer_and_page_number(self) -> None:
         blocks = [
             _block("body", "Hello", (60, 120, 400, 160)),
-            _block("foot", "Confidential", (48, 500, 300, 530), font_size=10),
-            _block("num", "3", (880, 500, 940, 530), font_size=10),
+            TextBlock(
+                id="foot",
+                source="ocr",
+                bbox=(48, 510, 300, 535),
+                text="Confidential",
+                confidence=0.9,
+                font_size=10,
+                image_bbox=(48, 510, 300, 535),
+            ),
+            TextBlock(
+                id="num",
+                source="ocr",
+                bbox=(880, 510, 940, 535),
+                text="3",
+                confidence=0.9,
+                font_size=10,
+                image_bbox=(880, 510, 940, 535),
+            ),
         ]
         regions = analyze_layout_heuristic(blocks, page_width=960, page_height=540)
         applied = apply_layout_to_page(
@@ -122,13 +138,67 @@ class HeuristicLayoutTests(unittest.TestCase):
         self.assertNotIn("Confidential", texts)
         self.assertNotIn("3", texts)
 
+    def test_keeps_native_footer_visible_on_digital(self) -> None:
+        blocks = [
+            _block("body", "Hello", (60, 120, 400, 160)),
+            _block("foot", "Confidential", (48, 510, 300, 535), font_size=10),
+        ]
+        regions = analyze_layout_heuristic(blocks, page_width=960, page_height=540)
+        applied = apply_layout_to_page(
+            blocks,
+            LayoutPageResult(regions=regions, engine="heuristic"),
+            page_width=960,
+            page_height=540,
+            skip_header_footer=True,
+        )
+        texts = [block.text for block in applied.text_blocks]
+        self.assertIn("Confidential", texts)
+
+    def test_chart_axis_labels_not_footer(self) -> None:
+        # Axis text deep in the footer band would match y0>=0.93*H, but a chart
+        # shape within 40pt above must block the footer label.
+        blocks = [
+            _block("t", "Monthly Active Users", (48, 36, 500, 80), role="title", font_size=24),
+            _block("axis", "Jan  Feb  Mar  Apr  May  Jun  Jul", (120, 505, 800, 530), font_size=11),
+        ]
+        shapes = [(140.0, 200.0, 200.0, 470.0), (220.0, 150.0, 280.0, 470.0)]
+        regions = analyze_layout_heuristic(
+            blocks,
+            page_width=960,
+            page_height=540,
+            shape_bboxes=shapes,
+        )
+        labels = {region.label for region in regions}
+        self.assertNotIn("footer", labels)
+        applied = apply_layout_to_page(
+            blocks,
+            LayoutPageResult(regions=regions, engine="heuristic"),
+            page_width=960,
+            page_height=540,
+            skip_header_footer=True,
+        )
+        self.assertTrue(any("Jan" in block.text for block in applied.text_blocks))
+
+    def test_shallow_bottom_labels_not_footer_without_tiny_type(self) -> None:
+        # geometric_chart axis at ~0.89*H must never be footer.
+        blocks = [
+            _block("axis", "Jan  Feb  Mar  Apr  May  Jun  Jul", (120, 480, 800, 500), font_size=14),
+        ]
+        regions = analyze_layout_heuristic(blocks, page_width=960, page_height=540)
+        self.assertEqual(regions[0].label, "text")
+
     def test_strip_bullet_prefix_levels(self) -> None:
-        cleaned, level = strip_bullet_prefix("• Ship it", left=72, min_left=72)
+        cleaned, level, style = strip_bullet_prefix("• Ship it", left=72, min_left=72)
         self.assertEqual(cleaned, "Ship it")
         self.assertEqual(level, 0)
-        cleaned, level = strip_bullet_prefix("1. First", left=96, min_left=72)
+        self.assertEqual(style, "bullet")
+        cleaned, level, style = strip_bullet_prefix("1. First", left=96, min_left=72)
         self.assertEqual(cleaned, "First")
         self.assertGreaterEqual(level, 1)
+        self.assertEqual(style, "arabicPeriod")
+        cleaned, level, style = strip_bullet_prefix("a. Nested", left=96, min_left=72)
+        self.assertEqual(cleaned, "Nested")
+        self.assertEqual(style, "alphaLcPeriod")
 
 
 class PpstructureMockTests(unittest.TestCase):
@@ -352,8 +422,22 @@ class LayoutMetricsFixtureTests(unittest.TestCase):
             _block("d", "• Keep heuristic fallback for CI", (72, 250, 880, 284)),
             _block("e", "◦ No model download required", (96, 290, 880, 324)),
             _block("f", "• Report grouping metrics in the PR", (72, 340, 880, 374)),
-            _block("foot", "Confidential", (48, 500, 400, 530), font_size=10),
-            _block("num", "3", (880, 500, 940, 530), font_size=10),
+            TextBlock(
+                id="foot",
+                source="ocr",
+                bbox=(48, 510, 400, 535),
+                text="Confidential",
+                confidence=0.9,
+                font_size=10,
+            ),
+            TextBlock(
+                id="num",
+                source="ocr",
+                bbox=(880, 510, 940, 535),
+                text="3",
+                confidence=0.9,
+                font_size=10,
+            ),
         ]
         regions = analyze_layout_heuristic(blocks, page_width=960, page_height=540)
         applied = apply_layout_to_page(
@@ -368,7 +452,7 @@ class LayoutMetricsFixtureTests(unittest.TestCase):
         self.assertIsNotNone(metrics.list_f1)
         assert metrics.list_f1 is not None
         self.assertGreaterEqual(metrics.list_f1, 0.5)
-        # Footer/page number should not appear as predicted boxes.
+        # OCR footer/page number stay in the raster background (skipped as text).
         joined = " ".join(block.text for block in applied.text_blocks)
         self.assertNotIn("Confidential", joined)
 
@@ -424,7 +508,157 @@ class RealModelOptInTests(unittest.TestCase):
         image = Image.new("RGB", (640, 480), color=(255, 255, 255))
         engine = LayoutEngine(engine="ppstructure")
         result = engine.analyze(image, page_width=640, page_height=480)
-        self.assertIn(result.engine, {"ppstructure", "heuristic"})
+        self.assertEqual(result.engine, "ppstructure")
+
+
+class TitleZOrderTests(unittest.TestCase):
+    def test_title_placeholder_above_background_picture(self) -> None:
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.models import PageResult, QualityScore
+        from pdf2ppt.ppt_render import render_page_to_slide
+
+        presentation = Presentation()
+        blank = presentation.slide_layouts[6]
+        # Minimal PNG background.
+        import io
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (16, 16), color=(40, 80, 120)).save(buffer, format="PNG")
+        page = PageResult(
+            page_number=1,
+            page_kind="digital",
+            background_mode="overlay",
+            width_pt=960,
+            height_pt=540,
+            background_image_bytes=buffer.getvalue(),
+            text_blocks=[
+                TextBlock(
+                    id="title",
+                    source="native",
+                    bbox=(60, 40, 700, 100),
+                    text="Platform Overview",
+                    confidence=1.0,
+                    font_size=28,
+                    block_role="title",
+                    use_title_placeholder=True,
+                    reading_order=1,
+                    bold=False,
+                ),
+            ],
+            quality_score=QualityScore(1, 1, 1, 1),
+            fallback_reason=None,
+        )
+        render_page_to_slide(presentation, blank, page, slide_width_pt=960, slide_height_pt=540)
+        slide = presentation.slides[0]
+        tree = slide.shapes._spTree  # noqa: SLF001
+        children = list(tree)
+        title_el = slide.shapes.title._element  # noqa: SLF001
+        pic_els = [child for child in children if child.tag == qn("p:pic")]
+        self.assertTrue(pic_els)
+        self.assertGreater(children.index(title_el), children.index(pic_els[0]))
+
+
+class GroupedOcrMaskTests(unittest.TestCase):
+    def test_grouped_ocr_lines_union_image_bbox(self) -> None:
+        blocks = [
+            TextBlock(
+                id="l1",
+                source="ocr",
+                bbox=(72, 130, 400, 160),
+                text="• First line",
+                confidence=0.9,
+                font_size=16,
+                image_bbox=(72, 130, 400, 160),
+                image_polygon=((72, 130), (400, 130), (400, 160), (72, 160)),
+            ),
+            TextBlock(
+                id="l2",
+                source="ocr",
+                bbox=(96, 170, 400, 200),
+                text="◦ Second line",
+                confidence=0.9,
+                font_size=16,
+                image_bbox=(96, 170, 400, 200),
+                image_polygon=((96, 170), (400, 170), (400, 200), (96, 200)),
+            ),
+        ]
+        regions = analyze_layout_heuristic(blocks, page_width=960, page_height=540)
+        applied = apply_layout_to_page(
+            blocks,
+            LayoutPageResult(regions=regions, engine="heuristic"),
+            page_width=960,
+            page_height=540,
+        )
+        list_blocks = [block for block in applied.text_blocks if block.block_role == "list"]
+        self.assertTrue(list_blocks)
+        image_bbox = list_blocks[0].image_bbox
+        self.assertIsNotNone(image_bbox)
+        assert image_bbox is not None
+        self.assertAlmostEqual(image_bbox[1], 130, places=0)
+        self.assertAlmostEqual(image_bbox[3], 200, places=0)
+        self.assertIsNone(list_blocks[0].image_polygon)
+
+
+class FigureSkipNativeTests(unittest.TestCase):
+    def test_skips_figure_crop_over_native_shapes(self) -> None:
+        from pdf2ppt.models import ShapeElement
+
+        image = Image.new("RGB", (960, 540), color=(255, 255, 255))
+        regions = [
+            LayoutRegion(
+                id="fig1",
+                label="figure",
+                bbox=(100, 100, 500, 400),
+                confidence=0.95,
+                reading_order=1,
+                engine="ppstructure",
+            )
+        ]
+        shapes = [
+            ShapeElement(
+                id="s1",
+                kind="rect",
+                bbox=(120, 120, 300, 280),
+                fill_color="#336699",
+            )
+        ]
+        applied = apply_layout_to_page(
+            [],
+            LayoutPageResult(regions=regions, engine="ppstructure"),
+            page_width=960,
+            page_height=540,
+            page_image=image,
+            shape_elements=shapes,
+        )
+        self.assertEqual(applied.figure_images, [])
+
+
+class TableRegionNoMergeTests(unittest.TestCase):
+    def test_table_region_without_native_keeps_per_line_boxes(self) -> None:
+        blocks = [
+            _block("a", "Cell A", (100, 100, 200, 130)),
+            _block("b", "Cell B", (220, 100, 320, 130)),
+            _block("c", "Cell C", (100, 150, 200, 180)),
+        ]
+        regions = [
+            LayoutRegion(
+                id="table",
+                label="table",
+                bbox=(90, 90, 340, 200),
+                confidence=0.9,
+                reading_order=1,
+                engine="ppstructure",
+            )
+        ]
+        applied = apply_layout_to_page(
+            blocks,
+            LayoutPageResult(regions=regions, engine="ppstructure"),
+            page_width=960,
+            page_height=540,
+            table_elements=[],
+        )
+        self.assertEqual(len(applied.text_blocks), 3)
 
 
 if __name__ == "__main__":

@@ -46,10 +46,14 @@ class TextParagraph:
 
     text: str
     list_level: int | None = None  # None = plain; 0+ = bullet indent level
+    # bullet | arabicPeriod | alphaLcPeriod — drives buChar vs buAutoNum.
+    list_style: str | None = None
     bold: bool | None = None
     italic: bool | None = None
     font_size: float | None = None
     font_color: str | None = None
+    # Extra space before this paragraph (pt), from PDF line gaps.
+    space_before_pt: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

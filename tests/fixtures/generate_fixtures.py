@@ -494,19 +494,12 @@ def build_flowchart() -> None:
 
 
 def build_merged_table() -> None:
-    """Bordered table with a merged header cell for P1 native table merges.
-
-    PyMuPDF 2.x ``find_tables()`` needs a complete line grid (including a
-    vertical through the header band) to detect the table; merge/colspan is
-    recovered from the header cell span metadata afterward.
-    """
+    """Bordered table with a merged header cell for P1 native table merges."""
 
     doc, page = _new_doc()
     page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
-    # Keep the title box relatively narrow: a wide title + header fill can make
-    # PyMuPDF 2.x ``find_tables()`` miss the grid entirely.
     page.insert_textbox(
-        fitz.Rect(60, 40, 400, 70),
+        fitz.Rect(60, 40, 700, 85),
         "Regional Headcount",
         fontsize=24,
         fontname="helv",
@@ -514,18 +507,25 @@ def build_merged_table() -> None:
     )
 
     left, top, right, bottom = 100.0, 120.0, 820.0, 400.0
-    mid_x = 460.0
-    # Header fill under the grid lines.
-    page.draw_rect(fitz.Rect(left, top, right, 200.0), color=None, fill=(0.85, 0.88, 0.94), fill_opacity=1)
-    horizontals = (top, 200.0, 266.666, 333.333, bottom)
-    verticals = (left, mid_x, right)
-    # Uniform 1pt strokes: mixed outer/inner widths + title + fill can make
-    # PyMuPDF 2.x miss the table. Border width assertions sample drawn lines.
-    for y in horizontals:
-        page.draw_line(fitz.Point(left, y), fitz.Point(right, y), color=(0.25, 0.25, 0.28), width=1.0)
-    for x in verticals:
-        page.draw_line(fitz.Point(x, top), fitz.Point(x, bottom), color=(0.25, 0.25, 0.28), width=1.0)
+    # Outer border
+    for x0, y0, x1, y1 in (
+        (left, top, right, top),
+        (left, bottom, right, bottom),
+        (left, top, left, bottom),
+        (right, top, right, bottom),
+    ):
+        page.draw_line(fitz.Point(x0, y0), fitz.Point(x1, y1), color=(0.25, 0.25, 0.28), width=1.5)
 
+    # Horizontal rules (3 body rows + header)
+    for y in (200.0, 266.666, 333.333):
+        page.draw_line(fitz.Point(left, y), fitz.Point(right, y), color=(0.25, 0.25, 0.28), width=1)
+
+    # Vertical divider only below the merged header
+    mid_x = 460.0
+    page.draw_line(fitz.Point(mid_x, 200.0), fitz.Point(mid_x, bottom), color=(0.25, 0.25, 0.28), width=1)
+
+    # Header fill
+    page.draw_rect(fitz.Rect(left, top, right, 200.0), color=None, fill=(0.85, 0.88, 0.94), fill_opacity=1)
     page.insert_textbox(
         fitz.Rect(left + 10, top + 25, right - 10, 190),
         "Americas + EMEA Combined",

@@ -351,6 +351,8 @@ def analyze_page(
         page_height=float(page.rect.height),
         text_blocks=text_blocks,
         page_number=page_number,
+        shape_bboxes=[shape.bbox for shape in vector_result.shapes],
+        table_bboxes=[table.bbox for table in vector_result.tables],
     )
     layout_applied = apply_layout_to_page(
         text_blocks,
@@ -359,6 +361,7 @@ def analyze_page(
         page_height=float(page.rect.height),
         page_image=layout_image,
         table_elements=vector_result.tables,
+        shape_elements=vector_result.shapes,
         skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
         page_number=page_number,
     )

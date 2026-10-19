@@ -68,21 +68,25 @@ def render_page_to_slide(
     scale_x = slide_width_pt / page_result.width_pt
     scale_y = slide_height_pt / page_result.height_pt
 
+    background_element: Any | None = None
     if page_result.background_image_bytes is not None:
-        slide.shapes.add_picture(
+        background_picture = slide.shapes.add_picture(
             io.BytesIO(page_result.background_image_bytes),
             0,
             0,
             width=presentation.slide_width,
             height=presentation.slide_height,
         )
+        background_element = background_picture._element  # noqa: SLF001
 
     # Z-order: page-background shapes → other shapes → pictures → tables → text.
     shape_elements = list(getattr(page_result, "shape_elements", None) or [])
     background_shapes = [shape for shape in shape_elements if shape.is_page_background]
     foreground_shapes = [shape for shape in shape_elements if not shape.is_page_background]
     for shape in sorted(background_shapes, key=lambda item: item.z_order):
-        add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
+        added = add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
+        if background_element is None and added is not None:
+            background_element = getattr(added, "_element", None)
     for shape in sorted(foreground_shapes, key=lambda item: item.z_order):
         add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
 
@@ -106,11 +110,41 @@ def render_page_to_slide(
             scale_x=scale_x,
             scale_y=scale_y,
         )
+        # Title Only layouts put the title placeholder first in spTree, under any
+        # full-slide background picture/shape. Move it just after the background.
+        raise_title_above_background(slide, background_element=background_element)
 
     for block in sorted(page_result.text_blocks, key=lambda item: item.reading_order):
         if title_block is not None and block.id == title_block.id:
             continue
         add_text_block(slide, block, scale_x=scale_x, scale_y=scale_y)
+
+
+def raise_title_above_background(slide: Any, *, background_element: Any | None) -> None:
+    """Move the title placeholder immediately after the slide background element."""
+
+    title_shape = getattr(slide.shapes, "title", None)
+    if title_shape is None:
+        return
+    try:
+        title_element = title_shape._element  # noqa: SLF001
+        tree = title_element.getparent()
+        if tree is None:
+            return
+        tree.remove(title_element)
+        if background_element is not None and background_element.getparent() is tree:
+            background_element.addnext(title_element)
+        else:
+            # No dedicated background: place title after any leading non-title shapes
+            # that already sit at the bottom of the tree, else append.
+            tree.insert(0, title_element)
+            if len(tree):
+                first = tree[0]
+                if first is not title_element:
+                    tree.remove(title_element)
+                    first.addnext(title_element)
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not raise title above background", exc_info=True)
 
 
 def _find_title_only_layout(presentation: Any) -> Any | None:
@@ -140,17 +174,19 @@ def _apply_title_placeholder(title_shape: Any, block: TextBlock, *, scale_x: flo
     """Fill the title placeholder and move it onto the PDF title bbox (keeps SSIM stable)."""
 
     left, top, width, height = bbox_to_shape_geometry(block.bbox, scale_x, scale_y)
+    # Widen slightly so a single-line title does not wrap under Title Only margins.
     try:
         title_shape.left = left
         title_shape.top = top
-        title_shape.width = max(width, Emu(1))
+        widened = max(int(width * 1.08), int(width), 1) if width else 1
+        title_shape.width = max(widened, Emu(1))
         title_shape.height = max(height, Emu(1))
     except Exception:  # noqa: BLE001
         logger.debug("Could not reposition title placeholder to PDF bbox", exc_info=True)
 
     text_frame = title_shape.text_frame
     text_frame.clear()
-    text_frame.word_wrap = True
+    text_frame.word_wrap = False
     text_frame.margin_left = 0
     text_frame.margin_right = 0
     text_frame.margin_top = 0
@@ -172,17 +208,16 @@ def _apply_title_placeholder(title_shape: Any, block: TextBlock, *, scale_x: flo
         run.font.size = Pt(max(6.0, block.font_size * min(scale_x, scale_y)))
     if block.font_color:
         run.font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
-    run.font.bold = True if block.bold or block.block_role == "title" else block.bold
+    # Preserve PDF boldness — do not force title runs to bold.
+    run.font.bold = block.bold
     run.font.italic = block.italic
 
 
-def add_shape_element(slide: Any, shape: ShapeElement, *, scale_x: float, scale_y: float) -> None:
+def add_shape_element(slide: Any, shape: ShapeElement, *, scale_x: float, scale_y: float) -> Any | None:
     if shape.kind in {"line", "polyline"} and len(shape.points) >= 2:
-        add_line_or_polyline(slide, shape, scale_x=scale_x, scale_y=scale_y)
-        return
+        return add_line_or_polyline(slide, shape, scale_x=scale_x, scale_y=scale_y)
     if shape.kind in {"polygon", "freeform"} and len(shape.points) >= 3:
-        add_freeform_shape(slide, shape, scale_x=scale_x, scale_y=scale_y)
-        return
+        return add_freeform_shape(slide, shape, scale_x=scale_x, scale_y=scale_y)
 
     if shape.kind == "arrow":
         mso_shape = _ARROW_DIRECTION_TO_MSO.get(shape.arrow_direction or "right", MSO_SHAPE.RIGHT_ARROW)
@@ -192,9 +227,10 @@ def add_shape_element(slide: Any, shape: ShapeElement, *, scale_x: float, scale_
     # Lines stored as zero-thickness bboxes still need a positive size for autoshapes.
     auto_shape = slide.shapes.add_shape(mso_shape, left, top, max(width, Emu(1)), max(height, Emu(1)))
     apply_shape_style(auto_shape, shape)
+    return auto_shape
 
 
-def add_line_or_polyline(slide: Any, shape: ShapeElement, *, scale_x: float, scale_y: float) -> None:
+def add_line_or_polyline(slide: Any, shape: ShapeElement, *, scale_x: float, scale_y: float) -> Any | None:
     points = shape.points
     if shape.kind == "line" or len(points) == 2:
         x0, y0 = points[0]
@@ -207,8 +243,8 @@ def add_line_or_polyline(slide: Any, shape: ShapeElement, *, scale_x: float, sca
             pt_to_emu(y1 * scale_y),
         )
         apply_line_style(connector, shape)
-        return
-    add_freeform_shape(slide, shape, scale_x=scale_x, scale_y=scale_y, close=False)
+        return connector
+    return add_freeform_shape(slide, shape, scale_x=scale_x, scale_y=scale_y, close=False)
 
 
 def add_freeform_shape(
@@ -218,10 +254,10 @@ def add_freeform_shape(
     scale_x: float,
     scale_y: float,
     close: bool | None = None,
-) -> None:
+) -> Any | None:
     points = shape.points
     if len(points) < 2:
-        return
+        return None
     start_x, start_y = points[0]
     builder = slide.shapes.build_freeform(pt_to_emu(start_x * scale_x), pt_to_emu(start_y * scale_y))
     segments = [(pt_to_emu(x * scale_x), pt_to_emu(y * scale_y)) for x, y in points[1:]]
@@ -231,6 +267,7 @@ def add_freeform_shape(
     builder.add_line_segments(segments, close=should_close)
     freeform = builder.convert_to_shape()
     apply_shape_style(freeform, shape)
+    return freeform
 
 
 def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_y: float) -> None:
@@ -588,17 +625,26 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
         font_color = item.font_color if item.font_color is not None else block.font_color
         bold = block.bold if item.bold is None else item.bold
         italic = block.italic if item.italic is None else item.italic
-        if font_size and len(paragraphs) == 1:
-            # Single-paragraph boxes still go through OCR fit below.
-            pass
-        elif font_size:
+        is_list_para = item.list_level is not None
+        if font_size and (is_list_para or len(paragraphs) > 1):
+            # List / multi-paragraph boxes never go through fit_text — set size now.
             font.size = Pt(max(6.0, font_size * min(scale_x, scale_y)))
+        elif font_size and len(paragraphs) == 1:
+            # Single plain paragraph still goes through OCR fit below.
+            pass
         if font_color:
             font.color.rgb = RGBColor.from_string(font_color.lstrip("#"))
         font.bold = bold
         font.italic = italic
-        if item.list_level is not None:
-            set_paragraph_bullet(paragraph, level=max(0, int(item.list_level)))
+        if is_list_para:
+            set_paragraph_bullet(
+                paragraph,
+                level=max(0, int(item.list_level or 0)),
+                list_style=getattr(item, "list_style", None),
+            )
+        space_before = getattr(item, "space_before_pt", None)
+        if space_before is not None and space_before > 0:
+            _set_paragraph_space_before(paragraph, space_before * min(scale_x, scale_y))
         _set_paragraph_end_typefaces(paragraph, resolved_typefaces)
 
     if len(paragraphs) == 1 and paragraphs[0].list_level is None and primary_run is not None:
@@ -620,10 +666,16 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
         font.italic = block.italic
 
 
-def set_paragraph_bullet(paragraph: Any, *, level: int = 0) -> None:
-    """Emit a real PowerPoint bullet (not a literal • character in the run text)."""
+def set_paragraph_bullet(
+    paragraph: Any,
+    *,
+    level: int = 0,
+    list_style: str | None = None,
+) -> None:
+    """Emit a real PowerPoint bullet or auto-number (not a literal glyph in run text)."""
 
-    paragraph.level = max(0, min(int(level), 8))
+    level = max(0, min(int(level), 8))
+    paragraph.level = level
     try:
         p_pr = paragraph._p.get_or_add_pPr()  # noqa: SLF001
     except Exception:  # noqa: BLE001
@@ -632,12 +684,43 @@ def set_paragraph_bullet(paragraph: Any, *, level: int = 0) -> None:
         tag = child.tag
         if tag in {qn("a:buFont"), qn("a:buChar"), qn("a:buNone"), qn("a:buAutoNum"), qn("a:buBlip")}:
             p_pr.remove(child)
+    # Hanging indent so the bullet/number sits left of the text.
+    indent_emu = 342900  # ~0.27"
+    mar_l = indent_emu * (level + 1)
+    p_pr.set("marL", str(mar_l))
+    p_pr.set("indent", str(-indent_emu))
+
+    style = (list_style or "bullet").strip()
+    if style in {"arabicPeriod", "alphaLcPeriod", "alphaUcPeriod", "romanLcPeriod", "romanUcPeriod"}:
+        bu_auto = OxmlElement("a:buAutoNum")
+        bu_auto.set("type", style)
+        p_pr.append(bu_auto)
+        return
+
     bu_font = OxmlElement("a:buFont")
     bu_font.set("typeface", "Arial")
     bu_char = OxmlElement("a:buChar")
     bu_char.set("char", "•")
     p_pr.append(bu_font)
     p_pr.append(bu_char)
+
+
+def _set_paragraph_space_before(paragraph: Any, space_before_pt: float) -> None:
+    """Set a:spcBef from PDF line gaps so multi-paragraph boxes keep spacing."""
+
+    try:
+        p_pr = paragraph._p.get_or_add_pPr()  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        return
+    for child in list(p_pr):
+        if child.tag == qn("a:spcBef"):
+            p_pr.remove(child)
+    spc_bef = OxmlElement("a:spcBef")
+    spc_pts = OxmlElement("a:spcPts")
+    # OOXML spcPts is in hundredths of a point.
+    spc_pts.set("val", str(int(round(max(0.0, space_before_pt) * 100))))
+    spc_bef.append(spc_pts)
+    p_pr.append(spc_bef)
 
 
 def fit_text_frame(text_frame: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> bool:

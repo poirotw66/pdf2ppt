@@ -26,6 +26,7 @@ from .models import (
     ImagePlacement,
     LayoutLabel,
     LayoutRegion,
+    ShapeElement,
     TableElement,
     TextBlock,
     TextParagraph,
@@ -34,6 +35,11 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 LayoutEngineName = Literal["heuristic", "ppstructure"]
+
+# Process-level LayoutDetection cache so convert_pdf / pages reuse one model load.
+_DETECTOR_CACHE: dict[tuple[str, float | None], Any] = {}
+_FOOTER_Y0_RATIO = 0.93
+_FOOTER_SHAPE_PROXIMITY_PT = 40.0
 
 # PP-DocLayout / PP-StructureV3 label → normalized LayoutLabel.
 _PPSTRUCTURE_LABEL_MAP: dict[str, LayoutLabel] = {
@@ -257,6 +263,8 @@ class LayoutEngine:
         page_height: float,
         text_blocks: list[TextBlock] | None = None,
         page_number: int = 1,
+        shape_bboxes: list[BBox] | None = None,
+        table_bboxes: list[BBox] | None = None,
     ) -> LayoutPageResult:
         """Return typed regions in page coordinates (PDF points)."""
 
@@ -279,6 +287,8 @@ class LayoutEngine:
                     page_width=page_width,
                     page_height=page_height,
                     page_number=page_number,
+                    shape_bboxes=shape_bboxes,
+                    table_bboxes=table_bboxes,
                 )
                 self._active_engine = "heuristic"
                 return LayoutPageResult(regions=regions, engine="heuristic", fallback_reason=reason)
@@ -288,12 +298,23 @@ class LayoutEngine:
             page_width=page_width,
             page_height=page_height,
             page_number=page_number,
+            shape_bboxes=shape_bboxes,
+            table_bboxes=table_bboxes,
         )
         self._active_engine = "heuristic"
         return LayoutPageResult(regions=regions, engine="heuristic")
 
+    def _cache_key(self) -> tuple[str, float | None]:
+        root = str(Path(self.model_root).expanduser().resolve()) if self.model_root else ""
+        return (root, self.threshold)
+
     def _get_detector(self) -> Any:
         if self._detector is not None:
+            return self._detector
+        cache_key = self._cache_key()
+        cached = _DETECTOR_CACHE.get(cache_key)
+        if cached is not None:
+            self._detector = cached
             return self._detector
         try:
             from paddleocr import LayoutDetection
@@ -304,17 +325,33 @@ class LayoutEngine:
                 "--layout-engine heuristic."
             ) from error
 
-        kwargs: dict[str, Any] = {"layout_nms": True}
+        kwargs: dict[str, Any] = {"layout_nms": True, "model_name": "PP-DocLayout_plus-L"}
         if self.threshold is not None:
             kwargs["threshold"] = self.threshold
-        # Prefer a lighter DocLayout model when the caller did not pin one.
+        if self.model_root is not None:
+            model_root = Path(self.model_root).expanduser()
+            # Prefer an already-downloaded model directory when present.
+            named = model_root / "PP-DocLayout_plus-L"
+            if named.is_dir():
+                kwargs["model_dir"] = str(named)
+            elif (model_root / "inference.yml").is_file() or (model_root / "inference.json").is_file():
+                kwargs["model_dir"] = str(model_root)
+            else:
+                kwargs["model_dir"] = str(model_root)
         try:
-            self._detector = LayoutDetection(model_name="PP-DocLayout_plus-L", **kwargs)
-        except TypeError:
             self._detector = LayoutDetection(**kwargs)
+        except TypeError:
+            # Older paddleocr builds may not accept model_dir / model_name together.
+            fallback = {key: value for key, value in kwargs.items() if key != "model_dir"}
+            try:
+                self._detector = LayoutDetection(**fallback)
+            except TypeError:
+                self._detector = LayoutDetection(layout_nms=True)
         except Exception:
             # Retry without an explicit model name (PaddleX default).
-            self._detector = LayoutDetection(**kwargs)
+            retry = {key: value for key, value in kwargs.items() if key != "model_name"}
+            self._detector = LayoutDetection(**retry)
+        _DETECTOR_CACHE[cache_key] = self._detector
         return self._detector
 
     def _analyze_ppstructure(
@@ -331,7 +368,8 @@ class LayoutEngine:
         rgb = image.convert("RGB")
         import numpy as np
 
-        array = np.array(rgb)
+        # PaddleX LayoutDetection expects BGR ndarrays by default.
+        array = np.ascontiguousarray(np.array(rgb)[:, :, ::-1])
         outputs = list(detector.predict(array, batch_size=1, layout_nms=True))
         if not outputs:
             return []
@@ -443,6 +481,8 @@ def analyze_layout_heuristic(
     page_width: float,
     page_height: float,
     page_number: int = 1,
+    shape_bboxes: list[BBox] | None = None,
+    table_bboxes: list[BBox] | None = None,
 ) -> list[LayoutRegion]:
     """Build typed regions from existing text blocks without a neural model.
 
@@ -458,6 +498,7 @@ def analyze_layout_heuristic(
     sorted_blocks = sorted(text_blocks, key=lambda block: (round(block.bbox[1], 1), round(block.bbox[0], 1)))
     sizes = [block.font_size for block in sorted_blocks if block.font_size]
     baseline = sorted(sizes)[len(sizes) // 2] if sizes else 12.0
+    obstacle_bboxes = list(shape_bboxes or []) + list(table_bboxes or [])
 
     regions: list[LayoutRegion] = []
     consumed: set[str] = set()
@@ -467,7 +508,13 @@ def analyze_layout_heuristic(
         if block.id in consumed:
             continue
         region_index += 1
-        label = _heuristic_label_for_block(block, baseline=baseline, page_width=page_width, page_height=page_height)
+        label = _heuristic_label_for_block(
+            block,
+            baseline=baseline,
+            page_width=page_width,
+            page_height=page_height,
+            obstacle_bboxes=obstacle_bboxes,
+        )
         members = [block]
         consumed.add(block.id)
 
@@ -477,7 +524,11 @@ def analyze_layout_heuristic(
                     continue
                 if _can_group_into_paragraph(members[-1], candidate, page_width=page_width):
                     cand_label = _heuristic_label_for_block(
-                        candidate, baseline=baseline, page_width=page_width, page_height=page_height
+                        candidate,
+                        baseline=baseline,
+                        page_width=page_width,
+                        page_height=page_height,
+                        obstacle_bboxes=obstacle_bboxes,
                     )
                     if cand_label in {"text", "list", "caption"} or (
                         label == "list" and cand_label == "list"
@@ -514,15 +565,18 @@ def _heuristic_label_for_block(
     baseline: float,
     page_width: float,
     page_height: float,
+    obstacle_bboxes: list[BBox] | None = None,
 ) -> LayoutLabel:
     text = block.text.strip()
     x0, y0, x1, y1 = block.bbox
     height = max(1.0, y1 - y0)
     width = max(1.0, x1 - x0)
     near_top = y0 < page_height * 0.06
-    near_bottom = y1 > page_height * 0.92
     compact = len(re.sub(r"\s+", "", text)) <= 24
     tiny_font = block.font_size is not None and block.font_size <= baseline * 0.85
+    # Absolute small type covers HF when the page median is already tiny (OCR-only pages).
+    small_type = tiny_font or (block.font_size is not None and block.font_size <= 11.0)
+    page_number_like = bool(text.isdigit() or re.fullmatch(r"\d+\s*/\s*\d+", text))
     # Headers are typically small type in a thin top band — not large slide titles.
     looks_like_running_header = tiny_font or (block.font_size is None and height <= baseline * 1.1)
 
@@ -534,10 +588,13 @@ def _heuristic_label_for_block(
         and block.block_role != "title"
     ):
         return "header"
-    if near_bottom and (compact or tiny_font):
-        if text.isdigit() or re.fullmatch(r"\d+\s*/\s*\d+", text):
-            return "page_number"
-        return "footer"
+    # Footer / page-number: deep bottom band + small type (or page-number glyph).
+    # Never treat chart axis labels as footers when a shape/table sits just above.
+    if y0 >= page_height * _FOOTER_Y0_RATIO and (small_type or page_number_like):
+        if not _has_obstacle_within_above(block.bbox, obstacle_bboxes or [], _FOOTER_SHAPE_PROXIMITY_PT):
+            if page_number_like:
+                return "page_number"
+            return "footer"
     if block.block_role == "title" or (
         block.font_size and block.font_size >= baseline * 1.35 and near_top and y0 < page_height * 0.28
     ):
@@ -549,6 +606,24 @@ def _heuristic_label_for_block(
         if text.lower().startswith(("fig", "figure", "表", "圖", "图")):
             return "caption"
     return "text"
+
+
+def _has_obstacle_within_above(
+    text_bbox: BBox,
+    obstacles: list[BBox],
+    proximity_pt: float,
+) -> bool:
+    """True when a shape/table bottom edge sits within ``proximity_pt`` above the text."""
+
+    tx0, ty0, tx1, _ty1 = text_bbox
+    for ox0, _oy0, ox1, oy1 in obstacles:
+        horizontal_overlap = min(tx1, ox1) - max(tx0, ox0)
+        if horizontal_overlap <= 0:
+            continue
+        gap = ty0 - oy1
+        if 0 <= gap <= proximity_pt:
+            return True
+    return False
 
 
 def _looks_like_list_line(text: str) -> bool:
@@ -611,6 +686,7 @@ def apply_layout_to_page(
     page_height: float,
     page_image: Image.Image | None = None,
     table_elements: list[TableElement] | None = None,
+    shape_elements: list[ShapeElement] | None = None,
     skip_header_footer: bool = True,
     page_number: int = 1,
 ) -> LayoutApplicationResult:
@@ -619,6 +695,7 @@ def apply_layout_to_page(
     text_blocks = split_wide_multiline_blocks(text_blocks, page_width=page_width)
     regions = list(layout.regions)
     tables = list(table_elements or [])
+    shapes = list(shape_elements or [])
     if not regions:
         # Still run list/title heuristics on individual blocks.
         enriched = [_enrich_block_paragraphs(block) for block in text_blocks]
@@ -643,7 +720,14 @@ def apply_layout_to_page(
             unassigned.append(block)
             continue
         if skip_header_footer and best_region.label in _SKIP_LABELS:
-            skipped.append(block.id)
+            # OCR HF stays in the raster background. Native digital text has no
+            # raster fallback, so keep it visible as a text box.
+            if block.source == "ocr":
+                skipped.append(block.id)
+                continue
+            block.block_role = best_region.label
+            block.layout_label = best_region.label
+            unassigned.append(block)
             continue
         if best_region.label in _TABLE_LABELS and tables:
             # Defer to P1 native tables — do not also emit a text box.
@@ -667,7 +751,12 @@ def apply_layout_to_page(
             continue
         if region.label in _SKIP_LABELS and skip_header_footer:
             continue
-        if region.label in _TABLE_LABELS and tables:
+        if region.label in _TABLE_LABELS:
+            if tables:
+                continue
+            # Scanned / undetected tables: keep one box per line (no mega-merge).
+            for member in members:
+                grouped_blocks.append(_enrich_block_paragraphs(member))
             continue
         grouped_blocks.extend(
             _group_region_members(
@@ -688,6 +777,8 @@ def apply_layout_to_page(
         page_image=page_image,
         page_width=page_width,
         page_height=page_height,
+        shape_elements=shapes,
+        table_elements=tables,
     )
 
     return LayoutApplicationResult(
@@ -706,13 +797,21 @@ def extract_figure_image_placements(
     page_image: Image.Image | None,
     page_width: float,
     page_height: float,
+    shape_elements: list[ShapeElement] | None = None,
+    table_elements: list[TableElement] | None = None,
 ) -> list[ImagePlacement]:
     if page_image is None:
         return []
     placements: list[ImagePlacement] = []
     rgb = page_image.convert("RGB")
+    native_obstacles = [shape.bbox for shape in (shape_elements or [])] + [
+        table.bbox for table in (table_elements or [])
+    ]
     for region in regions:
         if region.label not in _FIGURE_LABELS:
+            continue
+        if _figure_overlaps_native(region.bbox, native_obstacles):
+            # Region already nativized as vectors/tables — cropping again doubles ink.
             continue
         image_bbox = scale_bbox_from_page_to_image(
             region.bbox,
@@ -727,6 +826,21 @@ def extract_figure_image_placements(
 
         placements.append(ImagePlacement(bbox=region.bbox, png_bytes=pil_to_png_bytes(crop)))
     return placements
+
+
+def _figure_overlaps_native(figure_bbox: BBox, native_bboxes: list[BBox]) -> bool:
+    """Skip figure crops that largely cover already-nativized shapes/tables."""
+
+    figure_area = bbox_area(figure_bbox)
+    if figure_area <= 0 or not native_bboxes:
+        return False
+    covered = 0.0
+    for native in native_bboxes:
+        covered += intersection_area(figure_bbox, native)
+    # Any substantial overlap with native content means the figure is redundant.
+    return covered / figure_area >= 0.25 or any(
+        intersection_area(figure_bbox, native) / max(bbox_area(native), 1.0) >= 0.5 for native in native_bboxes
+    )
 
 
 def _safe_crop(image: Image.Image, bbox: BBox) -> Image.Image | None:
@@ -778,10 +892,16 @@ def _group_region_members(
     bbox = union_bbox([block.bbox for block in ordered])
     text = "\n".join(paragraph.text for paragraph in paragraphs if paragraph.text.strip())
     base = ordered[0]
-    font_sizes = [block.font_size for block in ordered if block.font_size is not None]
+    font_sizes = [
+        block.font_size if block.font_size is not None else _estimate_font_size_from_bbox(block.bbox)
+        for block in ordered
+    ]
     font_size = sorted(font_sizes)[len(font_sizes) // 2] if font_sizes else base.font_size
     confidence = sum(block.confidence for block in ordered) / max(len(ordered), 1)
     use_title = region.label in _TITLE_LABELS
+    # Union OCR erase masks so every grouped line is inpainted (avoids ghost text).
+    image_boxes = [block.image_bbox for block in ordered if block.image_bbox is not None]
+    merged_image_bbox = union_bbox(image_boxes) if image_boxes else base.image_bbox
     return [
         TextBlock(
             id=f"layout_text_{page_number}_{region.reading_order}",
@@ -792,18 +912,23 @@ def _group_region_members(
             font_family=base.font_family,
             font_size=font_size,
             font_color=base.font_color,
-            bold=any(block.bold for block in ordered) or use_title,
+            # Preserve PDF boldness — never force titles bold.
+            bold=any(block.bold for block in ordered),
             italic=any(block.italic for block in ordered),
             reading_order=region.reading_order,
             block_role=role,
-            image_bbox=base.image_bbox,
-            image_polygon=base.image_polygon,
+            image_bbox=merged_image_bbox,
+            image_polygon=None if image_boxes else base.image_polygon,
             layout_region_id=region.id,
             layout_label=region.label,
             paragraphs=paragraphs,
             use_title_placeholder=use_title,
         )
     ]
+
+
+def _estimate_font_size_from_bbox(bbox: BBox) -> float:
+    return max(6.0, (bbox[3] - bbox[1]) * 0.75)
 
 
 def _role_for_label(label: LayoutLabel) -> str:
@@ -826,31 +951,45 @@ def _paragraphs_from_members(
     paragraphs: list[TextParagraph] = []
     left_edges = [block.bbox[0] for block in members]
     min_left = min(left_edges) if left_edges else 0.0
+    previous_bottom: float | None = None
     for block in members:
         for line in block.text.splitlines() or [block.text]:
             raw = line.strip()
             if not raw:
                 continue
             is_list = region_label == "list" or _looks_like_list_line(raw)
-            cleaned, detected_level = strip_bullet_prefix(raw, left=block.bbox[0], min_left=min_left)
+            cleaned, detected_level, list_style = strip_bullet_prefix(
+                raw, left=block.bbox[0], min_left=min_left
+            )
             list_level: int | None = detected_level if is_list else None
+            font_size = block.font_size
+            if font_size is None:
+                font_size = _estimate_font_size_from_bbox(block.bbox)
+            space_before: float | None = None
+            if previous_bottom is not None:
+                gap = block.bbox[1] - previous_bottom
+                if gap > 1.0:
+                    space_before = gap
             paragraphs.append(
                 TextParagraph(
                     text=cleaned if is_list else raw,
                     list_level=list_level,
+                    list_style=list_style if is_list else None,
                     bold=block.bold,
                     italic=block.italic,
-                    font_size=block.font_size,
+                    font_size=font_size,
                     font_color=block.font_color,
+                    space_before_pt=space_before,
                 )
             )
+            previous_bottom = block.bbox[3]
     if not paragraphs:
         paragraphs.append(TextParagraph(text=""))
     return paragraphs
 
 
-def strip_bullet_prefix(text: str, *, left: float, min_left: float) -> tuple[str, int]:
-    """Remove literal bullet/number markers and estimate indent level."""
+def strip_bullet_prefix(text: str, *, left: float, min_left: float) -> tuple[str, int, str]:
+    """Remove literal bullet/number markers and estimate indent level + list style."""
 
     match = _BULLET_PREFIX_RE.match(text)
     cleaned = text[match.end() :].strip() if match else text.strip()
@@ -858,7 +997,16 @@ def strip_bullet_prefix(text: str, *, left: float, min_left: float) -> tuple[str
     level = int(round(indent / _INDENT_LEVEL_CHARS))
     # Numbered "1." / "a." at the same indent stays level 0; nested indents rise.
     level = max(0, min(level, 8))
-    return cleaned or text.strip(), level
+    list_style = "bullet"
+    if match:
+        token = match.group(0).strip()
+        if re.match(r"^\d", token):
+            list_style = "arabicPeriod"
+        elif re.match(r"^[A-Z][\.\)]", token):
+            list_style = "alphaUcPeriod"
+        elif re.match(r"^[a-z][\.\)]", token):
+            list_style = "alphaLcPeriod"
+    return cleaned or text.strip(), level, list_style
 
 
 def _enrich_block_paragraphs(block: TextBlock) -> TextBlock:
@@ -876,14 +1024,15 @@ def _enrich_block_paragraphs(block: TextBlock) -> TextBlock:
         raw = line.strip()
         is_list = _looks_like_list_line(raw)
         any_list = any_list or is_list
-        cleaned, level = strip_bullet_prefix(raw, left=block.bbox[0], min_left=min_left)
+        cleaned, level, list_style = strip_bullet_prefix(raw, left=block.bbox[0], min_left=min_left)
         paragraphs.append(
             TextParagraph(
                 text=cleaned if is_list else raw,
                 list_level=level if is_list else None,
+                list_style=list_style if is_list else None,
                 bold=block.bold,
                 italic=block.italic,
-                font_size=block.font_size,
+                font_size=block.font_size or _estimate_font_size_from_bbox(block.bbox),
                 font_color=block.font_color,
             )
         )
