@@ -359,8 +359,7 @@ def _text_block_line_height_px(
 ) -> float:
     """Estimate line height in pixels for dilation scaling."""
 
-    image_width, image_height = image_size
-    scale_x = image_width / max(1.0, float(page_rect.width))
+    _image_width, image_height = image_size
     scale_y = image_height / max(1.0, float(page_rect.height))
     if block.image_bbox is not None:
         return max(1.0, float(block.image_bbox[3] - block.image_bbox[1]))
@@ -443,7 +442,7 @@ def dilate_text_mask_by_line_height(
         max_dilate = max(max_dilate, dilate_px)
         if dilate_px > 0:
             kernel = np.ones((dilate_px * 2 + 1, dilate_px * 2 + 1), dtype=np.uint8)
-            block_mask = cv2.dilate(block_mask, kernel, iterations=1)
+            block_mask = np.asarray(cv2.dilate(block_mask, kernel, iterations=1), dtype=np.uint8)
         expanded = np.maximum(expanded, block_mask)
 
     # Cover any refined-mask pixels that did not match a block (e.g. OCR fringe).
@@ -453,13 +452,19 @@ def dilate_text_mask_by_line_height(
         dilate_px = max(int(floor_px), int(min_px) if ratio > 0 else 0)
         if dilate_px > 0:
             kernel = np.ones((dilate_px * 2 + 1, dilate_px * 2 + 1), dtype=np.uint8)
-            leftover_mask = cv2.dilate(leftover_mask, kernel, iterations=1)
+            leftover_mask = np.asarray(
+                cv2.dilate(leftover_mask, kernel, iterations=1),
+                dtype=np.uint8,
+            )
         expanded = np.maximum(expanded, leftover_mask)
 
     # Merge adjacent dilated islands so patch grouping does not explode.
     merge_px = max(max_dilate, int(floor_px), 1)
     close_kernel = np.ones((merge_px * 2 + 1, merge_px * 2 + 1), dtype=np.uint8)
-    merged = cv2.morphologyEx(expanded, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+    merged = np.asarray(
+        cv2.morphologyEx(expanded, cv2.MORPH_CLOSE, close_kernel, iterations=1),
+        dtype=np.uint8,
+    )
     return Image.fromarray(merged, mode="L")
 
 

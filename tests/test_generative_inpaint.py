@@ -29,8 +29,6 @@ from pdf2ppt.generative_inpaint import (
     seamless_clone_masked_edit,
     uses_generative_inpaint_engine,
 )
-from pdf2ppt.inpainting_masks import dilate_px_for_line_height, dilate_text_mask_by_line_height
-from pdf2ppt.models import TextBlock
 from pdf2ppt.generative_inpaint.aspect import (
     closest_aspect_ratio,
     plan_aspect_pad,
@@ -44,8 +42,9 @@ from pdf2ppt.generative_inpaint.pricing import (
     cost_from_openai_usage,
 )
 from pdf2ppt.generative_inpaint.safety import assert_unmasked_pixels_unchanged
+from pdf2ppt.inpainting_masks import dilate_px_for_line_height, dilate_text_mask_by_line_height
 from pdf2ppt.inpainting_overlay import resolve_background_inpainting_engine
-from pdf2ppt.models import ConversionReport, PageResult, QualityScore
+from pdf2ppt.models import ConversionReport, PageResult, QualityScore, TextBlock
 
 
 def _solid_rgb(size: tuple[int, int], color: tuple[int, int, int]) -> Image.Image:
@@ -131,7 +130,12 @@ class GenerativeHelpersTests(unittest.TestCase):
 
     def test_composite_preserves_unmasked_pixels(self) -> None:
         source = _solid_rgb((32, 32), (200, 100, 50))
-        edited = _solid_rgb((32, 32), (1, 2, 3))
+        # Structured edit so Poisson/seamlessClone cannot reconstruct the
+        # destination solid color from zero source gradients alone.
+        edited_arr = np.array(source)
+        for y in range(8, 24):
+            edited_arr[y, 8:24] = (y * 3, 20, 255 - y * 3)
+        edited = Image.fromarray(edited_arr, mode="RGB")
         mask = _rect_mask((32, 32), (8, 8, 24, 24))
         result = composite_masked_edit(source, edited, mask)
         assert_unmasked_pixels_unchanged(source, result, mask)
@@ -341,7 +345,7 @@ class GenerativeEngineTests(unittest.TestCase):
         self.assertEqual(payload["safety_block_fallbacks"], 1)
         self.assertEqual(payload["safety_block_retries"], 1)
         self.assertTrue(any(r.fallback_kind == "safety_block" for r in budget.records))
-        self.assertIn("fallback=1", engine.last_debug_note or "")
+        self.assertIn("local-safety-block", engine.last_debug_note or "")
 
     def test_parse_failure_records_uncertain_cost(self) -> None:
         error = GenerativeProviderError(
@@ -407,7 +411,7 @@ class GenerativeEngineTests(unittest.TestCase):
         assert_unmasked_pixels_unchanged(source, result, mask)
         self.assertEqual(provider.calls, 1)
         self.assertEqual(budget.low_freq_fallbacks, 1)
-        self.assertIn("low_freq", budget.to_dict())
+        self.assertEqual(budget.to_dict()["low_freq_fallbacks"], 1)
         self.assertTrue(any(r.fallback_kind == "low_freq" for r in budget.records))
 
     def test_safety_block_retry_recovers_on_second_attempt(self) -> None:

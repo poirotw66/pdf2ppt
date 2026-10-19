@@ -30,11 +30,17 @@ def low_frequency_masked_mae(
     binary = mask_array > 0
     if not np.any(binary):
         return 0.0
-    left = left_rgb.astype(np.float32)
-    right = right_rgb.astype(np.float32)
+    left: np.ndarray = left_rgb.astype(np.float32)
+    right: np.ndarray = right_rgb.astype(np.float32)
     if blur_sigma > 0:
-        left = cv2.GaussianBlur(left, (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma)
-        right = cv2.GaussianBlur(right, (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma)
+        left = np.asarray(
+            cv2.GaussianBlur(left, (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma),
+            dtype=np.float32,
+        )
+        right = np.asarray(
+            cv2.GaussianBlur(right, (0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma),
+            dtype=np.float32,
+        )
     diff = np.abs(left - right)
     return float(np.mean(diff[binary]))
 
