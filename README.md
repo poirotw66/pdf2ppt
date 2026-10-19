@@ -398,6 +398,25 @@ Run tests:
 python -m pytest -q
 ```
 
+### Slide-quality evaluation (Phase 0)
+
+To measure whether a change improved visual fidelity or editability, use the
+slide-level evaluator. It does not change default conversion behaviour.
+
+```bash
+# Metric unit tests (no LibreOffice required)
+python -m pytest tests/test_render_compare.py -q
+
+# Full fixture benchmark (requires LibreOffice + preferably fonts-noto-cjk)
+sudo apt-get install -y libreoffice-impress fonts-noto-cjk   # Debian/Ubuntu
+python scripts/bench_slide.py --ocr off --json-out output/bench_slide.json
+```
+
+Fidelity (SSIM, pixel error, edge F1, optional OCR text F1) and editability
+(native object counts, raster-background coverage) are reported separately so
+two runs can be diffed in JSON. See [`docs/slide-quality.md`](docs/slide-quality.md)
+for metrics, CJK font pinning, and the LibreOffice vs PowerPoint caveat.
+
 ## How to Enable the Review UI
 
 If you have not installed the project into the current Conda environment yet, do this first:
@@ -530,8 +549,11 @@ The repository includes a GitHub Actions workflow at `.github/workflows/ci.yml`.
 It runs:
 
 - backend validation with `pytest`
+- lint (ruff + mypy), blocking
 - frontend validation with `npm test`
 - frontend production build with `npm run build`
+- slide-quality evaluation (**report-only**, never blocking): LibreOffice +
+  Noto CJK, metric tests, and a short fixture bench
 
 This keeps Python and frontend regressions on the same pull request signal.
 

@@ -32,6 +32,13 @@ class TextBlock:
 
 @dataclass(slots=True)
 class QualityScore:
+    """Heuristic per-page scores produced during conversion.
+
+    These are pipeline-time estimates (not render-and-compare). For slide-level
+    fidelity / editability against a rendered PPTX, see ``render_compare`` and
+    ``docs/slide-quality.md``.
+    """
+
     text_confidence: float
     layout_overlap_score: float
     style_recovery_score: float

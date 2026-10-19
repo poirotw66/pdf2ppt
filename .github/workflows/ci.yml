@@ -52,7 +52,59 @@ jobs:
         run: python -m ruff check .
 
       - name: mypy
-        run: python -m mypy src/pdf2ppt scripts/bench_inpaint.py
+        run: python -m mypy src/pdf2ppt scripts/bench_inpaint.py scripts/bench_slide.py
+
+  # Phase 0 / P0 slide-quality evaluator: report-only, never blocks merge.
+  # Pure metric unit tests also run (and must pass) under the backend job;
+  # LibreOffice cases skip there when soffice is absent.
+  slide-quality:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install LibreOffice and pinned CJK font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-impress fonts-noto-cjk
+          fc-list | grep -i "Noto Sans CJK" | head -5 || true
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+
+      - name: Run slide-quality metric tests
+        run: pytest -q tests/test_render_compare.py
+
+      - name: Bench digital fixtures (OCR off, report-only)
+        # Hybrid fixtures (gradient_*, photo_texture, large_mask) need a working
+        # PaddleOCR/PaddlePaddle stack during conversion; keep CI light by
+        # scoring digital-native fixtures only. Full corpus: scripts/bench_slide.py
+        run: |
+          python scripts/bench_slide.py \
+            --ocr off \
+            --fixture solid_background \
+            --fixture dark_background_light_text \
+            --fixture geometric_chart \
+            --fixture table \
+            --json-out output/bench_slide_ci.json \
+            --work-dir output/bench_slide_ci_work
+          python -c "import json; print(json.dumps(json.load(open('output/bench_slide_ci.json'))['summary'], indent=2))"
+
+      - name: Upload bench JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-slide-ci
+          path: output/bench_slide_ci.json
+          if-no-files-found: ignore
 
   frontend:
     runs-on: ubuntu-latest
