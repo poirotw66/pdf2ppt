@@ -7,9 +7,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
-from .core import DEFAULT_OCR_BATCH_SIZE
+from .core import DEFAULT_OCR_BATCH_SIZE, ConversionOptions, InputValidationError
 from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
-from .pipeline import ConversionOptions, convert_pdf
+from .pipeline import convert_from_ir, convert_pdf
 
 GENERATIVE_INPAINT_ENGINE_CHOICES = (
     "generative-openai",
@@ -58,13 +58,57 @@ def positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Convert PDF files into editable PPTX decks.")
-    parser.add_argument("input_pdf", type=Path, help="Input PDF file path.")
-    parser.add_argument("output_pptx", type=Path, help="Output PPTX file path.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Convert PDF files into editable PPTX decks, or round-trip via SlideIR "
+            "(--emit-ir / --from-ir). Subcommands: emit-ir, from-ir, convert."
+        )
+    )
+    parser.add_argument(
+        "input_pdf",
+        type=Path,
+        nargs="?",
+        help="Input PDF file path (omit when using --from-ir).",
+    )
+    parser.add_argument(
+        "output_pptx",
+        type=Path,
+        nargs="?",
+        help="Output PPTX file path (omit with --emit-ir --ir-only).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        dest="output_override",
+        help="Explicit output PPTX path (useful with --from-ir).",
+    )
     parser.add_argument(
         "--report",
         type=Path,
-        help="Path to write the JSON conversion report. Defaults next to the PPTX output.",
+        help="Path to write the JSON conversion report. Defaults next to the PPTX or IR output.",
+    )
+    parser.add_argument(
+        "--emit-ir",
+        type=Path,
+        help=(
+            "Write SlideIR JSON (plus a sibling {ir_filename}.assets/ directory for "
+            "backgrounds and cropped images). Can be combined with PPTX output, or used "
+            "alone with --ir-only."
+        ),
+    )
+    parser.add_argument(
+        "--ir-only",
+        action="store_true",
+        help="With --emit-ir, skip PPTX generation (analysis + SlideIR only).",
+    )
+    parser.add_argument(
+        "--from-ir",
+        type=Path,
+        help=(
+            "Load SlideIR JSON and render PPTX (no PDF). Assets are resolved from the "
+            "assets_dir next to the IR file. Output path: positional or -o/--output."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -432,18 +476,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.INFO),
-        format="%(levelname)s %(name)s: %(message)s",
-    )
+def _rewrite_subcommand_argv(argv: list[str]) -> list[str]:
+    """Map ``emit-ir`` / ``from-ir`` / ``convert`` subcommands onto flag form."""
+    if not argv:
+        return argv
+    command = argv[0]
+    rest = argv[1:]
+    if command == "convert":
+        return rest
+    if command == "emit-ir":
+        # pdf2ppt emit-ir input.pdf out.slideir.json [flags...]
+        if len(rest) < 2 or rest[0].startswith("-") or rest[1].startswith("-"):
+            raise SystemExit(
+                "usage: pdf2ppt emit-ir INPUT.pdf OUTPUT.slideir.json [options...]"
+            )
+        input_pdf, ir_path, *flags = rest
+        return [input_pdf, "--emit-ir", ir_path, "--ir-only", *flags]
+    if command == "from-ir":
+        # pdf2ppt from-ir input.slideir.json output.pptx [flags...]
+        if len(rest) < 2 or rest[0].startswith("-") or rest[1].startswith("-"):
+            raise SystemExit("usage: pdf2ppt from-ir INPUT.slideir.json OUTPUT.pptx [options...]")
+        ir_path, output_pptx, *flags = rest
+        return ["--from-ir", ir_path, "-o", output_pptx, *flags]
+    return argv
 
-    report_path = args.report or args.output_pptx.with_suffix(".report.json")
-    options = ConversionOptions(
-        input_path=args.input_pdf,
-        output_path=args.output_pptx,
+
+def _resolve_output_pptx(args: argparse.Namespace) -> Path | None:
+    return args.output_override or args.output_pptx
+
+
+def _build_conversion_options(
+    args: argparse.Namespace,
+    *,
+    input_path: Path,
+    output_path: Path,
+    report_path: Path,
+) -> ConversionOptions:
+    return ConversionOptions(
+        input_path=input_path,
+        output_path=output_path,
         report_path=report_path,
         mode=args.mode,
         lang=args.lang,
@@ -496,9 +567,89 @@ def main(argv: list[str] | None = None) -> int:
         layout_model_root=args.layout_model_root,
         layout_skip_header_footer=not args.keep_header_footer,
     )
-    report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
-    print(
-        f"Converted {report.input_path} -> {report.output_path} "
-        f"({len(report.pages)} pages, report: {report_path})"
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        raw_argv = _rewrite_subcommand_argv(raw_argv)
+    except SystemExit as error:
+        message = str(error)
+        if message:
+            print(message, file=sys.stderr)
+        return 2
+
+    parser = build_parser()
+    args = parser.parse_args(raw_argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(levelname)s %(name)s: %(message)s",
     )
-    return 0
+
+    try:
+        if args.from_ir is not None:
+            if args.emit_ir is not None or args.ir_only:
+                raise InputValidationError("--from-ir cannot be combined with --emit-ir / --ir-only.")
+            output_pptx = _resolve_output_pptx(args)
+            # Allow ``pdf2ppt --from-ir deck.json out.pptx`` where out.pptx lands in input_pdf.
+            if output_pptx is None and args.input_pdf is not None:
+                output_pptx = args.input_pdf
+            if output_pptx is None:
+                raise InputValidationError(
+                    "--from-ir requires an output PPTX path (positional or -o/--output)."
+                )
+            report_path = args.report or output_pptx.with_suffix(".report.json")
+            report = convert_from_ir(args.from_ir, output_pptx, report_path=report_path)
+            print(
+                f"Rendered SlideIR {args.from_ir} -> {output_pptx} "
+                f"({len(report.pages)} pages, report: {report_path})"
+            )
+            return 0
+
+        if args.input_pdf is None:
+            raise InputValidationError("Input PDF path is required unless --from-ir is set.")
+
+        write_pptx = not args.ir_only
+        if args.ir_only and args.emit_ir is None:
+            raise InputValidationError("--ir-only requires --emit-ir PATH.")
+
+        output_pptx = _resolve_output_pptx(args)
+        if write_pptx and output_pptx is None:
+            raise InputValidationError("Output PPTX path is required unless --ir-only is set.")
+        if output_pptx is None:
+            # IR-only: placeholder path for ConversionOptions (not written).
+            output_pptx = args.emit_ir.with_suffix(".pptx") if args.emit_ir is not None else Path("output.pptx")
+
+        report_path = args.report
+        if report_path is None:
+            if args.ir_only and args.emit_ir is not None:
+                report_path = args.emit_ir.with_suffix(".report.json")
+            else:
+                report_path = output_pptx.with_suffix(".report.json")
+
+        options = _build_conversion_options(
+            args,
+            input_path=args.input_pdf,
+            output_path=output_pptx,
+            report_path=report_path,
+        )
+        report = convert_pdf(
+            options,
+            progress_callback=build_progress_callback(sys.stderr),
+            write_pptx=write_pptx,
+            emit_ir_path=args.emit_ir,
+        )
+        parts = []
+        if write_pptx:
+            parts.append(str(options.output_path))
+        if args.emit_ir is not None:
+            parts.append(f"ir={args.emit_ir}")
+        dest = ", ".join(parts) if parts else "(no output)"
+        print(
+            f"Converted {report.input_path} -> {dest} "
+            f"({len(report.pages)} pages, report: {report_path})"
+        )
+        return 0
+    except InputValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2

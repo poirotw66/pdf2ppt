@@ -158,6 +158,9 @@ class ConvertRequest(BaseModel):
     layout_model_root: str | None = "model"
     layout_skip_header_footer: bool = True
     write_debug_artifacts: bool = False
+    # P5 SlideIR — opt-in; defaults preserve convert behaviour.
+    emit_ir: bool = False
+    ir_only: bool = False
 
 
 class ConvertResponse(BaseModel):
@@ -166,3 +169,15 @@ class ConvertResponse(BaseModel):
     output_pptx_path: str
     report_path: str
     page_count: int
+    slideir_path: str | None = None
+    slideir_assets_dir: str | None = None
+
+
+class EmitIrResponse(BaseModel):
+    job_id: str
+    status: str
+    slideir_path: str
+    slideir_assets_dir: str
+    report_path: str
+    page_count: int
+

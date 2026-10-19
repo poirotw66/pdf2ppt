@@ -10,6 +10,7 @@
 - `--vector-complexity-threshold`: max drawings considered in `auto` mode (default `80`)
 - `--layout-engine`: `heuristic` (default, CI-safe) or `ppstructure` (opt-in PP-StructureV3 / LayoutDetection; soft-falls back to heuristic). See [`layout-analysis.md`](layout-analysis.md)
 - `--layout-model-root`: DocLayout / Structure model directory, default `./model`
+- `--emit-ir PATH` / `--ir-only` / `--from-ir PATH` / `-o`: SlideIR export and render ([`slideir.md`](slideir.md)). Subcommands: `pdf2ppt emit-ir …`, `pdf2ppt from-ir …`. Assets live in `{ir_filename}.assets/` next to the IR JSON.
 - `--keep-header-footer`: keep header/footer/page-number regions (skipped by default)
 - `--lang`: PaddleOCR language code, default `ch`
 - `--ocr-model-root`: local PaddleOCR model directory, default `./model`
@@ -76,6 +77,7 @@ estimated styling.
 - OCR-heavy pages are still estimations, not perfect semantic reconstruction.
 - Simple vector drawings and ruled tables on digital pages become native PPT shapes/tables by default (`--vector-mode auto`). Gradients, patterns, clips, and very dense illustrations still fall back to the raster background; use `--vector-mode off` to disable. Details: [`vector-nativization.md`](vector-nativization.md).
 - Layout analysis defaults to `heuristic` so CI/CPU paths need no model download. Opt into PP-StructureV3 with `--layout-engine ppstructure`. Details: [`layout-analysis.md`](layout-analysis.md).
+- SlideIR (`emit-ir` / `from-ir`) round-trips the same structures P1/P2 already render. `groups` / `plan_metadata` are forward-compatible for P3 and are not rendered today. Details: [`slideir.md`](slideir.md).
 - Bold and color restoration for OCR text are heuristic-based.
 
 ## Development

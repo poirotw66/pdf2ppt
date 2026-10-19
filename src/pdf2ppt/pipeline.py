@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -133,14 +134,88 @@ def convert_pdf(
     options: ConversionOptions,
     *,
     progress_callback: ProgressCallback | None = None,
+    write_pptx: bool = True,
+    emit_ir_path: Path | None = None,
 ) -> ConversionReport:
+    """Analyze a PDF and optionally write PPTX and/or SlideIR.
+
+    Default behaviour (``write_pptx=True``, ``emit_ir_path=None``) is unchanged
+    from pre-P5: produce PPTX + conversion report. Agents can set
+    ``write_pptx=False`` with ``emit_ir_path`` to extract SlideIR only.
+    """
     conversion_started_at = perf_counter()
     if not options.input_path.exists():
         raise InputValidationError(f"Input PDF does not exist: {options.input_path}")
-    options.output_path.parent.mkdir(parents=True, exist_ok=True)
+    if write_pptx:
+        options.output_path.parent.mkdir(parents=True, exist_ok=True)
     options.report_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Starting PDF conversion: %s -> %s", options.input_path, options.output_path)
+    logger.info(
+        "Starting PDF conversion: %s -> %s (pptx=%s, ir=%s)",
+        options.input_path,
+        options.output_path,
+        write_pptx,
+        emit_ir_path,
+    )
+    page_results, slide_width_pt, slide_height_pt = analyze_pdf(
+        options,
+        progress_callback=progress_callback,
+    )
+
+    if write_pptx:
+        render_pages_to_pptx(
+            page_results,
+            options.output_path,
+            slide_width_pt=slide_width_pt,
+            slide_height_pt=slide_height_pt,
+        )
+
+    if emit_ir_path is not None:
+        from .ir_io import write_slide_ir
+
+        write_slide_ir(
+            page_results,
+            emit_ir_path,
+            slide_width_pt=slide_width_pt,
+            slide_height_pt=slide_height_pt,
+            source_path=options.input_path,
+        )
+
+    generative_report = None
+    if isinstance(options.generative_budget, GenerativeBudget):
+        budget = options.generative_budget
+        generative_report = budget.to_dict()
+        logger.info(
+            "Generative inpaint run stats: calls=%s cache_hits=%s fallbacks=%s est_cost_usd=%.4f",
+            budget.calls,
+            budget.cache_hits,
+            budget.fallbacks,
+            budget.estimated_cost_usd,
+        )
+    report = ConversionReport(
+        input_path=str(options.input_path),
+        output_path=str(options.output_path) if write_pptx else "",
+        pages=page_results,
+        generative_inpaint=generative_report,
+    )
+    options.report_path.write_text(
+        json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.info(
+        "Finished PDF conversion with %s page(s) in %.3fs",
+        len(page_results),
+        perf_counter() - conversion_started_at,
+    )
+    return report
+
+
+def analyze_pdf(
+    options: ConversionOptions,
+    *,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[list[PageResult], float, float]:
+    """Run the analysis pipeline and return page results plus slide size in pt."""
     ocr_engine = OcrEngine(
         lang=options.lang,
         model_root=options.ocr_model_root,
@@ -166,14 +241,12 @@ def convert_pdf(
             )
         if options.generative_verify_ocr and options.generative_residual_checker is None:
             options.generative_residual_checker = build_ocr_residual_checker(ocr_engine)
-    page_results: list[PageResult] = []
 
+    page_results: list[PageResult] = []
     with fitz.open(options.input_path) as document:
-        presentation = Presentation()
         first_page = document[0]
-        presentation.slide_width = pt_to_emu(first_page.rect.width)
-        presentation.slide_height = pt_to_emu(first_page.rect.height)
-        blank_layout = presentation.slide_layouts[6]
+        slide_width_pt = float(first_page.rect.width)
+        slide_height_pt = float(first_page.rect.height)
         total_pages = document.page_count
         batched_ocr_page_data = prepare_batched_ocr_page_data(document, options, ocr_engine)
         if progress_callback is not None:
@@ -194,52 +267,75 @@ def convert_pdf(
                 raise
             except Exception as error:
                 logger.exception("Failed to process page %s", page.number + 1)
-                raise PageConversionError(page.number + 1, f"Failed to process page {page.number + 1}: {error}") from error
+                raise PageConversionError(
+                    page.number + 1, f"Failed to process page {page.number + 1}: {error}"
+                ) from error
             page_results.append(page_result)
-            slide_render_started_at = perf_counter()
-            render_page_to_slide(
-                presentation,
-                blank_layout,
-                page_result,
-                slide_width_pt=first_page.rect.width,
-                slide_height_pt=first_page.rect.height,
-            )
-            slide_render_seconds = perf_counter() - slide_render_started_at
-            logger.info("Page %s slide render: %.3fs", page.number + 1, slide_render_seconds)
             if progress_callback is not None:
                 progress_callback(page_index + 1, total_pages)
 
-        presentation_save_started_at = perf_counter()
-        presentation.save(str(options.output_path))
-        presentation_save_seconds = perf_counter() - presentation_save_started_at
-        logger.info("Presentation save: %.3fs", presentation_save_seconds)
+    return page_results, slide_width_pt, slide_height_pt
 
-    generative_report = None
-    if isinstance(options.generative_budget, GenerativeBudget):
-        budget = options.generative_budget
-        generative_report = budget.to_dict()
-        logger.info(
-            "Generative inpaint run stats: calls=%s cache_hits=%s fallbacks=%s est_cost_usd=%.4f",
-            budget.calls,
-            budget.cache_hits,
-            budget.fallbacks,
-            budget.estimated_cost_usd,
+
+def render_pages_to_pptx(
+    pages: list[PageResult],
+    output_path: Path,
+    *,
+    slide_width_pt: float,
+    slide_height_pt: float,
+) -> Path:
+    """Render analyzed (or deserialized) pages to a PPTX file."""
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    presentation = Presentation()
+    presentation.slide_width = pt_to_emu(slide_width_pt)
+    presentation.slide_height = pt_to_emu(slide_height_pt)
+    blank_layout = presentation.slide_layouts[6]
+    for page_result in pages:
+        slide_render_started_at = perf_counter()
+        render_page_to_slide(
+            presentation,
+            blank_layout,
+            page_result,
+            slide_width_pt=slide_width_pt,
+            slide_height_pt=slide_height_pt,
         )
+        logger.info(
+            "Page %s slide render: %.3fs",
+            page_result.page_number,
+            perf_counter() - slide_render_started_at,
+        )
+    presentation_save_started_at = perf_counter()
+    presentation.save(str(output))
+    logger.info("Presentation save: %.3fs", perf_counter() - presentation_save_started_at)
+    return output
+
+
+def convert_from_ir(
+    ir_path: Path,
+    output_path: Path,
+    *,
+    report_path: Path | None = None,
+) -> ConversionReport:
+    """Load SlideIR JSON and render a PPTX (no PDF required)."""
+    from .ir_io import read_slide_ir, render_deck_to_pptx
+
+    ir_file = Path(ir_path)
+    out_file = Path(output_path)
+    deck = read_slide_ir(ir_file)
+    render_deck_to_pptx(deck, out_file)
     report = ConversionReport(
-        input_path=str(options.input_path),
-        output_path=str(options.output_path),
-        pages=page_results,
-        generative_inpaint=generative_report,
+        input_path=str(ir_file),
+        output_path=str(out_file),
+        pages=deck.pages,
     )
-    options.report_path.write_text(
-        json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    logger.info(
-        "Finished PDF conversion with %s page(s) in %.3fs",
-        len(page_results),
-        perf_counter() - conversion_started_at,
-    )
+    if report_path is not None:
+        report_file = Path(report_path)
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text(
+            json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return report
 
 

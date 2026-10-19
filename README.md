@@ -24,6 +24,7 @@ backgrounds only where text was removed.
 - Line-box merging so titles stay coherent without collapsing multi-column layouts
 - Optional layout analysis for typed regions, reading order, bullets, and title placeholders ([`docs/layout-analysis.md`](docs/layout-analysis.md))
 - Vector / table nativization for simple drawings and ruled tables on digital PDFs ([`docs/vector-nativization.md`](docs/vector-nativization.md))
+- SlideIR agent layer: emit a versioned JSON IR (`emit-ir`) and render PPTX from IR alone (`from-ir`) so agents can round-trip without re-running the PDF pipeline ([`docs/slideir.md`](docs/slideir.md))
 - Background engines: `opencv-fast` (recommended), `white-box`, optional `lama-onnx` / `lama-pytorch`, and cloud generative backends ([`docs/background-engines.md`](docs/background-engines.md))
 - JSON conversion report, debug artifacts, and an optional OCR review UI
 
@@ -60,6 +61,10 @@ Optional: `python -m pip install pytest` for tests. OCR models default to
 pdf2ppt input.pdf output.pptx
 pdf2ppt input.pdf output.pptx --report output.report.json --debug-dir output_debug
 pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
+
+# Agent / SlideIR round-trip (no PPTX until from-ir)
+pdf2ppt emit-ir input.pdf deck.slideir.json
+pdf2ppt from-ir deck.slideir.json rebuilt.pptx
 ```
 
 ### Review UI (optional)
@@ -87,12 +92,14 @@ PDF → page classify (digital / scanned / hybrid)
     → optional vector/table nativization
     → conditional background (elements / overlay / full-page)
     → PPTX + JSON report
+    → optional SlideIR emit / from-ir render
 ```
 
 | Piece | Role |
 | --- | --- |
 | `src/pdf2ppt/cli.py` | CLI entry |
 | `src/pdf2ppt/pipeline.py` | Conversion orchestration |
+| `src/pdf2ppt/ir_io.py` | SlideIR serialize / deserialize |
 | `src/pdf2ppt/api.py` | Review UI backend |
 | `frontend/` | OCR box review UI |
 
@@ -110,6 +117,7 @@ available, otherwise `white-box`. Details:
 | [`docs/review-ui.md`](docs/review-ui.md) | Review UI setup and API |
 | [`docs/layout-analysis.md`](docs/layout-analysis.md) | Heuristic / PP-Structure layout |
 | [`docs/vector-nativization.md`](docs/vector-nativization.md) | Shape and table nativization |
+| [`docs/slideir.md`](docs/slideir.md) | SlideIR emit-ir / from-ir agent layer |
 | [`docs/generative-inpaint.md`](docs/generative-inpaint.md) | Cloud generative backends |
 | [`docs/slide-quality.md`](docs/slide-quality.md) | Fidelity / editability evaluation |
 
