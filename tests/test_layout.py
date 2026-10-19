@@ -189,19 +189,21 @@ class HeuristicLayoutTests(unittest.TestCase):
         self.assertEqual(regions[0].label, "text")
 
     def test_strip_bullet_prefix_levels(self) -> None:
-        cleaned, level, style = strip_bullet_prefix("• Ship it", left=72, min_left=72)
+        cleaned, level, style, prefix = strip_bullet_prefix("• Ship it", left=72, min_left=72)
         self.assertEqual(cleaned, "Ship it")
         self.assertEqual(level, 0)
         self.assertEqual(style, "bullet")
-        cleaned, level, style = strip_bullet_prefix("1. First", left=96, min_left=72)
+        self.assertTrue(prefix.startswith("•"))
+        cleaned, level, style, prefix = strip_bullet_prefix("1. First", left=96, min_left=72)
         self.assertEqual(cleaned, "First")
         self.assertEqual(level, 1)
         self.assertEqual(style, "arabicPeriod")
-        cleaned, level, style = strip_bullet_prefix("a. Nested", left=96, min_left=72)
+        self.assertTrue(prefix.startswith("1."))
+        cleaned, level, style, prefix = strip_bullet_prefix("a. Nested", left=96, min_left=72)
         self.assertEqual(cleaned, "Nested")
         self.assertEqual(style, "alphaLcPeriod")
         # Modest nested indent must map to level 1, not jump to 2 via rounding.
-        cleaned, level, style = strip_bullet_prefix("a. Nested", left=99, min_left=72)
+        cleaned, level, style, prefix = strip_bullet_prefix("a. Nested", left=99, min_left=72)
         self.assertEqual(level, 1)
         self.assertEqual(style, "alphaLcPeriod")
 
@@ -842,6 +844,144 @@ class ParagraphPropertiesSchemaOrderTests(unittest.TestCase):
                             for bullet_tag in (qn("a:buChar"), qn("a:buAutoNum")):
                                 if qn("a:spcBef") in tags and bullet_tag in tags:
                                     self.assertLess(tags.index(qn("a:spcBef")), tags.index(bullet_tag))
+
+
+class BulletListPositionTests(unittest.TestCase):
+    """Heuristic bullet boxes must track PDF glyph positions (|dx|<5, |dy|<3)."""
+
+    @unittest.skipUnless((FIXTURES / "bullet_list.pdf").exists(), "fixture missing")
+    def test_bullet_list_line_positions_near_pdf(self) -> None:
+        import fitz
+
+        from pdf2ppt.core import ConversionOptions
+        from pdf2ppt.layout import _LINE_HEIGHT_FACTOR
+        from pdf2ppt.pipeline import convert_pdf
+        from pdf2ppt.ppt_render import EMU_PER_PT
+
+        pdf_path = FIXTURES / "bullet_list.pdf"
+        # PDF ground truth: body lines only (skip title / footer).
+        pdf_lines: list[tuple[str, float, float, float]] = []
+        with fitz.open(pdf_path) as document:
+            page = document[0]
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    text = "".join(span["text"] for span in line.get("spans", [])).strip()
+                    if not text.startswith("-"):
+                        continue
+                    bbox = line["bbox"]
+                    size = float(line["spans"][0]["size"]) if line.get("spans") else 16.0
+                    pdf_lines.append((text, float(bbox[0]), float(bbox[1]), size))
+
+        self.assertGreaterEqual(len(pdf_lines), 6)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "bullet_list.pptx"
+            report_path = Path(tmp) / "bullet_list.json"
+            convert_pdf(
+                ConversionOptions(
+                    input_path=pdf_path,
+                    output_path=out,
+                    report_path=report_path,
+                    layout_engine="heuristic",
+                )
+            )
+            presentation = Presentation(str(out))
+            slide = presentation.slides[0]
+
+        list_shape = None
+        for shape in slide.shapes:
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            joined = "\n".join(paragraph.text for paragraph in shape.text_frame.paragraphs)
+            if "Ship layout analysis" in joined:
+                list_shape = shape
+                break
+        self.assertIsNotNone(list_shape)
+        assert list_shape is not None
+
+        box_left_pt = float(list_shape.left) / EMU_PER_PT
+        box_top_pt = float(list_shape.top) / EMU_PER_PT
+        cursor_y = box_top_pt
+        prev_font_pt = 16.0
+        bullet_paras = []
+        for paragraph in list_shape.text_frame.paragraphs:
+            p_pr = getattr(paragraph._p, "pPr", None)  # noqa: SLF001
+            if p_pr is None:
+                continue
+            has_bullet = any(
+                child.tag.endswith("}buChar") or child.tag.endswith("}buAutoNum") for child in p_pr
+            )
+            if not has_bullet:
+                continue
+            mar_l = int(p_pr.get("marL") or 0) / EMU_PER_PT
+            indent = abs(int(p_pr.get("indent") or 0)) / EMU_PER_PT
+            spc_bef = 0.0
+            for child in p_pr:
+                if child.tag.endswith("}spcBef"):
+                    pts = child.find("{http://schemas.openxmlformats.org/drawingml/2006/main}spcPts")
+                    if pts is not None and pts.get("val"):
+                        spc_bef = int(pts.get("val")) / 100.0
+            font_pt = prev_font_pt
+            for run in paragraph.runs:
+                if run.font.size is not None:
+                    font_pt = float(run.font.size.pt)
+                    break
+            if bullet_paras:
+                cursor_y += _LINE_HEIGHT_FACTOR * prev_font_pt + spc_bef
+            text_x = box_left_pt + mar_l
+            bullet_paras.append((paragraph.text, text_x, cursor_y, indent, font_pt))
+            prev_font_pt = font_pt
+
+        self.assertEqual(len(bullet_paras), len(pdf_lines))
+        for (_pdf_text, pdf_bullet_x, pdf_y0, pdf_size), (_ppt_text, text_x, text_y, indent, _font) in zip(
+            pdf_lines, bullet_paras, strict=True
+        ):
+            # PDF body text starts ~prefix-width after the bullet glyph.
+            expected_text_x = pdf_bullet_x + indent
+            self.assertLessEqual(
+                abs(text_x - expected_text_x),
+                5.0,
+                msg=f"dx too large for {_ppt_text!r}: ppt={text_x:.1f} pdf≈{expected_text_x:.1f}",
+            )
+            self.assertLessEqual(
+                abs(text_y - pdf_y0),
+                3.0,
+                msg=f"dy too large for {_ppt_text!r}: ppt={text_y:.1f} pdf={pdf_y0:.1f}",
+            )
+            # Hanging indent should be the measured prefix (~10pt), not the 27pt fallback.
+            self.assertLessEqual(indent, 18.0)
+            self.assertGreaterEqual(indent, 4.0)
+
+    def test_layout_paragraphs_use_baseline_spacing_and_prefix_indent(self) -> None:
+        blocks = [
+            _block("a", "- Ship layout analysis for scanned decks", (72, 130, 360, 152), font_size=16),
+            _block("b", "- Detect multi-level bullets", (96, 170, 280, 192), font_size=16),
+            _block("c", "- Map titles to placeholders", (96, 205, 290, 227), font_size=16),
+        ]
+        regions = analyze_layout_heuristic(blocks, page_width=960, page_height=540)
+        applied = apply_layout_to_page(
+            blocks,
+            LayoutPageResult(regions=regions, engine="heuristic"),
+            page_width=960,
+            page_height=540,
+        )
+        list_blocks = [block for block in applied.text_blocks if block.block_role == "list"]
+        self.assertTrue(list_blocks)
+        paragraphs = list_blocks[0].paragraphs or []
+        self.assertGreaterEqual(len(paragraphs), 3)
+        # Prefix "- " at 16pt measures ~11pt, far below the 27pt fallback.
+        self.assertIsNotNone(paragraphs[0].text_indent_pt)
+        assert paragraphs[0].text_indent_pt is not None
+        self.assertLess(paragraphs[0].text_indent_pt, 20.0)
+        self.assertGreater(paragraphs[0].text_indent_pt, 4.0)
+        # Nested line keeps its PDF left edge for marL.
+        self.assertAlmostEqual(paragraphs[1].left_pt or 0.0, 96.0, places=0)
+        # Baseline spacing ≈ (y0 delta) - 1.2*font, not raw bbox gap (~18).
+        self.assertIsNotNone(paragraphs[1].space_before_pt)
+        assert paragraphs[1].space_before_pt is not None
+        self.assertGreater(paragraphs[1].space_before_pt, 18.5)
 
 
 if __name__ == "__main__":

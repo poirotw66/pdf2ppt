@@ -52,8 +52,14 @@ class TextParagraph:
     italic: bool | None = None
     font_size: float | None = None
     font_color: str | None = None
-    # Extra space before this paragraph (pt), from PDF line gaps.
+    # Extra space before this paragraph (pt), from PDF baseline gaps.
     space_before_pt: float | None = None
+    # PDF hanging indent: first-glyph-x after bullet prefix minus prefix x (pt).
+    text_indent_pt: float | None = None
+    # PDF line left edge (bullet x) for marL relative to the text box.
+    left_pt: float | None = None
+    # Approximate PDF baseline y (pt) for vertical spacing.
+    baseline_pt: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

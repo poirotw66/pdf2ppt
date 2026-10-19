@@ -597,6 +597,7 @@ def _normalize_tcpr_child_order(cell: Any) -> None:
 
 # Default hanging indent (~0.27") used when PDF text-start offset is unknown.
 _DEFAULT_HANGING_INDENT_EMU = 342900
+_DEFAULT_HANGING_INDENT_PT = 27.0
 
 
 def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> None:
@@ -611,12 +612,20 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
         paragraphs = [TextParagraph(text=block.text)]
 
     list_paras = [item for item in paragraphs if item.list_level is not None]
-    hanging_indent_emu = _DEFAULT_HANGING_INDENT_EMU
+    box_left_pt = float(block.bbox[0])
+    scale_min = min(scale_x, scale_y)
     if list_paras:
-        # PDF bbox left is typically the bullet glyph x; hanging indent pushes body
-        # text right, so widen (and optionally nudge) the box to avoid wrap.
-        max_level = max(int(item.list_level or 0) for item in list_paras)
-        extra = int(hanging_indent_emu * (max_level + 1) * 1.05)
+        # Widen by the largest marL so hanging indent does not force wrap.
+        max_mar_l_pt = 0.0
+        for item in list_paras:
+            hanging_pt = (
+                float(item.text_indent_pt)
+                if getattr(item, "text_indent_pt", None) is not None
+                else _DEFAULT_HANGING_INDENT_PT
+            )
+            para_left = float(item.left_pt) if getattr(item, "left_pt", None) is not None else box_left_pt
+            max_mar_l_pt = max(max_mar_l_pt, max(0.0, (para_left - box_left_pt) + hanging_pt))
+        extra = int(round(max_mar_l_pt * EMU_PER_PT * scale_x * 1.05))
         width = Emu(max(int(width) + extra, 1))
     # Single-line list items from the PDF should not reflow under hanging indent.
     pdf_lines_were_single = all("\n" not in (item.text or "") for item in paragraphs)
@@ -669,13 +678,23 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
         # Spacing must be inserted before bullet children (pml.xsd order).
         space_before = getattr(item, "space_before_pt", None)
         if space_before is not None and space_before > 0:
-            _set_paragraph_space_before(paragraph, space_before * min(scale_x, scale_y))
+            _set_paragraph_space_before(paragraph, space_before * scale_min)
         if is_list_para:
+            hanging_pt = (
+                float(item.text_indent_pt)
+                if getattr(item, "text_indent_pt", None) is not None
+                else _DEFAULT_HANGING_INDENT_PT
+            )
+            para_left = float(item.left_pt) if getattr(item, "left_pt", None) is not None else box_left_pt
+            mar_l_pt = max(0.0, (para_left - box_left_pt) + hanging_pt)
+            hanging_emu = max(1, int(round(hanging_pt * EMU_PER_PT * scale_x)))
+            mar_l_emu = max(hanging_emu, int(round(mar_l_pt * EMU_PER_PT * scale_x)))
             set_paragraph_bullet(
                 paragraph,
                 level=max(0, int(item.list_level or 0)),
                 list_style=getattr(item, "list_style", None),
-                hanging_indent_emu=hanging_indent_emu,
+                hanging_indent_emu=hanging_emu,
+                mar_l_emu=mar_l_emu,
             )
         _set_paragraph_end_typefaces(paragraph, resolved_typefaces)
 
@@ -704,6 +723,7 @@ def set_paragraph_bullet(
     level: int = 0,
     list_style: str | None = None,
     hanging_indent_emu: int = _DEFAULT_HANGING_INDENT_EMU,
+    mar_l_emu: int | None = None,
 ) -> None:
     """Emit a real PowerPoint bullet or auto-number (not a literal glyph in run text)."""
 
@@ -717,9 +737,9 @@ def set_paragraph_bullet(
         tag = child.tag
         if tag in {qn("a:buFont"), qn("a:buChar"), qn("a:buNone"), qn("a:buAutoNum"), qn("a:buBlip")}:
             p_pr.remove(child)
-    # Hanging indent so the bullet/number sits left of the text.
+    # Hanging indent: indent = -(bullet→text gap); marL = line offset + gap.
     indent_emu = max(1, int(hanging_indent_emu))
-    mar_l = indent_emu * (level + 1)
+    mar_l = max(indent_emu, int(mar_l_emu)) if mar_l_emu is not None else indent_emu * (level + 1)
     p_pr.set("marL", str(mar_l))
     p_pr.set("indent", str(-indent_emu))
 

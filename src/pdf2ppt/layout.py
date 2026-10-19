@@ -99,6 +99,10 @@ _BULLET_PREFIX_RE = re.compile(
     re.VERBOSE,
 )
 _INDENT_LEVEL_CHARS = 18.0  # PDF points of left-indent ≈ one list level on slides
+# PowerPoint / LibreOffice single-spacing is ~1.2× font size; use when converting
+# PDF baseline gaps into a:spcBef so multi-paragraph boxes do not drift upward.
+_LINE_HEIGHT_FACTOR = 1.2
+_DEFAULT_HANGING_INDENT_PT = 27.0  # fallback when prefix width cannot be measured
 
 
 @dataclass(slots=True)
@@ -957,6 +961,47 @@ def _estimate_font_size_from_bbox(bbox: BBox) -> float:
     return max(6.0, (bbox[3] - bbox[1]) * 0.75)
 
 
+def _estimate_baseline_pt(bbox: BBox, font_size: float) -> float:
+    """Approximate PDF text baseline from the line bbox + font size."""
+
+    return float(bbox[1]) + max(font_size, 1.0) * 0.85
+
+
+def _measure_bullet_text_indent_pt(prefix: str, font_size: float) -> float:
+    """Width of the literal bullet/number prefix (→ hanging indent), in PDF points."""
+
+    cleaned = prefix or ""
+    if not cleaned.strip():
+        return _DEFAULT_HANGING_INDENT_PT
+    try:
+        from .text_style import choose_measurement_font, classify_text_script, measure_text_dimensions
+
+        script = classify_text_script(cleaned)
+        font_path = choose_measurement_font(script, bold=False)
+        if font_path is None:
+            return max(4.0, min(_DEFAULT_HANGING_INDENT_PT, len(cleaned) * font_size * 0.45))
+        width, _height = measure_text_dimensions(cleaned, max(6, int(round(font_size))), font_path)
+        return max(4.0, min(_DEFAULT_HANGING_INDENT_PT, float(width)))
+    except Exception:  # noqa: BLE001
+        return max(4.0, min(_DEFAULT_HANGING_INDENT_PT, len(cleaned) * font_size * 0.45))
+
+
+def _space_before_from_baselines(
+    baseline: float,
+    *,
+    prev_baseline: float | None,
+    prev_font_size: float | None,
+) -> float | None:
+    """Convert PDF baseline gap into PowerPoint a:spcBef (accounts for ~1.2× line height)."""
+
+    if prev_baseline is None or prev_font_size is None or prev_font_size <= 0:
+        return None
+    gap = baseline - prev_baseline - _LINE_HEIGHT_FACTOR * prev_font_size
+    if gap <= 0.25:
+        return 0.0
+    return gap
+
+
 def _role_for_label(label: LayoutLabel) -> str:
     if label in _TITLE_LABELS:
         return "title"
@@ -977,25 +1022,26 @@ def _paragraphs_from_members(
     paragraphs: list[TextParagraph] = []
     left_edges = [block.bbox[0] for block in members]
     min_left = min(left_edges) if left_edges else 0.0
-    previous_bottom: float | None = None
+    prev_baseline: float | None = None
+    prev_font: float | None = None
     for block in members:
         for line in block.text.splitlines() or [block.text]:
             raw = line.strip()
             if not raw:
                 continue
             is_list = region_label == "list" or _looks_like_list_line(raw)
-            cleaned, detected_level, list_style = strip_bullet_prefix(
+            cleaned, detected_level, list_style, prefix = strip_bullet_prefix(
                 raw, left=block.bbox[0], min_left=min_left
             )
             list_level: int | None = detected_level if is_list else None
             font_size = block.font_size
             if font_size is None:
                 font_size = _estimate_font_size_from_bbox(block.bbox)
-            space_before: float | None = None
-            if previous_bottom is not None:
-                gap = block.bbox[1] - previous_bottom
-                if gap > 1.0:
-                    space_before = gap
+            baseline = _estimate_baseline_pt(block.bbox, font_size)
+            space_before = _space_before_from_baselines(
+                baseline, prev_baseline=prev_baseline, prev_font_size=prev_font
+            )
+            text_indent = _measure_bullet_text_indent_pt(prefix, font_size) if is_list and prefix else None
             paragraphs.append(
                 TextParagraph(
                     text=cleaned if is_list else raw,
@@ -1006,18 +1052,26 @@ def _paragraphs_from_members(
                     font_size=font_size,
                     font_color=block.font_color,
                     space_before_pt=space_before,
+                    text_indent_pt=text_indent,
+                    left_pt=float(block.bbox[0]),
+                    baseline_pt=baseline,
                 )
             )
-            previous_bottom = block.bbox[3]
+            prev_baseline = baseline
+            prev_font = font_size
     if not paragraphs:
         paragraphs.append(TextParagraph(text=""))
     return paragraphs
 
 
-def strip_bullet_prefix(text: str, *, left: float, min_left: float) -> tuple[str, int, str]:
-    """Remove literal bullet/number markers and estimate indent level + list style."""
+def strip_bullet_prefix(text: str, *, left: float, min_left: float) -> tuple[str, int, str, str]:
+    """Remove literal bullet/number markers and estimate indent level + list style.
+
+    Returns ``(cleaned_text, level, list_style, matched_prefix)``.
+    """
 
     match = _BULLET_PREFIX_RE.match(text)
+    prefix = match.group(0) if match else ""
     cleaned = text[match.end() :].strip() if match else text.strip()
     indent = max(0.0, left - min_left)
     # Floor (not round) so a modest nested indent maps to level 1, not 2.
@@ -1033,7 +1087,7 @@ def strip_bullet_prefix(text: str, *, left: float, min_left: float) -> tuple[str
             list_style = "alphaUcPeriod"
         elif re.match(r"^[a-z][\.\)]", token):
             list_style = "alphaLcPeriod"
-    return cleaned or text.strip(), level, list_style
+    return cleaned or text.strip(), level, list_style, prefix
 
 
 def _enrich_block_paragraphs(block: TextBlock) -> TextBlock:
@@ -1045,13 +1099,30 @@ def _enrich_block_paragraphs(block: TextBlock) -> TextBlock:
     if len(lines) == 1 and not _looks_like_list_line(lines[0]):
         return block
     min_left = block.bbox[0]
+    font_size = block.font_size or _estimate_font_size_from_bbox(block.bbox)
+    # Estimate per-line baselines by slicing the shared bbox (large_mask etc.).
+    box_height = max(1.0, block.bbox[3] - block.bbox[1])
+    line_slot = box_height / max(len(lines), 1)
     paragraphs: list[TextParagraph] = []
     any_list = False
-    for line in lines:
+    prev_baseline: float | None = None
+    prev_font: float | None = None
+    for index, line in enumerate(lines):
         raw = line.strip()
         is_list = _looks_like_list_line(raw)
         any_list = any_list or is_list
-        cleaned, level, list_style = strip_bullet_prefix(raw, left=block.bbox[0], min_left=min_left)
+        cleaned, level, list_style, prefix = strip_bullet_prefix(raw, left=block.bbox[0], min_left=min_left)
+        line_bbox: BBox = (
+            block.bbox[0],
+            block.bbox[1] + index * line_slot,
+            block.bbox[2],
+            block.bbox[1] + (index + 1) * line_slot,
+        )
+        baseline = _estimate_baseline_pt(line_bbox, font_size)
+        space_before = _space_before_from_baselines(
+            baseline, prev_baseline=prev_baseline, prev_font_size=prev_font
+        )
+        text_indent = _measure_bullet_text_indent_pt(prefix, font_size) if is_list and prefix else None
         paragraphs.append(
             TextParagraph(
                 text=cleaned if is_list else raw,
@@ -1059,10 +1130,16 @@ def _enrich_block_paragraphs(block: TextBlock) -> TextBlock:
                 list_style=list_style if is_list else None,
                 bold=block.bold,
                 italic=block.italic,
-                font_size=block.font_size or _estimate_font_size_from_bbox(block.bbox),
+                font_size=font_size,
                 font_color=block.font_color,
+                space_before_pt=space_before,
+                text_indent_pt=text_indent,
+                left_pt=float(block.bbox[0]),
+                baseline_pt=baseline,
             )
         )
+        prev_baseline = baseline
+        prev_font = font_size
     block.paragraphs = paragraphs
     if any_list:
         block.block_role = "list"
