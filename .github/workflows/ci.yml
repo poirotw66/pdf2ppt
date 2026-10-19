@@ -94,6 +94,9 @@ jobs:
             --fixture dark_background_light_text \
             --fixture geometric_chart \
             --fixture table \
+            --fixture vector_shapes \
+            --fixture flowchart \
+            --fixture merged_table \
             --json-out output/bench_slide_ci.json \
             --work-dir output/bench_slide_ci_work
           python -c "import json; print(json.dumps(json.load(open('output/bench_slide_ci.json'))['summary'], indent=2))"

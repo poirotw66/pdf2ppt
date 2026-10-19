@@ -252,6 +252,8 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         generative_textured_ring_luma_std=request.generative_textured_ring_luma_std,
         generative_safety_block_retries=request.generative_safety_block_retries,
         generative_max_attempts=request.generative_max_attempts,
+        vector_mode=request.vector_mode,
+        vector_complexity_threshold=request.vector_complexity_threshold,
         approved_ocr_blocks_by_page=approved_boxes_by_page,
         approved_ocr_image_size_by_page=approved_image_sizes_by_page,
         apply_notebooklm_watermark_fallback=_should_apply_notebooklm_watermark_fallback(record.original_filename),

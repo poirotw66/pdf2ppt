@@ -150,10 +150,16 @@ def choose_background_mode(
     quality: QualityScore,
     has_text: bool,
     has_visuals: bool,
+    has_native_vectors: bool = False,
 ) -> tuple[BackgroundMode, str | None]:
     if not has_text or quality.editable_ratio < 0.4:
+        # Native shapes/tables alone can still produce an editable slide.
+        if has_native_vectors and page_kind == "digital":
+            return "elements", "Native vectors without recoverable text."
         return "full-page", "Editable ratio below fallback threshold."
     if page_kind == "digital" and quality.editable_ratio >= 0.8 and not has_visuals:
+        return "elements", None
+    if page_kind == "digital" and quality.editable_ratio >= 0.8 and has_native_vectors and not has_visuals:
         return "elements", None
     if page_kind == "digital" and quality.editable_ratio >= 0.8:
         return "overlay", "Retained background to preserve non-text visuals."

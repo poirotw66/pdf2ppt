@@ -48,9 +48,10 @@ on mask cleanliness. The slide evaluator scores the **end-to-end PPTX**.
 - Counts: text boxes, pictures, auto-shapes, tables, lines, groups, charts.
 - **`raster_background_area_ratio`** — largest picture covering ≥ 85% of the
   slide area (typical full-page overlay / full-page background).
-- **`score`** — composite in `[0, 1]` that rewards native objects and penalizes
-  full-page rasters. Use the raw counts for fine-grained diffs; use `score` for
-  a single comparable number.
+- **`score`** — composite in `[0, 1]` that rewards native objects (tables and
+  shapes weighted higher after P1 vector nativization) and penalizes full-page
+  rasters. Use the raw counts for fine-grained diffs; use `score` for a single
+  comparable number. See also [`docs/vector-nativization.md`](vector-nativization.md).
 
 ## System dependencies (optional)
 

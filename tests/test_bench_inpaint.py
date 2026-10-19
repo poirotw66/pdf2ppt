@@ -290,7 +290,9 @@ class RunBenchmarkSmokeTests(unittest.TestCase):
             report = bench_inpaint.run_benchmark(config)
 
         self.assertFalse(report["ocr"]["available"])
-        self.assertEqual(len(report["cases"]), 8)
+        fixture_count = len(list((REPO_ROOT / "tests" / "fixtures").glob("*.pdf")))
+        self.assertEqual(len(report["cases"]), fixture_count)
+        self.assertGreaterEqual(fixture_count, 8)
         for case in report["cases"]:
             for engine_name in config.engines:
                 metrics = case["engines"][engine_name]

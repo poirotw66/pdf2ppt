@@ -2509,7 +2509,12 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
         ]
         extract_native_text_blocks_mock.return_value = (native_blocks, [])
         select_text_blocks_mock.return_value = native_blocks
-        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        page = SimpleNamespace(
+            number=0,
+            rect=fitz.Rect(0, 0, 320, 240),
+            get_drawings=lambda: [],
+            find_tables=lambda **_kwargs: SimpleNamespace(tables=[]),
+        )
         options = ConversionOptions(
             input_path=Path("input.pdf"),
             output_path=Path("output.pptx"),
@@ -2553,7 +2558,12 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
             mask_image=None,
             debug_images={},
         )
-        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        page = SimpleNamespace(
+            number=0,
+            rect=fitz.Rect(0, 0, 320, 240),
+            get_drawings=lambda: [],
+            find_tables=lambda **_kwargs: SimpleNamespace(tables=[]),
+        )
         options = ConversionOptions(
             input_path=Path("input.pdf"),
             output_path=Path("output.pptx"),
@@ -2613,7 +2623,12 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
             mask_image=None,
             debug_images={},
         )
-        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        page = SimpleNamespace(
+            number=0,
+            rect=fitz.Rect(0, 0, 320, 240),
+            get_drawings=lambda: [],
+            find_tables=lambda **_kwargs: SimpleNamespace(tables=[]),
+        )
         options = ConversionOptions(
             input_path=Path("input.pdf"),
             output_path=Path("output.pptx"),
@@ -2673,7 +2688,12 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
             mask_image=None,
             debug_images={},
         )
-        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        page = SimpleNamespace(
+            number=0,
+            rect=fitz.Rect(0, 0, 320, 240),
+            get_drawings=lambda: [],
+            find_tables=lambda **_kwargs: SimpleNamespace(tables=[]),
+        )
         options = ConversionOptions(
             input_path=Path("input.pdf"),
             output_path=Path("output.pptx"),
@@ -2740,7 +2760,12 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
             mask_image=None,
             debug_images={},
         )
-        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        page = SimpleNamespace(
+            number=0,
+            rect=fitz.Rect(0, 0, 320, 240),
+            get_drawings=lambda: [],
+            find_tables=lambda **_kwargs: SimpleNamespace(tables=[]),
+        )
         options = ConversionOptions(
             input_path=Path("input.pdf"),
             output_path=Path("output.pptx"),
@@ -2801,7 +2826,12 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
     ) -> None:
         ocr_image = Image.new("RGB", (200, 100), (10, 10, 10))
         render_page_image_mock.return_value = ocr_image
-        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        page = SimpleNamespace(
+            number=0,
+            rect=fitz.Rect(0, 0, 320, 240),
+            get_drawings=lambda: [],
+            find_tables=lambda **_kwargs: SimpleNamespace(tables=[]),
+        )
         options = ConversionOptions(
             input_path=Path("input.pdf"),
             output_path=Path("output.pptx"),
@@ -2865,7 +2895,12 @@ class AnalyzePagePerformanceTests(unittest.TestCase):
         ocr_image = Image.new("RGB", (200, 100), (10, 10, 10))
         background_image = Image.new("RGB", (120, 60), (20, 20, 20))
         render_page_image_mock.side_effect = [ocr_image, background_image]
-        page = SimpleNamespace(number=0, rect=fitz.Rect(0, 0, 320, 240))
+        page = SimpleNamespace(
+            number=0,
+            rect=fitz.Rect(0, 0, 320, 240),
+            get_drawings=lambda: [],
+            find_tables=lambda **_kwargs: SimpleNamespace(tables=[]),
+        )
         options = ConversionOptions(
             input_path=Path("input.pdf"),
             output_path=Path("output.pptx"),

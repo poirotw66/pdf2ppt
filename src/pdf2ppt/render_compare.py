@@ -616,18 +616,19 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
         text_box_count + auto_shape_count + table_count + line_count + group_count + chart_count
     )
     # Composite in [0, 1]. Text boxes remain valuable even under a full-page
-    # raster overlay (pdf2ppt's current default). Vector shapes / tables lift
-    # the score further; a picture-only slide stays near zero.
-    text_component = min(1.0, text_box_count / 6.0) * 0.50
-    structure_component = (
-        min(
-            1.0,
-            (auto_shape_count + table_count * 2 + line_count + group_count + chart_count) / 5.0,
-        )
-        * 0.35
+    # raster overlay. Native shapes / tables (P1 vector nativization) lift the
+    # score further and reduce the raster penalty; a picture-only slide stays
+    # near zero. Tables are weighted higher than shapes because one table
+    # replaces many fragmented text boxes.
+    text_component = min(1.0, text_box_count / 6.0) * 0.40
+    structure_units = (
+        auto_shape_count + table_count * 4 + line_count * 0.5 + group_count + chart_count * 2
     )
+    structure_component = min(1.0, structure_units / 8.0) * 0.45
     if text_box_count == 0 and native_object_count == 0:
         raster_penalty = raster_background_area * 0.40
+    elif structure_units >= 2:
+        raster_penalty = raster_background_area * 0.10
     else:
         raster_penalty = raster_background_area * 0.15
     score = max(0.0, min(1.0, text_component + structure_component + 0.15 - raster_penalty))

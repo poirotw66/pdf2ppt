@@ -152,6 +152,8 @@ class ConvertRequest(BaseModel):
     generative_textured_ring_luma_std: float = Field(default=4.0, ge=0.0, le=255.0)
     generative_safety_block_retries: int = Field(default=1, ge=0, le=5)
     generative_max_attempts: int | None = Field(default=None, ge=1, le=50_000)
+    vector_mode: Literal["off", "auto", "aggressive"] = "auto"
+    vector_complexity_threshold: int = Field(default=80, ge=1, le=10_000)
     write_debug_artifacts: bool = False
 
 
