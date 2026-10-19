@@ -7,6 +7,18 @@ BBox = tuple[float, float, float, float]
 Polygon = tuple[tuple[float, float], ...]
 PageKind = Literal["digital", "scanned", "hybrid"]
 BackgroundMode = Literal["elements", "overlay", "full-page"]
+ShapeKind = Literal[
+    "rect",
+    "round_rect",
+    "ellipse",
+    "line",
+    "polyline",
+    "polygon",
+    "freeform",
+    "arrow",
+]
+ArrowDirection = Literal["left", "right", "up", "down"]
+VectorMode = Literal["off", "auto", "aggressive"]
 
 
 @dataclass(slots=True)
@@ -25,6 +37,94 @@ class TextBlock:
     block_role: str = "body"
     image_bbox: BBox | None = None
     image_polygon: Polygon | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class ShapeElement:
+    """Native PowerPoint-ready vector shape extracted from a PDF drawing path."""
+
+    id: str
+    kind: ShapeKind
+    bbox: BBox
+    points: list[tuple[float, float]] = field(default_factory=list)
+    fill_color: str | None = None
+    stroke_color: str | None = None
+    stroke_width: float | None = None
+    stroke_dash: str | None = None
+    fill_opacity: float = 1.0
+    stroke_opacity: float = 1.0
+    z_order: int = 0
+    provenance: str = "native_drawing"
+    confidence: float = 1.0
+    locked: bool = True
+    drawing_index: int | None = None
+    is_page_background: bool = False
+    arrow_direction: ArrowDirection | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class TableCell:
+    row: int
+    col: int
+    text: str
+    rowspan: int = 1
+    colspan: int = 1
+    fill_color: str | None = None
+    font_size: float | None = None
+    font_color: str | None = None
+    font_name: str | None = None
+    bold: bool = False
+    # "left" | "center" | "right"
+    horizontal_align: str = "left"
+    # "top" | "middle" | "bottom"
+    vertical_anchor: str = "middle"
+    text_block_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class TableElement:
+    """Native PowerPoint-ready table extracted via PyMuPDF ``find_tables()``."""
+
+    id: str
+    bbox: BBox
+    row_count: int
+    col_count: int
+    cells: list[TableCell]
+    column_widths: list[float]
+    row_heights: list[float]
+    border_color: str | None = None
+    border_width: float | None = None
+    # Optional distinct outer vs inner rule widths (PDF ruled tables).
+    outer_border_width: float | None = None
+    inner_border_width: float | None = None
+    z_order: int = 0
+    provenance: str = "native_table"
+    confidence: float = 0.9
+    locked: bool = True
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class GroupElement:
+    """Optional grouping of related native elements (SlideIR placeholder)."""
+
+    id: str
+    member_ids: list[str]
+    bbox: BBox | None = None
+    provenance: str = "native_group"
+    confidence: float = 0.5
+    locked: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -68,9 +168,14 @@ class PageResult:
     background_inpaint_note: str | None = None
     background_image_bytes: bytes | None = field(default=None, repr=False)
     image_elements: list[ImagePlacement] = field(default_factory=list, repr=False)
+    shape_elements: list[ShapeElement] = field(default_factory=list)
+    table_elements: list[TableElement] = field(default_factory=list)
+    group_elements: list[GroupElement] = field(default_factory=list)
+    vector_mode: str | None = None
+    vector_fallback_reason: str | None = None
 
     def to_report_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "page": self.page_number,
             "page_kind": self.page_kind,
             "background_mode": self.background_mode,
@@ -80,7 +185,15 @@ class PageResult:
             "background_inpaint_engine": self.background_inpaint_engine,
             "background_inpaint_note": self.background_inpaint_note,
             "text_blocks": [block.to_dict() for block in self.text_blocks],
+            "shape_elements": [shape.to_dict() for shape in self.shape_elements],
+            "table_elements": [table.to_dict() for table in self.table_elements],
+            "group_elements": [group.to_dict() for group in self.group_elements],
         }
+        if self.vector_mode is not None:
+            payload["vector_mode"] = self.vector_mode
+        if self.vector_fallback_reason is not None:
+            payload["vector_fallback_reason"] = self.vector_fallback_reason
+        return payload
 
 
 @dataclass(slots=True)

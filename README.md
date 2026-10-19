@@ -48,6 +48,9 @@ Core pipeline:
   - `generative-openai` / `generative-gemini` (optional cloud image-edit backends; explicit opt-in; see [`docs/generative-inpaint.md`](docs/generative-inpaint.md))
   - `auto` routing (uses `lama-onnx` instead of `white-box` for large masks when a LaMa runtime is available)
 - Generate a JSON report for every conversion.
+- **Vector / table nativization (P1):** for digital PDFs, map simple drawings and
+  ruled tables to native PowerPoint shapes and tables (`--vector-mode auto` by
+  default). See [`docs/vector-nativization.md`](docs/vector-nativization.md).
 - Generate per-page debug artifacts for OCR masks and background decisions.
 - OCR post-processing: merge adjacent boxes on the same text line by default; opt in to PaddleOCR word-level boxes with `--ocr-return-word-box` for debugging.
 - Show page-level conversion progress in the CLI.
@@ -291,6 +294,8 @@ Main arguments:
 - `output_pptx`: output PPTX path
 - `--report`: path for the JSON conversion report
 - `--mode`: `editable`, `fidelity`, or `fast`
+- `--vector-mode`: `off`, `auto` (default), or `aggressive` — digital-PDF shape/table nativization ([`docs/vector-nativization.md`](docs/vector-nativization.md))
+- `--vector-complexity-threshold`: max drawings considered in `auto` mode (default `80`)
 - `--lang`: PaddleOCR language code, default `ch`
 - `--ocr-model-root`: local PaddleOCR model directory, default `./model`
 - `--enable-doc-orientation`: enable PaddleOCR document orientation classification; disabled by default for faster startup and OCR
@@ -388,7 +393,10 @@ The JSON report includes:
 ## Notes and Limitations
 
 - OCR-heavy pages are still estimations, not perfect semantic reconstruction.
-- Complex charts and vector graphics are currently preserved more for appearance than semantic editability.
+- Simple vector drawings and ruled tables on digital pages become native PPT
+  shapes/tables by default (`--vector-mode auto`). Gradients, patterns, clips,
+  and very dense illustrations still fall back to the raster background; use
+  `--vector-mode off` to disable. Details: [`docs/vector-nativization.md`](docs/vector-nativization.md).
 - Bold and color restoration for OCR text are heuristic-based.
 
 ## Development
@@ -414,9 +422,10 @@ python scripts/bench_slide.py --ocr off --json-out output/bench_slide.json
 ```
 
 Fidelity (SSIM, pixel error, edge F1, optional OCR text F1) and editability
-(native object counts, raster-background coverage) are reported separately so
-two runs can be diffed in JSON. See [`docs/slide-quality.md`](docs/slide-quality.md)
-for metrics, CJK font pinning, and the LibreOffice vs PowerPoint caveat.
+(native object counts including shapes/tables, raster-background coverage) are
+reported separately so two runs can be diffed in JSON. See
+[`docs/slide-quality.md`](docs/slide-quality.md) for metrics, CJK font pinning,
+and the LibreOffice vs PowerPoint caveat.
 
 ## How to Enable the Review UI
 

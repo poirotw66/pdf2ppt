@@ -42,6 +42,14 @@ class ConversionOptions:
     output_path: Path
     report_path: Path
     mode: str = "editable"
+    # Digital-PDF vector / table nativization. ``off`` keeps the pre-P1 path
+    # (text boxes + raster background). ``auto`` (default) converts simple
+    # drawings and detected tables when path complexity stays under the
+    # threshold. ``aggressive`` raises the threshold and keeps denser paths.
+    vector_mode: str = "auto"
+    # Max drawings considered for vector nativization in ``auto`` mode.
+    # ``aggressive`` uses ``max(threshold, 400)`` unless the caller sets higher.
+    vector_complexity_threshold: int = 80
     lang: str = "ch"
     ocr_model_root: Path | None = Path("model")
     ocr_use_doc_orientation: bool = False

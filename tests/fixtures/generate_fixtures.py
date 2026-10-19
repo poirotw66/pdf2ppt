@@ -371,6 +371,198 @@ def build_large_mask() -> None:
     _save(doc, "large_mask.pdf")
 
 
+def build_vector_shapes() -> None:
+    """Rects, lines, circles, arrows, and rounded boxes for P1 vector nativization."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(0.98, 0.98, 0.99), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(40, 24, 700, 70),
+        "Vector Shape Catalog",
+        fontsize=24,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+
+    # Filled rectangle
+    page.draw_rect(fitz.Rect(60, 100, 220, 200), color=(0.1, 0.1, 0.1), fill=(0.25, 0.45, 0.85), width=1.5)
+    page.insert_textbox(fitz.Rect(60, 210, 220, 240), "rect", fontsize=12, fontname="helv", color=(0.2, 0.2, 0.2))
+
+    # Circle / ellipse
+    page.draw_oval(fitz.Rect(280, 100, 420, 220), color=(0.15, 0.15, 0.15), fill=(0.95, 0.55, 0.2), width=1.5)
+    page.insert_textbox(fitz.Rect(280, 230, 420, 260), "ellipse", fontsize=12, fontname="helv", color=(0.2, 0.2, 0.2))
+
+    # Straight lines
+    page.draw_line(fitz.Point(480, 120), fitz.Point(700, 120), color=(0.2, 0.2, 0.25), width=2)
+    page.draw_line(fitz.Point(480, 160), fitz.Point(700, 200), color=(0.75, 0.2, 0.25), width=2.5)
+    page.insert_textbox(fitz.Rect(480, 220, 700, 250), "lines", fontsize=12, fontname="helv", color=(0.2, 0.2, 0.2))
+
+    # Rounded rectangle approximated with Shape finish (PyMuPDF draw_rect is sharp;
+    # use a closed path of lines + curves for a recognisable round_rect).
+    shape = page.new_shape()
+    rr = fitz.Rect(60, 300, 240, 420)
+    radius = 18.0
+    shape.draw_line(fitz.Point(rr.x0 + radius, rr.y0), fitz.Point(rr.x1 - radius, rr.y0))
+    shape.draw_bezier(
+        fitz.Point(rr.x1 - radius, rr.y0),
+        fitz.Point(rr.x1 - radius * 0.45, rr.y0),
+        fitz.Point(rr.x1, rr.y0 + radius * 0.45),
+        fitz.Point(rr.x1, rr.y0 + radius),
+    )
+    shape.draw_line(fitz.Point(rr.x1, rr.y0 + radius), fitz.Point(rr.x1, rr.y1 - radius))
+    shape.draw_bezier(
+        fitz.Point(rr.x1, rr.y1 - radius),
+        fitz.Point(rr.x1, rr.y1 - radius * 0.45),
+        fitz.Point(rr.x1 - radius * 0.45, rr.y1),
+        fitz.Point(rr.x1 - radius, rr.y1),
+    )
+    shape.draw_line(fitz.Point(rr.x1 - radius, rr.y1), fitz.Point(rr.x0 + radius, rr.y1))
+    shape.draw_bezier(
+        fitz.Point(rr.x0 + radius, rr.y1),
+        fitz.Point(rr.x0 + radius * 0.45, rr.y1),
+        fitz.Point(rr.x0, rr.y1 - radius * 0.45),
+        fitz.Point(rr.x0, rr.y1 - radius),
+    )
+    shape.draw_line(fitz.Point(rr.x0, rr.y1 - radius), fitz.Point(rr.x0, rr.y0 + radius))
+    shape.draw_bezier(
+        fitz.Point(rr.x0, rr.y0 + radius),
+        fitz.Point(rr.x0, rr.y0 + radius * 0.45),
+        fitz.Point(rr.x0 + radius * 0.45, rr.y0),
+        fitz.Point(rr.x0 + radius, rr.y0),
+    )
+    shape.finish(color=(0.1, 0.1, 0.1), fill=(0.35, 0.7, 0.45), width=1.5, closePath=True)
+    shape.commit()
+    page.insert_textbox(fitz.Rect(60, 430, 240, 460), "round_rect", fontsize=12, fontname="helv", color=(0.2, 0.2, 0.2))
+
+    # Simple right-pointing arrow polygon
+    arrow = page.new_shape()
+    arrow.draw_polyline(
+        [
+            fitz.Point(320, 340),
+            fitz.Point(480, 340),
+            fitz.Point(480, 310),
+            fitz.Point(560, 370),
+            fitz.Point(480, 430),
+            fitz.Point(480, 400),
+            fitz.Point(320, 400),
+        ]
+    )
+    arrow.finish(color=(0.1, 0.1, 0.1), fill=(0.55, 0.35, 0.75), width=1.2, closePath=True)
+    arrow.commit()
+    page.insert_textbox(fitz.Rect(320, 440, 560, 470), "arrow", fontsize=12, fontname="helv", color=(0.2, 0.2, 0.2))
+
+    _save(doc, "vector_shapes.pdf")
+
+
+def build_flowchart() -> None:
+    """Small flowchart: boxes + connectors for P1 freeform/line nativization."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(40, 24, 600, 70),
+        "Onboarding Flow",
+        fontsize=24,
+        fontname="helv",
+        color=(0.1, 0.1, 0.1),
+    )
+
+    boxes = [
+        (120, 120, 320, 190, "Start", (0.25, 0.45, 0.85)),
+        (120, 250, 320, 320, "Collect Info", (0.35, 0.65, 0.45)),
+        (520, 250, 760, 320, "Verify", (0.9, 0.55, 0.2)),
+        (320, 400, 560, 470, "Done", (0.55, 0.35, 0.75)),
+    ]
+    for x0, y0, x1, y1, label, fill in boxes:
+        page.draw_rect(fitz.Rect(x0, y0, x1, y1), color=(0.15, 0.15, 0.15), fill=fill, width=1.5)
+        page.insert_textbox(
+            fitz.Rect(x0 + 8, y0 + 18, x1 - 8, y1 - 8),
+            label,
+            fontsize=16,
+            fontname="helv",
+            color=(1, 1, 1),
+            align=1,
+        )
+
+    # Connectors
+    page.draw_line(fitz.Point(220, 190), fitz.Point(220, 250), color=(0.2, 0.2, 0.2), width=2)
+    page.draw_line(fitz.Point(320, 285), fitz.Point(520, 285), color=(0.2, 0.2, 0.2), width=2)
+    page.draw_line(fitz.Point(640, 320), fitz.Point(640, 435), color=(0.2, 0.2, 0.2), width=2)
+    page.draw_line(fitz.Point(640, 435), fitz.Point(560, 435), color=(0.2, 0.2, 0.2), width=2)
+
+    _save(doc, "flowchart.pdf")
+
+
+def build_merged_table() -> None:
+    """Bordered table with a merged header cell for P1 native table merges."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(60, 40, 700, 85),
+        "Regional Headcount",
+        fontsize=24,
+        fontname="helv",
+        color=(0.1, 0.1, 0.1),
+    )
+
+    left, top, right, bottom = 100.0, 120.0, 820.0, 400.0
+    # Outer border
+    for x0, y0, x1, y1 in (
+        (left, top, right, top),
+        (left, bottom, right, bottom),
+        (left, top, left, bottom),
+        (right, top, right, bottom),
+    ):
+        page.draw_line(fitz.Point(x0, y0), fitz.Point(x1, y1), color=(0.25, 0.25, 0.28), width=1.5)
+
+    # Horizontal rules (3 body rows + header)
+    for y in (200.0, 266.666, 333.333):
+        page.draw_line(fitz.Point(left, y), fitz.Point(right, y), color=(0.25, 0.25, 0.28), width=1)
+
+    # Vertical divider only below the merged header
+    mid_x = 460.0
+    page.draw_line(fitz.Point(mid_x, 200.0), fitz.Point(mid_x, bottom), color=(0.25, 0.25, 0.28), width=1)
+
+    # Header fill
+    page.draw_rect(fitz.Rect(left, top, right, 200.0), color=None, fill=(0.85, 0.88, 0.94), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(left + 10, top + 25, right - 10, 190),
+        "Americas + EMEA Combined",
+        fontsize=16,
+        fontname="helv",
+        color=(0.1, 0.1, 0.1),
+        align=1,
+    )
+
+    body = [
+        ("Engineering", "420"),
+        ("Sales", "188"),
+        ("Support", "96"),
+    ]
+    row_top = 200.0
+    row_h = (bottom - 200.0) / 3.0
+    for index, (left_text, right_text) in enumerate(body):
+        y0 = row_top + index * row_h
+        y1 = y0 + row_h
+        page.insert_textbox(
+            fitz.Rect(left + 12, y0 + 16, mid_x - 12, y1 - 8),
+            left_text,
+            fontsize=14,
+            fontname="helv",
+            color=(0.15, 0.15, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(mid_x + 12, y0 + 16, right - 12, y1 - 8),
+            right_text,
+            fontsize=14,
+            fontname="helv",
+            color=(0.15, 0.15, 0.15),
+        )
+
+    _save(doc, "merged_table.pdf")
+
+
 def main() -> None:
     build_solid_background()
     build_gradient_linear()
@@ -380,6 +572,9 @@ def main() -> None:
     build_dark_background_light_text()
     build_table()
     build_large_mask()
+    build_vector_shapes()
+    build_flowchart()
+    build_merged_table()
 
 
 if __name__ == "__main__":

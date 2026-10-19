@@ -26,6 +26,12 @@ from .background import (
     resolve_background_inpainting_engine,
     write_debug_artifacts,
 )
+from .background_erase import (
+    erase_regions_from_image,
+    regions_for_background_erase,
+    resolve_erase_fill_color,
+    uncomposite_translucent_shapes_from_image,
+)
 from .block_analysis import (
     bbox_area,
     choose_background_mode,
@@ -94,6 +100,12 @@ from .text_style import (
     script_target_width_ratio,
     single_line_fit_width_ratio,
     write_text_fit_debug_report,
+)
+from .vector_nativization import (
+    apply_header_cell_fills,
+    extract_vector_content,
+    filter_text_blocks_outside_tables,
+    remaining_visuals_after_nativization,
 )
 
 logger = logging.getLogger(__name__)
@@ -298,19 +310,48 @@ def analyze_page(
 
     page_mode_started_at = perf_counter()
     text_blocks = select_text_blocks(page_kind, native_blocks, ocr_blocks)
+
+    vector_result = extract_vector_content(
+        page,
+        text_blocks,
+        vector_mode=getattr(options, "vector_mode", "auto"),
+        complexity_threshold=int(getattr(options, "vector_complexity_threshold", 80)),
+        page_kind=page_kind,
+    )
+    for table in vector_result.tables:
+        apply_header_cell_fills(table, page)
+    text_blocks = filter_text_blocks_outside_tables(text_blocks, vector_result.absorbed_text_block_ids)
+
+    has_remaining_visuals = remaining_visuals_after_nativization(
+        image_boxes=image_boxes,
+        drawing_count=signals.drawing_count,
+        nativized_drawing_count=len(vector_result.nativized_drawing_indices),
+        skipped_drawing_count=vector_result.skipped_drawing_count,
+    )
+    # When every drawing was nativized (or absorbed into tables) and there are no
+    # embedded images, treat the page as free of residual raster visuals.
+    if vector_result.shapes or vector_result.tables:
+        if vector_result.skipped_drawing_count == 0 and not image_boxes:
+            if len(vector_result.nativized_drawing_indices) >= signals.drawing_count:
+                has_remaining_visuals = False
+
     quality = score_page(page_kind, text_blocks, native_blocks, ocr_blocks)
+    has_native_vectors = bool(vector_result.shapes or vector_result.tables)
     background_mode, fallback_reason = choose_background_mode(
         page_kind=page_kind,
         quality=quality,
-        has_text=bool(text_blocks),
-        has_visuals=bool(image_boxes) or signals.drawing_count > 0,
+        has_text=bool(text_blocks) or has_native_vectors,
+        has_visuals=has_remaining_visuals,
+        has_native_vectors=has_native_vectors,
     )
     page_mode_seconds = perf_counter() - page_mode_started_at
     logger.debug(
-        "Page %s classified as %s with background mode %s",
+        "Page %s classified as %s with background mode %s (shapes=%s tables=%s)",
         page.number + 1,
         page_kind,
         background_mode,
+        len(vector_result.shapes),
+        len(vector_result.tables),
     )
 
     background_image_bytes: bytes | None = None
@@ -372,6 +413,32 @@ def analyze_page(
             background_inpaint_engine = background_result.engine_name
             background_inpaint_note = background_result.note
             mask_image = background_result.mask_image
+        if has_native_vectors:
+            # Peel translucent solid fills off the raster before native shapes
+            # re-apply the same alpha (avoids double-darkening caption boxes).
+            background_image = uncomposite_translucent_shapes_from_image(
+                background_image,
+                vector_result.shapes,
+                page_width=float(page.rect.width),
+                page_height=float(page.rect.height),
+            )
+            erase_regions = regions_for_background_erase(
+                vector_result.shapes,
+                [table.bbox for table in vector_result.tables],
+                image_boxes=image_boxes,
+            )
+            if erase_regions:
+                fill_color = resolve_erase_fill_color(vector_result.shapes, background_image)
+                background_image = erase_regions_from_image(
+                    background_image,
+                    erase_regions,
+                    page_width=float(page.rect.width),
+                    page_height=float(page.rect.height),
+                    fill_color=fill_color,
+                )
+                note = background_inpaint_note or ""
+                erase_note = f"erased {len(erase_regions)} nativized vector/table region(s)"
+                background_inpaint_note = f"{note}; {erase_note}".strip("; ")
         background_encode_started_at = perf_counter()
         background_image_format = options.background_image_format
         if background_mode == "overlay":
@@ -429,19 +496,24 @@ def analyze_page(
         page_total_seconds,
     )
 
+    emit_native = background_mode != "full-page"
     return PageResult(
         page_number=page_number,
         page_kind=page_kind,
         background_mode=background_mode,
         width_pt=page.rect.width,
         height_pt=page.rect.height,
-        text_blocks=text_blocks if background_mode != "full-page" else [],
+        text_blocks=text_blocks if emit_native else [],
         quality_score=quality,
         fallback_reason=fallback_reason,
         background_inpaint_engine=background_inpaint_engine,
         background_inpaint_note=background_inpaint_note,
         background_image_bytes=background_image_bytes,
         image_elements=image_elements,
+        shape_elements=vector_result.shapes if emit_native else [],
+        table_elements=vector_result.tables if emit_native else [],
+        vector_mode=str(getattr(options, "vector_mode", "auto")),
+        vector_fallback_reason=vector_result.fallback_reason,
     )
 
 

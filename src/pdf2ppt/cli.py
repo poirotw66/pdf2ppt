@@ -378,6 +378,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--vector-mode",
+        choices=("off", "auto", "aggressive"),
+        default="auto",
+        help=(
+            "Digital-PDF vector/table nativization. 'auto' (default) maps simple drawings "
+            "and find_tables() grids to native PowerPoint shapes/tables when complexity "
+            "stays under --vector-complexity-threshold; 'aggressive' raises the threshold; "
+            "'off' keeps the pre-P1 text+raster path. Scanned pages are unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--vector-complexity-threshold",
+        type=positive_int,
+        default=80,
+        help=(
+            "Max drawings considered for vector nativization in --vector-mode=auto "
+            "(default 80). Aggressive mode uses max(threshold, 400)."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -444,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
         generative_textured_ring_luma_std=args.generative_textured_ring_luma_std,
         generative_safety_block_retries=args.generative_safety_block_retries,
         generative_max_attempts=args.generative_max_attempts,
+        vector_mode=args.vector_mode,
+        vector_complexity_threshold=args.vector_complexity_threshold,
     )
     report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
     print(
