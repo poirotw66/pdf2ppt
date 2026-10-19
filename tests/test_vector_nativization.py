@@ -262,5 +262,168 @@ class FilterTextTests(unittest.TestCase):
         self.assertEqual([block.id for block in filtered], ["a"])
 
 
+class TableStyleAndSchemaTests(unittest.TestCase):
+    @unittest.skipUnless((FIXTURES_DIR / "table.pdf").exists(), "fixture missing")
+    def test_table_disables_default_banding_and_sets_font_color(self) -> None:
+        pptx_path, report = _convert("table")
+        page = report.pages[0]
+        self.assertTrue(all(cell.font_size is not None for cell in page.table_elements[0].cells))
+        self.assertTrue(all(cell.font_color for cell in page.table_elements[0].cells))
+
+        presentation = Presentation(str(pptx_path))
+        table = presentation.slides[0].shapes[1].table  # page bg shape then table (or reverse)
+        # Find the table shape regardless of z-order.
+        table = next(shape.table for shape in presentation.slides[0].shapes if shape.has_table)
+        self.assertFalse(table.first_row)
+        self.assertFalse(table.horz_banding)
+        header = table.cell(0, 0)
+        # Explicit dark text, not theme white-on-blue.
+        run = header.text_frame.paragraphs[0].runs[0]
+        self.assertIsNotNone(run.font.color.rgb)
+        self.assertNotEqual(str(run.font.color.rgb).upper(), "FFFFFF")
+
+    @unittest.skipUnless((FIXTURES_DIR / "table.pdf").exists(), "fixture missing")
+    def test_table_tcpr_borders_precede_fills(self) -> None:
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.ppt_render import tcpr_children_in_schema_order
+
+        pptx_path, _report = _convert("table")
+        presentation = Presentation(str(pptx_path))
+        table = next(shape.table for shape in presentation.slides[0].shapes if shape.has_table)
+        checked = 0
+        for row in table.rows:
+            for cell in row.cells:
+                tc_pr = cell._tc.tcPr  # noqa: SLF001
+                if tc_pr is None:
+                    continue
+                has_border = any(child.tag == qn("a:lnL") for child in tc_pr)
+                has_fill = any(child.tag in {qn("a:solidFill"), qn("a:noFill")} for child in tc_pr)
+                if has_border and has_fill:
+                    self.assertTrue(tcpr_children_in_schema_order(tc_pr))
+                    checked += 1
+        self.assertGreater(checked, 0)
+
+    @unittest.skipUnless((FIXTURES_DIR / "merged_table.pdf").exists(), "fixture missing")
+    def test_merged_header_uses_center_alignment(self) -> None:
+        _pptx_path, report = _convert("merged_table")
+        table = report.pages[0].table_elements[0]
+        header = next(cell for cell in table.cells if cell.colspan > 1 or "Combined" in cell.text)
+        self.assertEqual(header.horizontal_align, "center")
+
+
+class ShadowClearingTests(unittest.TestCase):
+    @unittest.skipUnless((FIXTURES_DIR / "vector_shapes.pdf").exists(), "fixture missing")
+    def test_shapes_and_connectors_have_empty_effect_list(self) -> None:
+        from pptx.oxml.ns import qn
+
+        pptx_path, _report = _convert("vector_shapes")
+        presentation = Presentation(str(pptx_path))
+        checked = 0
+        for shape in presentation.slides[0].shapes:
+            element = shape._element  # noqa: SLF001
+            style = element.find(qn("p:style"))
+            if style is None:
+                continue
+            sp_pr = getattr(element, "spPr", None)
+            self.assertIsNotNone(sp_pr)
+            effect_lists = [child for child in sp_pr if child.tag == qn("a:effectLst")]
+            self.assertEqual(len(effect_lists), 1)
+            self.assertEqual(len(effect_lists[0]), 0)
+            effect_ref = style.find(qn("a:effectRef"))
+            self.assertIsNotNone(effect_ref)
+            self.assertEqual(effect_ref.get("idx"), "0")
+            checked += 1
+        self.assertGreaterEqual(checked, 3)
+
+
+class TransparentEraseTests(unittest.TestCase):
+    def test_transparent_shape_not_erased_over_image(self) -> None:
+        from pdf2ppt.background_erase import regions_for_background_erase, shape_should_erase_background
+        from pdf2ppt.models import ShapeElement
+
+        transparent = ShapeElement(
+            id="t",
+            kind="rect",
+            bbox=(60, 340, 620, 460),
+            fill_color="#000000",
+            fill_opacity=0.35,
+        )
+        opaque = ShapeElement(
+            id="o",
+            kind="rect",
+            bbox=(10, 10, 50, 50),
+            fill_color="#FFFFFF",
+            fill_opacity=1.0,
+        )
+        image_box = (0.0, 0.0, 960.0, 540.0)
+        self.assertFalse(shape_should_erase_background(transparent, image_boxes=[image_box]))
+        self.assertFalse(shape_should_erase_background(opaque, image_boxes=[image_box]))
+        self.assertTrue(shape_should_erase_background(opaque, image_boxes=[]))
+        regions = regions_for_background_erase(
+            [transparent, opaque],
+            [],
+            image_boxes=[image_box],
+        )
+        self.assertEqual(regions, [])
+
+    @unittest.skipUnless((FIXTURES_DIR / "photo_texture.pdf").exists(), "fixture missing")
+    def test_photo_texture_keeps_raster_under_transparent_caption(self) -> None:
+        import fitz
+
+        from pdf2ppt.background_erase import erase_regions_from_image, regions_for_background_erase
+        from pdf2ppt.block_analysis import render_page_image
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.vector_nativization import extract_vector_content
+
+        # Unit-level regression without OCR: transparent caption over a photo
+        # must not be listed for solid background erase.
+        with fitz.open(FIXTURES_DIR / "photo_texture.pdf") as document:
+            page = document[0]
+            text_blocks, image_boxes = extract_native_text_blocks(page)
+            result = extract_vector_content(
+                page,
+                text_blocks,
+                vector_mode="auto",
+                page_kind="hybrid",
+            )
+            self.assertTrue(any(shape.fill_opacity < 0.99 for shape in result.shapes))
+            erase_regions = regions_for_background_erase(
+                result.shapes,
+                [table.bbox for table in result.tables],
+                image_boxes=image_boxes,
+            )
+            self.assertEqual(erase_regions, [])
+            background = render_page_image(page, dpi=72)
+            erased = erase_regions_from_image(
+                background,
+                erase_regions,
+                page_width=float(page.rect.width),
+                page_height=float(page.rect.height),
+                fill_color=(128, 100, 80),
+            )
+            # No erase → identical pixels under the caption box.
+            cx, cy = erased.width // 3, int(erased.height * 0.72)
+            self.assertEqual(background.getpixel((cx, cy)), erased.getpixel((cx, cy)))
+            # Keep a textured neighbourhood (not a flat painted region).
+            patch = [
+                erased.getpixel((cx + dx, cy + dy))
+                for dx in range(-6, 7)
+                for dy in range(-6, 7)
+            ]
+            self.assertGreater(len(set(patch)), 8)
+
+
+class EditabilityTableCellTests(unittest.TestCase):
+    @unittest.skipUnless((FIXTURES_DIR / "table.pdf").exists(), "fixture missing")
+    def test_editability_counts_nonempty_table_cells(self) -> None:
+        pptx_path, _report = _convert("table")
+        metrics = inspect_pptx_editability(pptx_path)[0]
+        self.assertEqual(metrics.table_count, 1)
+        self.assertGreaterEqual(metrics.nonempty_table_cell_count, 20)
+        # Fully native table page should score well above the old ~0.50 ceiling.
+        self.assertGreater(metrics.score, 0.7)
+
+
 if __name__ == "__main__":
     unittest.main()

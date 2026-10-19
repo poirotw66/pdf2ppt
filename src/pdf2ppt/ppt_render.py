@@ -35,6 +35,17 @@ _SHAPE_KIND_TO_MSO = {
     "arrow": MSO_SHAPE.RIGHT_ARROW,
 }
 
+_ARROW_DIRECTION_TO_MSO = {
+    "left": MSO_SHAPE.LEFT_ARROW,
+    "right": MSO_SHAPE.RIGHT_ARROW,
+    "up": MSO_SHAPE.UP_ARROW,
+    "down": MSO_SHAPE.DOWN_ARROW,
+}
+
+# ECMA-376 CT_TableCellProperties child order before fill.
+_TCPR_BORDER_TAGS = ("a:lnL", "a:lnR", "a:lnT", "a:lnB", "a:lnTlToBr", "a:lnBlToTr", "a:cell3D")
+_TCPR_FILL_TAGS = ("a:solidFill", "a:noFill", "a:gradFill", "a:blipFill", "a:pattFill", "a:grpFill")
+
 
 def render_page_to_slide(
     presentation: Any,
@@ -91,7 +102,10 @@ def add_shape_element(slide: Any, shape: ShapeElement, *, scale_x: float, scale_
         add_freeform_shape(slide, shape, scale_x=scale_x, scale_y=scale_y)
         return
 
-    mso_shape = _SHAPE_KIND_TO_MSO.get(shape.kind, MSO_SHAPE.RECTANGLE)
+    if shape.kind == "arrow":
+        mso_shape = _ARROW_DIRECTION_TO_MSO.get(shape.arrow_direction or "right", MSO_SHAPE.RIGHT_ARROW)
+    else:
+        mso_shape = _SHAPE_KIND_TO_MSO.get(shape.kind, MSO_SHAPE.RECTANGLE)
     left, top, width, height = bbox_to_shape_geometry(shape.bbox, scale_x, scale_y)
     # Lines stored as zero-thickness bboxes still need a positive size for autoshapes.
     auto_shape = slide.shapes.add_shape(mso_shape, left, top, max(width, Emu(1)), max(height, Emu(1)))
@@ -148,6 +162,9 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
         max(height, Emu(1)),
     )
     ppt_table = table_shape.table
+    # Disable python-pptx's default Medium Style 2 – Accent 1 (white header text + banding).
+    ppt_table.first_row = False
+    ppt_table.horz_banding = False
 
     total_width = sum(table.column_widths) or 1.0
     usable_width = max(int(width), 1)
@@ -174,25 +191,34 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
 
     for cell in table.cells:
         ppt_cell = ppt_table.cell(cell.row, cell.col)
-        ppt_cell.text = cell.text
+        # Borders before fills so tcPr child order matches ECMA-376.
+        if table.border_color:
+            _set_cell_borders(ppt_cell, table.border_color, table.border_width or 1.0)
         if cell.fill_color:
             try:
                 ppt_cell.fill.solid()
                 ppt_cell.fill.fore_color.rgb = RGBColor.from_string(cell.fill_color.lstrip("#"))
             except (ValueError, TypeError):
-                pass
+                ppt_cell.fill.background()
+        else:
+            ppt_cell.fill.background()
+        # python-pptx may append fills in an arbitrary position; normalize order.
+        _normalize_tcpr_child_order(ppt_cell)
+
+        ppt_cell.text = cell.text
+        ppt_cell.vertical_anchor = _resolve_table_vertical_anchor(cell.vertical_anchor)
+        font_color = cell.font_color or "#1A1A1A"
+        font_size_pt = max(6.0, (cell.font_size or 12.0) * min(scale_x, scale_y))
+        alignment = _resolve_table_paragraph_align(cell.horizontal_align)
         for paragraph in ppt_cell.text_frame.paragraphs:
+            paragraph.alignment = alignment
             for run in paragraph.runs:
-                if cell.font_size:
-                    run.font.size = Pt(max(6.0, cell.font_size * min(scale_x, scale_y)))
-                if cell.font_color:
-                    try:
-                        run.font.color.rgb = RGBColor.from_string(cell.font_color.lstrip("#"))
-                    except ValueError:
-                        pass
+                run.font.size = Pt(font_size_pt)
+                try:
+                    run.font.color.rgb = RGBColor.from_string(font_color.lstrip("#"))
+                except ValueError:
+                    run.font.color.rgb = RGBColor(0x1A, 0x1A, 0x1A)
                 run.font.bold = cell.bold
-        if table.border_color:
-            _set_cell_borders(ppt_cell, table.border_color, table.border_width or 1.0)
 
 
 def apply_shape_style(shape: Any, element: ShapeElement) -> None:
@@ -212,6 +238,7 @@ def apply_shape_style(shape: Any, element: ShapeElement) -> None:
         _set_line_alpha(shape, element.stroke_opacity)
     else:
         shape.line.fill.background()
+    _clear_inherited_effects(shape)
 
 
 def apply_line_style(connector: Any, element: ShapeElement) -> None:
@@ -222,6 +249,7 @@ def apply_line_style(connector: Any, element: ShapeElement) -> None:
     if element.stroke_dash and element.stroke_dash != "solid":
         connector.line.dash_style = MSO_LINE_DASH_STYLE.DASH
     _set_line_alpha(connector, element.stroke_opacity)
+    _clear_inherited_effects(connector)
 
 
 def _set_fill_alpha(shape: Any, opacity: float) -> None:
@@ -264,7 +292,12 @@ def _set_line_alpha(shape: Any, opacity: float) -> None:
 
 
 def _set_cell_borders(cell: Any, color_hex: str, width_pt: float) -> None:
-    """Set uniform thin borders on a table cell via OOXML."""
+    """Set uniform thin borders on a table cell via OOXML.
+
+    ECMA-376 ``CT_TableCellProperties`` requires borders (lnL…lnB, diagonals,
+    cell3D) **before** any fill element. Inserting after an existing solidFill
+    can make PowerPoint offer to repair the file.
+    """
 
     try:
         tc = cell._tc  # noqa: SLF001
@@ -280,9 +313,117 @@ def _set_cell_borders(cell: Any, color_hex: str, width_pt: float) -> None:
             srgb.set("val", color_hex.lstrip("#").upper())
             solid.append(srgb)
             line.append(solid)
-            tc_pr.append(line)
+            _insert_tcpr_border(tc_pr, line)
     except Exception:  # noqa: BLE001
         logger.debug("Could not set cell borders", exc_info=True)
+
+
+def _insert_tcpr_border(tc_pr: Any, line: Any) -> None:
+    """Insert a border element before fills, keeping lnL→lnR→lnT→lnB order."""
+
+    fill_tags = {qn(tag) for tag in _TCPR_FILL_TAGS}
+    border_tags = [qn(tag) for tag in _TCPR_BORDER_TAGS]
+    insert_at = len(tc_pr)
+    for index, child in enumerate(tc_pr):
+        if child.tag in fill_tags:
+            insert_at = index
+            break
+    # Place among existing borders according to schema order.
+    line_rank = border_tags.index(line.tag) if line.tag in border_tags else len(border_tags)
+    for index, child in enumerate(list(tc_pr)[:insert_at]):
+        if child.tag not in border_tags:
+            continue
+        child_rank = border_tags.index(child.tag)
+        if child_rank > line_rank:
+            insert_at = index
+            break
+    tc_pr.insert(insert_at, line)
+
+
+def _clear_inherited_effects(shape: Any) -> None:
+    """Neutralize theme shadows from python-pptx ``<p:style>`` effectRef.
+
+    An empty ``<a:effectLst/>`` in spPr overrides the theme effect list, and
+    ``effectRef idx="0"`` clears the style reference so LibreOffice / PowerPoint
+    do not paint drop shadows on autoshapes or connectors.
+    """
+
+    try:
+        element = shape._element  # noqa: SLF001
+        sp_pr = getattr(element, "spPr", None)
+        if sp_pr is not None:
+            for child in list(sp_pr):
+                if child.tag == qn("a:effectLst"):
+                    sp_pr.remove(child)
+            sp_pr.append(OxmlElement("a:effectLst"))
+        style = element.find(qn("p:style"))
+        if style is not None:
+            for child in style:
+                if child.tag == qn("a:effectRef"):
+                    child.set("idx", "0")
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not clear inherited shape effects", exc_info=True)
+
+
+def _resolve_table_paragraph_align(align: str) -> PP_ALIGN:
+    if align == "center":
+        return PP_ALIGN.CENTER
+    if align == "right":
+        return PP_ALIGN.RIGHT
+    return PP_ALIGN.LEFT
+
+
+def _resolve_table_vertical_anchor(anchor: str) -> MSO_VERTICAL_ANCHOR:
+    if anchor == "top":
+        return MSO_VERTICAL_ANCHOR.TOP
+    if anchor == "bottom":
+        return MSO_VERTICAL_ANCHOR.BOTTOM
+    return MSO_VERTICAL_ANCHOR.MIDDLE
+
+
+def tcpr_children_in_schema_order(tc_pr: Any) -> bool:
+    """Return True when border tags appear before fill tags (ECMA-376 order)."""
+
+    seen_fill = False
+    border_tags = {qn(tag) for tag in _TCPR_BORDER_TAGS}
+    fill_tags = {qn(tag) for tag in _TCPR_FILL_TAGS}
+    for child in tc_pr:
+        if child.tag in fill_tags:
+            seen_fill = True
+        elif child.tag in border_tags and seen_fill:
+            return False
+    return True
+
+
+def _normalize_tcpr_child_order(cell: Any) -> None:
+    """Reorder tcPr children so borders precede fills."""
+
+    try:
+        tc = cell._tc  # noqa: SLF001
+        tc_pr = tc.tcPr
+        if tc_pr is None:
+            return
+        if tcpr_children_in_schema_order(tc_pr):
+            return
+        border_tags = {qn(tag) for tag in _TCPR_BORDER_TAGS}
+        fill_tags = {qn(tag) for tag in _TCPR_FILL_TAGS}
+        borders: list[Any] = []
+        fills: list[Any] = []
+        others: list[Any] = []
+        for child in list(tc_pr):
+            tc_pr.remove(child)
+            if child.tag in border_tags:
+                borders.append(child)
+            elif child.tag in fill_tags:
+                fills.append(child)
+            else:
+                others.append(child)
+        border_order = {qn(tag): index for index, tag in enumerate(_TCPR_BORDER_TAGS)}
+        borders.sort(key=lambda node: border_order.get(node.tag, 99))
+        for child in borders + fills + others:
+            tc_pr.append(child)
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not normalize tcPr child order", exc_info=True)
 
 
 def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> None:

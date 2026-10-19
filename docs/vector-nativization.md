@@ -63,10 +63,11 @@ pdf2ppt input.pdf output.pptx --vector-mode aggressive --vector-complexity-thres
 
 ## Evaluator
 
-`render_compare.inspect_slide_editability` already counts auto-shapes, lines,
-and tables. The composite editability score weights native tables/shapes more
-heavily after P1 so a native table scores better than the same cells as many
-text boxes over a full-page raster.
+`render_compare.inspect_slide_editability` counts auto-shapes, lines, tables,
+and **non-empty table cells** (as text units alongside text boxes). The
+composite score uses text 0.40 / structure 0.45 / base 0.15 so a fully native
+table page is not capped near 0.50 just because cell text left the text-box
+count.
 
 Fixtures added for P1:
 

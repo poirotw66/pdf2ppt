@@ -7,7 +7,17 @@ BBox = tuple[float, float, float, float]
 Polygon = tuple[tuple[float, float], ...]
 PageKind = Literal["digital", "scanned", "hybrid"]
 BackgroundMode = Literal["elements", "overlay", "full-page"]
-ShapeKind = Literal["rect", "round_rect", "ellipse", "line", "polyline", "polygon", "freeform", "arrow"]
+ShapeKind = Literal[
+    "rect",
+    "round_rect",
+    "ellipse",
+    "line",
+    "polyline",
+    "polygon",
+    "freeform",
+    "arrow",
+]
+ArrowDirection = Literal["left", "right", "up", "down"]
 VectorMode = Literal["off", "auto", "aggressive"]
 
 
@@ -52,6 +62,7 @@ class ShapeElement:
     locked: bool = True
     drawing_index: int | None = None
     is_page_background: bool = False
+    arrow_direction: ArrowDirection | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -68,6 +79,10 @@ class TableCell:
     font_size: float | None = None
     font_color: str | None = None
     bold: bool = False
+    # "left" | "center" | "right"
+    horizontal_align: str = "left"
+    # "top" | "middle" | "bottom"
+    vertical_anchor: str = "middle"
     text_block_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:

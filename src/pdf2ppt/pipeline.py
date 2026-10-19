@@ -412,6 +412,7 @@ def analyze_page(
             erase_regions = regions_for_background_erase(
                 vector_result.shapes,
                 [table.bbox for table in vector_result.tables],
+                image_boxes=image_boxes,
             )
             if erase_regions:
                 fill_color = resolve_erase_fill_color(vector_result.shapes, background_image)

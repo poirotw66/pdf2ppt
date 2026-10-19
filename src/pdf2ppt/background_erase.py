@@ -4,6 +4,10 @@ When drawings and tables are emitted as native PowerPoint objects they must not
 also remain baked into the page background image. For digital pages we fill those
 regions with a solid page-background color (sampled from a page-fill shape or
 from unmasked corners) so the native objects are not duplicated.
+
+Transparent shapes and shapes that sit over embedded images are **not** erased:
+painting a solid fill under them would destroy the photo/texture underneath
+(see ``photo_texture`` regression).
 """
 
 from __future__ import annotations
@@ -13,6 +17,11 @@ import math
 from PIL import Image, ImageDraw
 
 from .models import BBox, ShapeElement
+
+# Shapes at or above this fill opacity may safely replace their raster underlay.
+OPAQUE_FILL_OPACITY = 0.99
+# Overlap ratio vs an image box that means "this shape sits on a photo".
+IMAGE_OVERLAP_RATIO = 0.25
 
 
 def resolve_erase_fill_color(
@@ -94,24 +103,68 @@ def _hex_to_rgb(color: str, *, default: tuple[int, int, int]) -> tuple[int, int,
         return default
 
 
+def _bbox_area(bbox: BBox) -> float:
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+
+
+def _intersection_area(a: BBox, b: BBox) -> float:
+    left = max(a[0], b[0])
+    top = max(a[1], b[1])
+    right = min(a[2], b[2])
+    bottom = min(a[3], b[3])
+    return max(0.0, right - left) * max(0.0, bottom - top)
+
+
+def _shape_overlaps_image(shape_bbox: BBox, image_boxes: list[BBox]) -> bool:
+    area = _bbox_area(shape_bbox)
+    if area <= 0:
+        return False
+    for image_bbox in image_boxes:
+        if _intersection_area(shape_bbox, image_bbox) / area >= IMAGE_OVERLAP_RATIO:
+            return True
+    return False
+
+
+def shape_should_erase_background(
+    shape: ShapeElement,
+    *,
+    image_boxes: list[BBox] | None = None,
+) -> bool:
+    """Whether a nativized shape's raster underlay may be solid-filled away."""
+
+    if shape.fill_opacity < OPAQUE_FILL_OPACITY:
+        return False
+    if image_boxes and _shape_overlaps_image(shape.bbox, image_boxes):
+        return False
+    return True
+
+
 def regions_for_background_erase(
     shapes: list[ShapeElement],
     table_bboxes: list[BBox],
+    *,
+    image_boxes: list[BBox] | None = None,
 ) -> list[BBox]:
     """Regions that must disappear from a raster background.
 
-    Page-background shapes are kept as native shapes; when a raster background
-    is still present they should also be erased so they are not doubled.
+    Only opaque shapes that do not sit on embedded images are erased. Tables are
+    always erased (their grid is fully replaced by a native table).
     """
 
-    regions = [shape.bbox for shape in shapes]
+    regions = [
+        shape.bbox
+        for shape in shapes
+        if shape_should_erase_background(shape, image_boxes=image_boxes)
+    ]
     regions.extend(table_bboxes)
     return regions
 
 
 __all__ = [
+    "OPAQUE_FILL_OPACITY",
     "erase_regions_from_image",
     "regions_for_background_erase",
     "resolve_erase_fill_color",
     "sample_corner_color",
+    "shape_should_erase_background",
 ]

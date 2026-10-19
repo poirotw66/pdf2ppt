@@ -17,7 +17,15 @@ from typing import Any
 
 import fitz
 
-from .models import BBox, ShapeElement, ShapeKind, TableCell, TableElement, TextBlock
+from .models import (
+    ArrowDirection,
+    BBox,
+    ShapeElement,
+    ShapeKind,
+    TableCell,
+    TableElement,
+    TextBlock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +249,8 @@ def extract_tables(
     if finder is None:
         return []
 
+    span_index = _collect_page_spans(page)
+    border_color, border_width = _infer_table_border_style(page)
     tables: list[TableElement] = []
     for table_index, table in enumerate(getattr(finder, "tables", []) or []):
         element = _table_to_element(
@@ -248,6 +258,9 @@ def extract_tables(
             text_blocks=text_blocks,
             page_number=page_number,
             table_index=table_index,
+            span_index=span_index,
+            border_color=border_color,
+            border_width=border_width,
         )
         if element is not None:
             tables.append(element)
@@ -406,6 +419,10 @@ def _path_to_shape(
         y_coords = [point[1] for point in points]
         bbox = (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
 
+    arrow_direction: ArrowDirection | None = None
+    if kind == "arrow":
+        arrow_direction = _infer_arrow_direction(points, bbox)
+
     return ShapeElement(
         id=f"shape_{page_number}_{drawing_index}",
         kind=kind,
@@ -421,6 +438,7 @@ def _path_to_shape(
         drawing_index=drawing_index,
         is_page_background=is_page_background,
         confidence=0.95 if kind in {"rect", "line", "ellipse"} else 0.75,
+        arrow_direction=arrow_direction,
     )
 
 
@@ -448,7 +466,7 @@ def _classify_path_items(
         return "round_rect", []
 
     if _looks_like_arrow(items, bbox):
-        return "arrow", _polyline_points(items)
+        return "arrow", _polyline_points(items)  # direction set on ShapeElement below
 
     only_lines = all(item[0] == "l" for item in items)
     if only_lines:
@@ -556,12 +574,34 @@ def _looks_like_arrow(items: list[tuple[Any, ...]], bbox: BBox) -> bool:
     return (width / height >= 1.8) or (height / width >= 1.8)
 
 
+def _infer_arrow_direction(points: list[tuple[float, float]], bbox: BBox) -> ArrowDirection:
+    """Pick the MSO arrow facing the sharp tip of a closed arrow polygon."""
+
+    if len(points) < 3:
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        return "right" if width >= height else "down"
+
+    cx = (bbox[0] + bbox[2]) / 2.0
+    cy = (bbox[1] + bbox[3]) / 2.0
+    # Tip is the vertex farthest from the bbox center along the long axis.
+    tip = max(points, key=lambda point: math.hypot(point[0] - cx, point[1] - cy))
+    dx = tip[0] - cx
+    dy = tip[1] - cy
+    if abs(dx) >= abs(dy):
+        return "right" if dx >= 0 else "left"
+    return "down" if dy >= 0 else "up"
+
+
 def _table_to_element(
     table: Any,
     *,
     text_blocks: list[TextBlock],
     page_number: int,
     table_index: int,
+    span_index: list[dict[str, Any]],
+    border_color: str | None,
+    border_width: float | None,
 ) -> TableElement | None:
     row_count = int(getattr(table, "row_count", 0) or 0)
     col_count = int(getattr(table, "col_count", 0) or 0)
@@ -596,6 +636,7 @@ def _table_to_element(
                     colspan=colspan,
                     cell_bbox=cell_bbox,
                     text_blocks=text_blocks,
+                    span_index=span_index,
                 )
                 cells.append(cell)
                 for r in range(row_index, row_index + rowspan):
@@ -645,6 +686,7 @@ def _table_to_element(
                     colspan=colspan,
                     cell_bbox=cell_bbox,
                     text_blocks=text_blocks,
+                    span_index=span_index,
                 )
                 cells.append(cell)
                 for c in range(col_index + 1, col_index + colspan):
@@ -663,8 +705,8 @@ def _table_to_element(
         cells=cells,
         column_widths=column_widths,
         row_heights=row_heights,
-        border_color="#4D4D4D",
-        border_width=1.0,
+        border_color=border_color or "#4D4D4D",
+        border_width=border_width if border_width is not None else 1.0,
         z_order=10_000 + table_index,
         confidence=0.9,
     )
@@ -699,6 +741,7 @@ def _build_table_cell(
     colspan: int,
     cell_bbox: BBox,
     text_blocks: list[TextBlock],
+    span_index: list[dict[str, Any]],
 ) -> TableCell:
     overlapping = [
         block
@@ -708,8 +751,17 @@ def _build_table_cell(
     ]
     if not text.strip() and overlapping:
         text = "\n".join(block.text for block in overlapping if block.text.strip())
-    font_sizes = [block.font_size for block in overlapping if block.font_size]
-    font_colors = [block.font_color for block in overlapping if block.font_color]
+
+    style = _style_from_spans(cell_bbox, span_index)
+    if style["font_size"] is None:
+        font_sizes = [block.font_size for block in overlapping if block.font_size]
+        style["font_size"] = float(median(font_sizes)) if font_sizes else None
+    if style["font_color"] is None:
+        font_colors = [block.font_color for block in overlapping if block.font_color]
+        style["font_color"] = Counter(font_colors).most_common(1)[0][0] if font_colors else "#1A1A1A"
+    if not style["bold"]:
+        style["bold"] = any(block.bold for block in overlapping)
+
     return TableCell(
         row=row,
         col=col,
@@ -717,11 +769,146 @@ def _build_table_cell(
         rowspan=rowspan,
         colspan=colspan,
         fill_color=None,
-        font_size=float(median(font_sizes)) if font_sizes else None,
-        font_color=Counter(font_colors).most_common(1)[0][0] if font_colors else None,
-        bold=any(block.bold for block in overlapping) or row == 0,
+        font_size=style["font_size"],
+        font_color=style["font_color"],
+        bold=bool(style["bold"]),
+        horizontal_align=str(style["horizontal_align"]),
+        vertical_anchor=str(style["vertical_anchor"]),
         text_block_ids=[block.id for block in overlapping],
     )
+
+
+def _collect_page_spans(page: fitz.Page) -> list[dict[str, Any]]:
+    """Flatten PDF text spans with geometry for per-cell style lookup."""
+
+    spans: list[dict[str, Any]] = []
+    try:
+        text_dict = page.get_text("dict")
+    except Exception as error:  # noqa: BLE001
+        logger.debug("get_text(dict) failed: %s", error)
+        return spans
+    for block in text_dict.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = str(span.get("text", ""))
+                if not text.strip():
+                    continue
+                bbox_values = span.get("bbox")
+                if not bbox_values or len(bbox_values) < 4:
+                    continue
+                bbox = (
+                    float(bbox_values[0]),
+                    float(bbox_values[1]),
+                    float(bbox_values[2]),
+                    float(bbox_values[3]),
+                )
+                font_name = str(span.get("font", "") or "")
+                color = span.get("color")
+                font_color = None
+                if isinstance(color, int):
+                    font_color = f"#{color & 0xFFFFFF:06X}"
+                spans.append(
+                    {
+                        "bbox": bbox,
+                        "text": text,
+                        "size": float(span.get("size", 0.0) or 0.0),
+                        "font_color": font_color,
+                        "bold": "bold" in font_name.lower(),
+                    }
+                )
+    return spans
+
+
+def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict[str, Any]:
+    """Derive font size/color/bold/alignment from spans whose centers fall in the cell."""
+
+    matched: list[dict[str, Any]] = []
+    for span in span_index:
+        bbox = span["bbox"]
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        if cell_bbox[0] <= cx <= cell_bbox[2] and cell_bbox[1] <= cy <= cell_bbox[3]:
+            matched.append(span)
+        elif intersection_ratio(bbox, cell_bbox) >= 0.5:
+            matched.append(span)
+
+    if not matched:
+        return {
+            "font_size": None,
+            "font_color": None,
+            "bold": False,
+            "horizontal_align": "left",
+            "vertical_anchor": "middle",
+        }
+
+    sizes = [float(span["size"]) for span in matched if span["size"] > 0]
+    colors = [span["font_color"] for span in matched if span["font_color"]]
+    bold = any(bool(span["bold"]) for span in matched)
+
+    # Union of matched span boxes for alignment heuristics.
+    text_x0 = min(span["bbox"][0] for span in matched)
+    text_x1 = max(span["bbox"][2] for span in matched)
+    text_y0 = min(span["bbox"][1] for span in matched)
+    text_y1 = max(span["bbox"][3] for span in matched)
+    cell_width = max(1.0, cell_bbox[2] - cell_bbox[0])
+    cell_height = max(1.0, cell_bbox[3] - cell_bbox[1])
+    left_gap = text_x0 - cell_bbox[0]
+    right_gap = cell_bbox[2] - text_x1
+    top_gap = text_y0 - cell_bbox[1]
+    bottom_gap = cell_bbox[3] - text_y1
+
+    if abs(left_gap - right_gap) <= cell_width * 0.12 and left_gap > cell_width * 0.08:
+        horizontal_align = "center"
+    elif right_gap < left_gap * 0.45 and right_gap < cell_width * 0.12:
+        horizontal_align = "right"
+    else:
+        horizontal_align = "left"
+
+    if abs(top_gap - bottom_gap) <= cell_height * 0.2:
+        vertical_anchor = "middle"
+    elif top_gap < bottom_gap:
+        vertical_anchor = "top"
+    else:
+        vertical_anchor = "bottom"
+
+    return {
+        "font_size": float(median(sizes)) if sizes else None,
+        "font_color": Counter(colors).most_common(1)[0][0] if colors else None,
+        "bold": bold,
+        "horizontal_align": horizontal_align,
+        "vertical_anchor": vertical_anchor,
+    }
+
+
+def _infer_table_border_style(page: fitz.Page) -> tuple[str | None, float | None]:
+    """Most common stroke color/width among line drawings (table rules)."""
+
+    colors: list[str] = []
+    widths: list[float] = []
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001
+        return None, None
+    for path in drawings:
+        if path.get("type") not in {"s", "fs"}:
+            continue
+        items = path.get("items") or []
+        if not items or items[0][0] not in {"l", "re"}:
+            continue
+        color = rgb_tuple_to_hex(path.get("color"))
+        width = path.get("width")
+        if color is None or width is None:
+            continue
+        # Prefer thin ruled lines over thick decorative strokes.
+        if float(width) > 4.0:
+            continue
+        colors.append(color)
+        widths.append(float(width))
+    if not colors:
+        return None, None
+    return Counter(colors).most_common(1)[0][0], float(median(widths))
 
 
 def _estimate_table_geometry(

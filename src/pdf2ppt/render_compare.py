@@ -106,6 +106,8 @@ class EditabilityMetrics:
     native_object_count: int
     raster_background_area_ratio: float
     score: float
+    # Non-empty native table cells counted as text units (P1).
+    nonempty_table_cell_count: int = 0
 
     def to_dict(self) -> dict[str, float | int]:
         return asdict(self)
@@ -568,6 +570,20 @@ def _shape_area_emu(shape: Any) -> float:
     return abs(width * height)
 
 
+def _count_nonempty_table_cells(shape: Any) -> int:
+    """Count cells with non-whitespace text in a native PowerPoint table shape."""
+
+    if not getattr(shape, "has_table", False):
+        return 0
+    table = shape.table
+    count = 0
+    for row in table.rows:
+        for cell in row.cells:
+            if (cell.text or "").strip():
+                count += 1
+    return count
+
+
 def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int) -> EditabilityMetrics:
     """Count native objects and estimate raster-background coverage for one slide."""
 
@@ -580,6 +596,7 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
     group_count = 0
     chart_count = 0
     other_shape_count = 0
+    nonempty_table_cell_count = 0
     raster_background_area = 0.0
 
     for shape in slide.shapes:
@@ -593,6 +610,7 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
                 raster_background_area = max(raster_background_area, area_ratio)
         elif shape_type == MSO_SHAPE_TYPE.TABLE:
             table_count += 1
+            nonempty_table_cell_count += _count_nonempty_table_cells(shape)
         elif shape_type == MSO_SHAPE_TYPE.GROUP:
             group_count += 1
         elif shape_type == MSO_SHAPE_TYPE.CHART:
@@ -615,17 +633,17 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
     native_object_count = (
         text_box_count + auto_shape_count + table_count + line_count + group_count + chart_count
     )
-    # Composite in [0, 1]. Text boxes remain valuable even under a full-page
-    # raster overlay. Native shapes / tables (P1 vector nativization) lift the
-    # score further and reduce the raster penalty; a picture-only slide stays
-    # near zero. Tables are weighted higher than shapes because one table
-    # replaces many fragmented text boxes.
-    text_component = min(1.0, text_box_count / 6.0) * 0.40
+    # Composite in [0, 1]. Text units = text boxes + non-empty native table
+    # cells so a fully nativized table page is not penalized for absorbing
+    # cell text out of text boxes. Structure still rewards shapes/tables;
+    # weights (0.40 / 0.45 / 0.15) match the P1 editability formula.
+    text_units = text_box_count + nonempty_table_cell_count
+    text_component = min(1.0, text_units / 6.0) * 0.40
     structure_units = (
         auto_shape_count + table_count * 4 + line_count * 0.5 + group_count + chart_count * 2
     )
     structure_component = min(1.0, structure_units / 8.0) * 0.45
-    if text_box_count == 0 and native_object_count == 0:
+    if text_units == 0 and native_object_count == 0:
         raster_penalty = raster_background_area * 0.40
     elif structure_units >= 2:
         raster_penalty = raster_background_area * 0.10
@@ -645,6 +663,7 @@ def inspect_slide_editability(slide: Any, *, slide_width: int, slide_height: int
         native_object_count=native_object_count,
         raster_background_area_ratio=round(min(1.0, raster_background_area), 6),
         score=round(score, 6),
+        nonempty_table_cell_count=nonempty_table_cell_count,
     )
 
 
@@ -849,6 +868,9 @@ def summarize_slide_scores(pages: list[SlideQualityScore]) -> dict[str, Any]:
                 sum(page.editability.raster_background_area_ratio for page in pages) / len(pages), 6
             ),
             "text_box_count_total": sum(page.editability.text_box_count for page in pages),
+            "nonempty_table_cell_count_total": sum(
+                page.editability.nonempty_table_cell_count for page in pages
+            ),
             "auto_shape_count_total": sum(page.editability.auto_shape_count for page in pages),
             "table_count_total": sum(page.editability.table_count for page in pages),
         },
