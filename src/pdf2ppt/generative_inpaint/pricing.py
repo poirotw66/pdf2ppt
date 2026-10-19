@@ -75,11 +75,19 @@ def cost_from_gemini_usage(usage: Mapping[str, Any] | None) -> CostEstimate | No
     output_by_modality = _modality_token_map(usage.get("output_tokens_by_modality"))
     image_out = output_by_modality.get("image", 0)
     text_out = output_by_modality.get("text", 0)
-
-    # If modality breakdown is absent, treat remaining output tokens as image
-    # (Nano Banana image edits are image-dominated) minus thinking already billed.
     total_output = _as_nonneg_int(usage.get("total_output_tokens"))
-    if not output_by_modality and total_output is not None:
+
+    if output_by_modality:
+        # Real Gemini responses often report image modality tokens plus a small
+        # leftover in total_output_tokens (~256 text/thought tokens) that is not
+        # listed under output_tokens_by_modality. Price that remainder at the
+        # text+thinking rate so usage-based costs are not undercounted.
+        accounted = image_out + text_out
+        if total_output is not None and total_output > accounted:
+            text_out += total_output - accounted
+    elif total_output is not None:
+        # No modality split: treat output as image-dominated (Nano Banana edits).
+        # Thinking tokens are billed separately via total_thought_tokens.
         image_out = total_output
 
     usd = (

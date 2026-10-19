@@ -426,6 +426,8 @@ class BackgroundModeTests(unittest.TestCase):
             inpaint_engine="auto",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
             inpaint_max_area_ratio=0.2,
         )
         result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=options)
@@ -453,6 +455,8 @@ class BackgroundModeTests(unittest.TestCase):
             inpaint_engine="opencv-fast",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
         )
         dilated = ConversionOptions(
             input_path=Path("input.pdf"),
@@ -461,6 +465,8 @@ class BackgroundModeTests(unittest.TestCase):
             inpaint_engine="opencv-fast",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=2,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
         )
         tight_result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=tight)
         dilated_result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=dilated)
@@ -1323,9 +1329,17 @@ class BackgroundModeTests(unittest.TestCase):
             inpaint_engine="auto",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
             inpaint_max_area_ratio=0.1,
         )
-        result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=options)
+        # Pin LaMa detection off so a local model/onnxruntime install cannot
+        # divert auto → lama-onnx (environment-dependent flake on main).
+        with patch(
+            "pdf2ppt.inpainting_overlay._detect_auto_lama_runtime",
+            return_value=None,
+        ):
+            result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=options)
         self.assertEqual(result.engine_name, "white-box")
         self.assertIn("white-box", result.note or "")
         self.assertEqual(result.image.getpixel((20, 18)), (255, 255, 255))
@@ -1483,6 +1497,8 @@ class BackgroundModeTests(unittest.TestCase):
             inpaint_engine="auto",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
             inpaint_max_area_ratio=0.1,
             inpaint_model_root=Path("model/lama"),
         )
@@ -1590,6 +1606,8 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             inpaint_engine="auto",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
             inpaint_max_area_ratio=0.12,
         )
         result = render_overlay_background(image, blocks, fitz.Rect(0, 0, width, height), options=options)
@@ -2109,6 +2127,8 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             inpaint_engine="auto",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
             inpaint_max_area_ratio=0.2,
         )
 
@@ -2224,6 +2244,8 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             inpaint_engine="opencv-fast",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
         )
 
         corrected_image, debug_images, note = _apply_targeted_file_back_color_correction(
@@ -2293,6 +2315,8 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             inpaint_engine="opencv-fast",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
         )
 
         corrected_image, debug_images, note = _apply_targeted_footer_label_color_correction(
@@ -2361,6 +2385,8 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             inpaint_engine="opencv-fast",
             inpaint_padding_px=0,
             inpaint_mask_dilate_px=0,
+            inpaint_mask_dilate_line_height_ratio=0.0,
+            inpaint_mask_dilate_min_px=0,
         )
 
         corrected_image, _debug_images, note = _apply_targeted_footer_label_color_correction(
@@ -2421,6 +2447,8 @@ class OcrStyleOptimizationTests(unittest.TestCase):
                 inpaint_engine="opencv-fast",
                 inpaint_padding_px=0,
                 inpaint_mask_dilate_px=0,
+                inpaint_mask_dilate_line_height_ratio=0.0,
+                inpaint_mask_dilate_min_px=0,
             ),
         )
 

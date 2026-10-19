@@ -20,6 +20,10 @@ DEFAULT_TABLE_LINE_BOUNDARY_BAND_PX = 5
 DEFAULT_TABLE_LINE_MAX_TEXT_OVERLAP_RATIO = 0.85
 DEFAULT_TABLE_LINE_MIN_OUTSIDE_PIXELS = 12
 DEFAULT_TABLE_LINE_MIN_OUTSIDE_RATIO = 0.08
+# Extra AA-fringe coverage: dilate each text box by a fraction of its line height.
+DEFAULT_MASK_DILATE_LINE_HEIGHT_RATIO = 0.18
+DEFAULT_MASK_DILATE_MIN_PX = 2
+DEFAULT_MASK_DILATE_MAX_PX = 16
 
 
 @dataclass(slots=True)
@@ -348,6 +352,122 @@ def estimate_low_texture_mask_fraction(
     return round(float(low_texture_area) / float(valid_area), 4)
 
 
+def _text_block_line_height_px(
+    block: TextBlock,
+    image_size: tuple[int, int],
+    page_rect: fitz.Rect,
+) -> float:
+    """Estimate line height in pixels for dilation scaling."""
+
+    _image_width, image_height = image_size
+    scale_y = image_height / max(1.0, float(page_rect.height))
+    if block.image_bbox is not None:
+        return max(1.0, float(block.image_bbox[3] - block.image_bbox[1]))
+    if block.font_size is not None and block.font_size > 0:
+        return max(1.0, float(block.font_size) * scale_y)
+    return max(1.0, float(block.bbox[3] - block.bbox[1]) * scale_y)
+
+
+def dilate_px_for_line_height(
+    line_height_px: float,
+    *,
+    ratio: float = DEFAULT_MASK_DILATE_LINE_HEIGHT_RATIO,
+    min_px: int = DEFAULT_MASK_DILATE_MIN_PX,
+    max_px: int = DEFAULT_MASK_DILATE_MAX_PX,
+    floor_px: int = 0,
+) -> int:
+    """Return dilation px for one line height, clamped and floored by an absolute override."""
+
+    scaled = int(round(max(0.0, float(line_height_px)) * max(0.0, float(ratio))))
+    clamped = max(int(min_px), min(int(max_px), scaled)) if scaled > 0 or min_px > 0 else 0
+    if ratio <= 0:
+        clamped = 0
+    return max(int(floor_px), clamped)
+
+
+def dilate_text_mask_by_line_height(
+    mask_image: Image.Image,
+    text_blocks: list[TextBlock],
+    page_rect: fitz.Rect,
+    *,
+    ratio: float = DEFAULT_MASK_DILATE_LINE_HEIGHT_RATIO,
+    min_px: int = DEFAULT_MASK_DILATE_MIN_PX,
+    max_px: int = DEFAULT_MASK_DILATE_MAX_PX,
+    floor_px: int = 0,
+) -> Image.Image:
+    """Dilate each text box by a fraction of its line height, then merge adjacent regions.
+
+    ``floor_px`` (typically ``--inpaint-mask-dilate-px``) is an absolute minimum
+    applied to every box. After per-box dilation, a morphological close merges
+    nearby components so dilation does not split patch groups into more generative
+    crops than the undilated topology.
+    """
+
+    base = np.array(mask_image.convert("L"), dtype=np.uint8)
+    if not np.any(base) or (ratio <= 0 and floor_px <= 0):
+        if floor_px > 0 and np.any(base):
+            kernel = np.ones((floor_px * 2 + 1, floor_px * 2 + 1), dtype=np.uint8)
+            return Image.fromarray(cv2.dilate(base, kernel, iterations=1), mode="L")
+        return mask_image.convert("L")
+
+    image_size = mask_image.size
+    expanded = np.zeros_like(base)
+    max_dilate = 0
+    for block in text_blocks:
+        block_mask = np.array(
+            build_text_mask_image([block], image_size, page_rect, padding_px=0).convert("L"),
+            dtype=np.uint8,
+        )
+        # Restrict to pixels that already belong to the refined mask so table-line
+        # shrinkage and other refinements are preserved.
+        block_mask = np.where((block_mask > 0) & (base > 0), 255, 0).astype(np.uint8)
+        if not np.any(block_mask):
+            # Box may have been refined away; still expand any residual base pixels
+            # near the box using the line-height kernel on the intersection with a
+            # lightly padded box mask.
+            block_mask = np.array(
+                build_text_mask_image([block], image_size, page_rect, padding_px=1).convert("L"),
+                dtype=np.uint8,
+            )
+            block_mask = np.where((block_mask > 0) & (base > 0), 255, 0).astype(np.uint8)
+        if not np.any(block_mask):
+            continue
+        dilate_px = dilate_px_for_line_height(
+            _text_block_line_height_px(block, image_size, page_rect),
+            ratio=ratio,
+            min_px=min_px,
+            max_px=max_px,
+            floor_px=floor_px,
+        )
+        max_dilate = max(max_dilate, dilate_px)
+        if dilate_px > 0:
+            kernel = np.ones((dilate_px * 2 + 1, dilate_px * 2 + 1), dtype=np.uint8)
+            block_mask = np.asarray(cv2.dilate(block_mask, kernel, iterations=1), dtype=np.uint8)
+        expanded = np.maximum(expanded, block_mask)
+
+    # Cover any refined-mask pixels that did not match a block (e.g. OCR fringe).
+    leftover = (base > 0) & (expanded == 0)
+    if np.any(leftover):
+        leftover_mask = (leftover.astype(np.uint8) * 255)
+        dilate_px = max(int(floor_px), int(min_px) if ratio > 0 else 0)
+        if dilate_px > 0:
+            kernel = np.ones((dilate_px * 2 + 1, dilate_px * 2 + 1), dtype=np.uint8)
+            leftover_mask = np.asarray(
+                cv2.dilate(leftover_mask, kernel, iterations=1),
+                dtype=np.uint8,
+            )
+        expanded = np.maximum(expanded, leftover_mask)
+
+    # Merge adjacent dilated islands so patch grouping does not explode.
+    merge_px = max(max_dilate, int(floor_px), 1)
+    close_kernel = np.ones((merge_px * 2 + 1, merge_px * 2 + 1), dtype=np.uint8)
+    merged = np.asarray(
+        cv2.morphologyEx(expanded, cv2.MORPH_CLOSE, close_kernel, iterations=1),
+        dtype=np.uint8,
+    )
+    return Image.fromarray(merged, mode="L")
+
+
 def compute_mask_crop_box(mask_image: Image.Image, *, padding_px: int) -> tuple[int, int, int, int] | None:
     mask_array = np.array(mask_image.convert("L"), dtype=np.uint8)
     points = cv2.findNonZero(mask_array)
@@ -365,6 +485,9 @@ def compute_mask_crop_box(mask_image: Image.Image, *, padding_px: int) -> tuple[
 
 
 __all__ = [
+    "DEFAULT_MASK_DILATE_LINE_HEIGHT_RATIO",
+    "DEFAULT_MASK_DILATE_MAX_PX",
+    "DEFAULT_MASK_DILATE_MIN_PX",
     "build_text_mask_image",
     "build_refined_text_mask_for_inpainting",
     "compute_mask_crop_box",
@@ -373,6 +496,8 @@ __all__ = [
     "DEFAULT_LOW_TEXTURE_MIN_CONTEXT_PIXELS",
     "DEFAULT_LOW_TEXTURE_STD_THRESHOLD",
     "InpaintingMaskRefinementResult",
+    "dilate_px_for_line_height",
+    "dilate_text_mask_by_line_height",
     "estimate_background_complexity",
     "estimate_low_texture_mask_fraction",
     "mask_area_ratio",

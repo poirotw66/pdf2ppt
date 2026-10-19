@@ -23,15 +23,20 @@ from pdf2ppt.render_compare import (
     EditabilityMetrics,
     FidelityMetrics,
     SlideQualityScore,
+    build_pdf_text_mask,
     compare_page_images,
+    compute_boundary_ring_mae,
     compute_edge_similarity,
+    compute_masked_pixel_mae,
     compute_pixel_error,
     compute_ssim,
     evaluate_pptx_against_pdf,
+    extract_pptx_background_image,
     find_libreoffice_executable,
     inspect_pptx_editability,
     inspect_slide_editability,
     render_pdf_page_image,
+    render_text_free_background,
     summarize_slide_scores,
     text_token_f1,
     tokenize_text,
@@ -75,6 +80,58 @@ class PixelErrorTests(unittest.TestCase):
         stats = compute_pixel_error(left, right)
         # Mean abs over RGB: 10/3 per pixel
         self.assertAlmostEqual(stats["pixel_mae"], 10.0 / 3.0, places=4)
+
+    def test_masked_mae_ignores_outside_mask(self) -> None:
+        left = _solid((10, 10), (0, 0, 0))
+        right = _solid((10, 10), (0, 0, 0))
+        draw = ImageDraw.Draw(right)
+        draw.rectangle((0, 0, 9, 9), fill=(30, 0, 0))
+        draw.rectangle((2, 2, 5, 5), fill=(90, 0, 0))
+        mask = Image.new("L", (10, 10), 0)
+        ImageDraw.Draw(mask).rectangle((2, 2, 5, 5), fill=255)
+        stats = compute_masked_pixel_mae(left, right, mask)
+        self.assertAlmostEqual(float(stats["masked_mae"]), 30.0, places=4)
+        ring = compute_boundary_ring_mae(left, right, mask, ring_px=1)
+        self.assertGreater(ring, 0.0)
+
+
+class InpaintRegionMetricTests(unittest.TestCase):
+    def test_text_free_background_removes_native_text(self) -> None:
+        pdf = FIXTURES_DIR / "solid_background.pdf"
+        if not pdf.exists():
+            self.skipTest("fixture missing")
+        gt = render_text_free_background(pdf, 0, dpi=72)
+        original = render_pdf_page_image(pdf, 0, dpi=72)
+        mask = build_pdf_text_mask(pdf, 0, image_size=gt.size, padding_px=4)
+        import numpy as np
+
+        self.assertGreater(int(np.count_nonzero(np.array(mask) > 0)), 0)
+        # Inside text boxes the redacted page should differ from the original.
+        masked = compute_masked_pixel_mae(original, gt, mask)
+        self.assertGreater(float(masked["masked_mae"]), 1.0)
+
+    def test_extract_pptx_background_image(self) -> None:
+        presentation = Presentation()
+        presentation.slide_width = Inches(10)
+        presentation.slide_height = Inches(7.5)
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        buffer = io.BytesIO()
+        Image.new("RGB", (16, 16), color=(7, 8, 9)).save(buffer, format="PNG")
+        buffer.seek(0)
+        slide.shapes.add_picture(
+            buffer,
+            Emu(0),
+            Emu(0),
+            width=presentation.slide_width,
+            height=presentation.slide_height,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bg.pptx"
+            presentation.save(str(path))
+            image = extract_pptx_background_image(path, slide_index=0)
+        self.assertIsNotNone(image)
+        assert image is not None
+        self.assertEqual(image.getpixel((0, 0)), (7, 8, 9))
 
 
 class EdgeSimilarityTests(unittest.TestCase):

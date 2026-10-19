@@ -190,10 +190,31 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help=(
-            "Additional morphological dilation (px) applied to the final text mask so "
-            "anti-aliased glyph edges are covered. Default 2; set 0 to disable. "
-            "Slightly expands the inpainted region for all engines."
+            "Absolute minimum dilation (px) applied to each text box after "
+            "line-height-scaled expansion. Default 2; set 0 to rely only on the "
+            "line-height ratio. Applies to all inpaint engines."
         ),
+    )
+    parser.add_argument(
+        "--inpaint-mask-dilate-line-height-ratio",
+        type=float,
+        default=0.18,
+        help=(
+            "Dilate each text mask by this fraction of the box line height "
+            "(default 0.18 ≈ 18%%). Clamped by --inpaint-mask-dilate-min/max-px."
+        ),
+    )
+    parser.add_argument(
+        "--inpaint-mask-dilate-min-px",
+        type=int,
+        default=2,
+        help="Minimum per-box dilation in pixels when line-height scaling is enabled.",
+    )
+    parser.add_argument(
+        "--inpaint-mask-dilate-max-px",
+        type=int,
+        default=16,
+        help="Maximum per-box dilation in pixels when line-height scaling is enabled.",
     )
     parser.add_argument(
         "--inpaint-max-area-ratio",
@@ -285,6 +306,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable the post-generation OCR residual-text safety check (not recommended).",
     )
     parser.add_argument(
+        "--generative-low-freq-mae-threshold",
+        type=float,
+        default=4.0,
+        help=(
+            "Base low-frequency MAE gate vs opencv-fast (0-255). Scaled up on "
+            "textured surroundings and skipped when the outside ring is highly "
+            "textured. Set negative to disable. Flat rings skip the API entirely."
+        ),
+    )
+    parser.add_argument(
+        "--generative-flat-ring-luma-std",
+        type=float,
+        default=4.0,
+        help=(
+            "When the outside-mask ring luma std is at or below this value, skip the "
+            "generative API and use opencv-fast (smooth backgrounds)."
+        ),
+    )
+    parser.add_argument(
+        "--no-generative-skip-flat-ring",
+        action="store_true",
+        help="Always call the generative API even when the outside ring is flat.",
+    )
+    parser.add_argument(
+        "--generative-textured-ring-luma-std",
+        type=float,
+        default=16.0,
+        help=(
+            "Outside-ring luma std at/above this disables the low-frequency MAE gate "
+            "(photo / textured pages where generative is preferred)."
+        ),
+    )
+    parser.add_argument(
+        "--generative-safety-block-retries",
+        type=int,
+        default=1,
+        help=(
+            "Retry count for nondeterministic copyright/recitation (and similar) "
+            "safety blocks before falling back to opencv-fast. Blocked attempts are free "
+            "and do not consume --generative-max-calls."
+        ),
+    )
+    parser.add_argument(
+        "--generative-max-attempts",
+        type=int,
+        default=None,
+        help=(
+            "Hard cap on total provider attempts including free safety blocks. "
+            "Defaults to 3× --generative-max-calls."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -326,6 +399,9 @@ def main(argv: list[str] | None = None) -> int:
         inpaint_lama_patch_hybrid=uses_lama_patch_hybrid(args.inpaint_engine),
         inpaint_padding_px=args.inpaint_padding_px,
         inpaint_mask_dilate_px=args.inpaint_mask_dilate_px,
+        inpaint_mask_dilate_line_height_ratio=args.inpaint_mask_dilate_line_height_ratio,
+        inpaint_mask_dilate_min_px=args.inpaint_mask_dilate_min_px,
+        inpaint_mask_dilate_max_px=args.inpaint_mask_dilate_max_px,
         inpaint_max_area_ratio=args.inpaint_max_area_ratio,
         inpaint_model_root=args.inpaint_model_root,
         inpaint_onnx_cuda_provider=args.inpaint_onnx_cuda_provider,
@@ -340,6 +416,12 @@ def main(argv: list[str] | None = None) -> int:
         generative_cache_dir=args.generative_cache_dir,
         generative_timeout_s=args.generative_timeout_s,
         generative_verify_ocr=not args.no_generative_verify_ocr,
+        generative_low_freq_mae_threshold=args.generative_low_freq_mae_threshold,
+        generative_skip_flat_ring=not args.no_generative_skip_flat_ring,
+        generative_flat_ring_luma_std=args.generative_flat_ring_luma_std,
+        generative_textured_ring_luma_std=args.generative_textured_ring_luma_std,
+        generative_safety_block_retries=args.generative_safety_block_retries,
+        generative_max_attempts=args.generative_max_attempts,
     )
     report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
     print(

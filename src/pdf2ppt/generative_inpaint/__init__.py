@@ -16,9 +16,18 @@ Design invariants:
 
 from __future__ import annotations
 
+from .blend import (
+    DEFAULT_FLAT_RING_LUMA_STD,
+    DEFAULT_LOW_FREQ_MAE_THRESHOLD,
+    context_ring_luma_std,
+    effective_low_freq_mae_threshold,
+    low_frequency_masked_mae,
+    seamless_clone_masked_edit,
+)
 from .budget import GenerativeBudget, GenerativeCallRecord
 from .cache import GenerativeInpaintCache, compute_generative_cache_key
 from .engine import (
+    DEFAULT_SAFETY_BLOCK_RETRIES,
     GENERATIVE_INPAINT_ENGINES,
     GenerativeInpaintingEngine,
     composite_masked_edit,
@@ -44,7 +53,10 @@ from .safety import (
 )
 
 __all__ = [
+    "DEFAULT_FLAT_RING_LUMA_STD",
     "DEFAULT_IMAGE_RESTORE_PROMPT",
+    "DEFAULT_LOW_FREQ_MAE_THRESHOLD",
+    "DEFAULT_SAFETY_BLOCK_RETRIES",
     "DEFAULT_TEXT_REMOVAL_PROMPT",
     "GEMINI_DEFAULT_MODEL",
     "GENERATIVE_INPAINT_ENGINES",
@@ -61,9 +73,13 @@ __all__ = [
     "build_ocr_residual_checker",
     "composite_masked_edit",
     "compute_generative_cache_key",
+    "context_ring_luma_std",
     "create_provider",
+    "effective_low_freq_mae_threshold",
     "is_expected_safety_block_message",
+    "low_frequency_masked_mae",
     "provider_name_for_engine",
     "residual_text_overlap_ratio",
+    "seamless_clone_masked_edit",
     "uses_generative_inpaint_engine",
 ]
