@@ -91,6 +91,12 @@ def render_overlay_background(
         padding_px=mask_padding_px,
     )
     mask_image = mask_refinement.mask_image
+    dilate_px = max(0, int(options.inpaint_mask_dilate_px))
+    if dilate_px > 0:
+        # Cover anti-aliased glyph fringes that sit just outside tight text boxes.
+        mask_array = np.array(mask_image, dtype=np.uint8)
+        kernel = np.ones((dilate_px * 2 + 1, dilate_px * 2 + 1), dtype=np.uint8)
+        mask_image = Image.fromarray(cv2.dilate(mask_array, kernel, iterations=1), mode="L")
     mask_array = np.array(mask_image, dtype=np.uint8)
     if np.count_nonzero(mask_array) == 0:
         logger.info("No overlay mask pixels were generated for background rendering")

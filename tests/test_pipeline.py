@@ -425,6 +425,7 @@ class BackgroundModeTests(unittest.TestCase):
             report_path=Path("output.report.json"),
             inpaint_engine="auto",
             inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
             inpaint_max_area_ratio=0.2,
         )
         result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=options)
@@ -432,6 +433,42 @@ class BackgroundModeTests(unittest.TestCase):
         self.assertIn("opencv-fast", result.note or "")
         pixel = result.image.getpixel((25, 18))
         self.assertTrue(all(abs(channel - expected) <= 4 for channel, expected in zip(pixel, (35, 45, 55))))
+
+    def test_render_overlay_background_mask_dilate_expands_text_mask(self) -> None:
+        image = Image.new("RGB", (60, 40), color=(35, 45, 55))
+        blocks = [
+            TextBlock(
+                id="ocr_dilate",
+                source="ocr",
+                bbox=(20, 12, 35, 24),
+                text="demo",
+                confidence=0.9,
+                image_bbox=(20, 12, 35, 24),
+            )
+        ]
+        tight = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="opencv-fast",
+            inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
+        )
+        dilated = ConversionOptions(
+            input_path=Path("input.pdf"),
+            output_path=Path("output.pptx"),
+            report_path=Path("output.report.json"),
+            inpaint_engine="opencv-fast",
+            inpaint_padding_px=0,
+            inpaint_mask_dilate_px=2,
+        )
+        tight_result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=tight)
+        dilated_result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=dilated)
+        assert tight_result.mask_image is not None
+        assert dilated_result.mask_image is not None
+        tight_count = int(np.count_nonzero(np.array(tight_result.mask_image) > 0))
+        dilated_count = int(np.count_nonzero(np.array(dilated_result.mask_image) > 0))
+        self.assertGreater(dilated_count, tight_count)
 
     def test_resolve_background_inpainting_engine_returns_lama_for_explicit_request(self) -> None:
         image = Image.new("RGB", (60, 40), color=(35, 45, 55))
@@ -1285,6 +1322,7 @@ class BackgroundModeTests(unittest.TestCase):
             report_path=Path("output.report.json"),
             inpaint_engine="auto",
             inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
             inpaint_max_area_ratio=0.1,
         )
         result = render_overlay_background(image, blocks, fitz.Rect(0, 0, 60, 40), options=options)
@@ -1444,6 +1482,7 @@ class BackgroundModeTests(unittest.TestCase):
             report_path=Path("output.report.json"),
             inpaint_engine="auto",
             inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
             inpaint_max_area_ratio=0.1,
             inpaint_model_root=Path("model/lama"),
         )
@@ -1550,6 +1589,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             report_path=Path("output.report.json"),
             inpaint_engine="auto",
             inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
             inpaint_max_area_ratio=0.12,
         )
         result = render_overlay_background(image, blocks, fitz.Rect(0, 0, width, height), options=options)
@@ -2068,6 +2108,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             report_path=Path("output.report.json"),
             inpaint_engine="auto",
             inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
             inpaint_max_area_ratio=0.2,
         )
 
@@ -2182,6 +2223,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             report_path=Path("output.report.json"),
             inpaint_engine="opencv-fast",
             inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
         )
 
         corrected_image, debug_images, note = _apply_targeted_file_back_color_correction(
@@ -2250,6 +2292,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             report_path=Path("output.report.json"),
             inpaint_engine="opencv-fast",
             inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
         )
 
         corrected_image, debug_images, note = _apply_targeted_footer_label_color_correction(
@@ -2317,6 +2360,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
             report_path=Path("output.report.json"),
             inpaint_engine="opencv-fast",
             inpaint_padding_px=0,
+            inpaint_mask_dilate_px=0,
         )
 
         corrected_image, _debug_images, note = _apply_targeted_footer_label_color_correction(
@@ -2376,6 +2420,7 @@ class OcrStyleOptimizationTests(unittest.TestCase):
                 report_path=Path("output.report.json"),
                 inpaint_engine="opencv-fast",
                 inpaint_padding_px=0,
+                inpaint_mask_dilate_px=0,
             ),
         )
 

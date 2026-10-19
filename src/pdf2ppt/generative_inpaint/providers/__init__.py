@@ -9,6 +9,7 @@ from .base import (
     GenerativeEditResult,
     GenerativeImageEditProvider,
     GenerativeProviderError,
+    is_expected_safety_block_message,
 )
 from .gemini_provider import (
     GEMINI_DEFAULT_MODEL,
@@ -58,4 +59,5 @@ __all__ = [
     "GeminiImageEditProvider",
     "OpenAIImageEditProvider",
     "create_provider",
+    "is_expected_safety_block_message",
 ]

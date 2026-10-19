@@ -15,6 +15,10 @@ class GenerativeCallRecord:
     cache_hit: bool
     success: bool
     note: str | None = None
+    cost_source: str = "estimate"  # "usage" | "estimate" | "zero"
+    cost_uncertain: bool = False
+    # None | "api_error" | "safety_block" | "budget" | "ocr_safety" | "cache_reject"
+    fallback_kind: str | None = None
 
 
 @dataclass(slots=True)
@@ -24,7 +28,10 @@ class GenerativeBudget:
     calls: int = 0
     cache_hits: int = 0
     fallbacks: int = 0
+    safety_block_fallbacks: int = 0
+    api_error_fallbacks: int = 0
     estimated_cost_usd: float = 0.0
+    cost_uncertain: bool = False
     records: list[GenerativeCallRecord] = field(default_factory=list)
 
     def can_afford(self, estimated_cost_usd: float) -> bool:
@@ -40,12 +47,42 @@ class GenerativeBudget:
 
     def record_call(self, record: GenerativeCallRecord) -> None:
         self.calls += 1
-        if record.success:
+        # Always accumulate reported cost when the vendor may have billed,
+        # including failed parse paths that still consumed image tokens.
+        if record.estimated_cost_usd > 0:
             self.estimated_cost_usd += record.estimated_cost_usd
+        if record.cost_uncertain:
+            self.cost_uncertain = True
         self.records.append(record)
 
-    def record_fallback(self, note: str | None = None) -> None:
+    def record_fallback(self, note: str | None = None, *, kind: str | None = None) -> None:
         self.fallbacks += 1
+        resolved_kind = kind
+        if resolved_kind is None and note:
+            lowered = note.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "copyright",
+                    "recitation",
+                    "safety",
+                    "blocked",
+                    "unable to show the generated image",
+                )
+            ):
+                resolved_kind = "safety_block"
+            elif "budget" in lowered:
+                resolved_kind = "budget"
+            elif "ocr" in lowered:
+                resolved_kind = "ocr_safety"
+            elif "cache" in lowered:
+                resolved_kind = "cache_reject"
+            else:
+                resolved_kind = "api_error"
+        if resolved_kind == "safety_block":
+            self.safety_block_fallbacks += 1
+        elif resolved_kind == "api_error":
+            self.api_error_fallbacks += 1
         if note:
             self.records.append(
                 GenerativeCallRecord(
@@ -57,6 +94,9 @@ class GenerativeBudget:
                     cache_hit=False,
                     success=True,
                     note=note,
+                    cost_source="zero",
+                    cost_uncertain=False,
+                    fallback_kind=resolved_kind,
                 )
             )
 
@@ -67,7 +107,10 @@ class GenerativeBudget:
             "calls": self.calls,
             "cache_hits": self.cache_hits,
             "fallbacks": self.fallbacks,
+            "safety_block_fallbacks": self.safety_block_fallbacks,
+            "api_error_fallbacks": self.api_error_fallbacks,
             "estimated_cost_usd": round(self.estimated_cost_usd, 6),
+            "cost_uncertain": self.cost_uncertain,
             "records": [
                 {
                     "provider": record.provider,
@@ -78,6 +121,9 @@ class GenerativeBudget:
                     "cache_hit": record.cache_hit,
                     "success": record.success,
                     "note": record.note,
+                    "cost_source": record.cost_source,
+                    "cost_uncertain": record.cost_uncertain,
+                    "fallback_kind": record.fallback_kind,
                 }
                 for record in self.records
             ],

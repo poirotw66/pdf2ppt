@@ -24,9 +24,21 @@ from pdf2ppt.generative_inpaint import (
     composite_masked_edit,
     compute_generative_cache_key,
     create_provider,
+    is_expected_safety_block_message,
     uses_generative_inpaint_engine,
 )
+from pdf2ppt.generative_inpaint.aspect import (
+    closest_aspect_ratio,
+    plan_aspect_pad,
+    unpad_image_from_plan,
+)
+from pdf2ppt.generative_inpaint.budget import GenerativeCallRecord
 from pdf2ppt.generative_inpaint.cache import GenerativeInpaintCache
+from pdf2ppt.generative_inpaint.pricing import (
+    GEMINI_FALLBACK_COST_USD,
+    cost_from_gemini_usage,
+    cost_from_openai_usage,
+)
 from pdf2ppt.generative_inpaint.safety import assert_unmasked_pixels_unchanged
 from pdf2ppt.inpainting_overlay import resolve_background_inpainting_engine
 from pdf2ppt.models import ConversionReport, PageResult, QualityScore
@@ -45,13 +57,32 @@ def _rect_mask(size: tuple[int, int], box: tuple[int, int, int, int]) -> Image.I
     return mask
 
 
+def _png_b64(image: Image.Image) -> str:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 class FakeProvider:
     name = "fake"
     default_model = "fake-model"
 
-    def __init__(self, *, fill_color: tuple[int, int, int] = (10, 20, 30), fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fill_color: tuple[int, int, int] = (10, 20, 30),
+        fail: bool = False,
+        fail_error: GenerativeProviderError | None = None,
+        cost_usd: float = 0.05,
+        cost_uncertain: bool = False,
+        cost_source: str = "estimate",
+    ) -> None:
         self.fill_color = fill_color
         self.fail = fail
+        self.fail_error = fail_error
+        self.cost_usd = cost_usd
+        self.cost_uncertain = cost_uncertain
+        self.cost_source = cost_source
         self.calls = 0
         self._configured = True
 
@@ -60,11 +91,13 @@ class FakeProvider:
 
     def estimate_cost_usd(self, *, model: str, width: int, height: int) -> float:
         del model, width, height
-        return 0.05
+        return self.cost_usd
 
     def edit(self, request: GenerativeEditRequest) -> GenerativeEditResult:
         self.calls += 1
         if self.fail:
+            if self.fail_error is not None:
+                raise self.fail_error
             raise GenerativeProviderError("simulated provider failure")
         # Paint the whole crop a solid color; compositor must keep unmasked pixels.
         edited = Image.new("RGB", request.image.size, self.fill_color)
@@ -72,7 +105,9 @@ class FakeProvider:
             image=edited,
             model=self.default_model,
             provider_name=self.name,
-            estimated_cost_usd=0.05,
+            estimated_cost_usd=self.cost_usd,
+            cost_source=self.cost_source,
+            cost_uncertain=self.cost_uncertain,
             raw_response_note="fake",
         )
 
@@ -83,6 +118,12 @@ class GenerativeHelpersTests(unittest.TestCase):
         self.assertTrue(uses_generative_inpaint_engine("generative-gemini"))
         self.assertFalse(uses_generative_inpaint_engine("opencv-fast"))
         self.assertFalse(uses_generative_inpaint_engine("auto"))
+
+    def test_default_prompt_is_neutral(self) -> None:
+        lowered = DEFAULT_TEXT_REMOVAL_PROMPT.lower()
+        self.assertNotIn("watermark", lowered)
+        self.assertNotIn("logo", lowered)
+        self.assertIn("background", lowered)
 
     def test_composite_preserves_unmasked_pixels(self) -> None:
         source = _solid_rgb((32, 32), (200, 100, 50))
@@ -118,6 +159,53 @@ class GenerativeHelpersTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             assert loaded is not None
             self.assertEqual(loaded.size, image.size)
+
+
+class AspectAndPricingTests(unittest.TestCase):
+    def test_closest_aspect_ratio_for_wide_crop(self) -> None:
+        self.assertEqual(closest_aspect_ratio(1698, 462), "4:1")
+        self.assertEqual(closest_aspect_ratio(1280, 720), "16:9")
+        self.assertEqual(closest_aspect_ratio(100, 100), "1:1")
+
+    def test_unpad_does_not_stretch_content(self) -> None:
+        plan = plan_aspect_pad(100, 40)  # 2.5:1 → nearest documented ratio is 21:9
+        self.assertEqual(plan.aspect_ratio, "21:9")
+        self.assertGreater(plan.padded_size[0] * plan.padded_size[1], 100 * 40)
+        # Model returned a correct-AR canvas with a solid color; unpad must keep size.
+        padded = Image.new("RGB", plan.padded_size, (10, 20, 30))
+        left, top, right, bottom = plan.content_box
+        for y in range(top, bottom):
+            for x in range(left, right):
+                padded.putpixel((x, y), (200, 100, 50))
+        restored = unpad_image_from_plan(padded, plan)
+        self.assertEqual(restored.size, (100, 40))
+        arr = np.array(restored)
+        self.assertTrue(np.all(arr == (200, 100, 50)))
+
+    def test_gemini_usage_cost_matches_measured_ballpark(self) -> None:
+        usage = {
+            "total_input_tokens": 1200,
+            "total_thought_tokens": 300,
+            "total_output_tokens": 1120,
+            "output_tokens_by_modality": [{"modality": "image", "tokens": 1120}],
+        }
+        cost = cost_from_gemini_usage(usage)
+        assert cost is not None
+        self.assertFalse(cost.uncertain)
+        self.assertEqual(cost.source, "usage")
+        # 1200*1.5 + 300*7.5 + 1120*30 = 1800+2250+33600 = 37650 / 1e6 = 0.03765
+        self.assertAlmostEqual(cost.usd, 0.03765, places=5)
+
+    def test_openai_usage_cost(self) -> None:
+        usage = {
+            "input_tokens": 1000,
+            "output_tokens": 1000,
+            "input_tokens_details": {"text_tokens": 200, "image_tokens": 800},
+        }
+        cost = cost_from_openai_usage(usage)
+        assert cost is not None
+        # 200*5 + 800*8 + 1000*30 = 1000+6400+30000 = 37400 / 1e6
+        self.assertAlmostEqual(cost.usd, 0.0374, places=5)
 
 
 class GenerativeEngineTests(unittest.TestCase):
@@ -158,6 +246,79 @@ class GenerativeEngineTests(unittest.TestCase):
         assert_unmasked_pixels_unchanged(source, result, mask)
         self.assertEqual(provider.calls, 1)
         self.assertGreaterEqual(engine.budget.fallbacks, 1)
+
+    def test_local_fallback_preserves_unmasked_even_if_opencv_touches_outside(self) -> None:
+        """Regression: fallback must re-composite through the mask."""
+
+        class TouchyFallback(FakeProvider):
+            def edit(self, request: GenerativeEditRequest) -> GenerativeEditResult:
+                raise GenerativeProviderError("force fallback")
+
+        engine = GenerativeInpaintingEngine(
+            provider=TouchyFallback(fail=True),
+            budget=GenerativeBudget(max_calls=5, max_cost_usd=1.0),
+            cache_dir=None,
+            verify_ocr=False,
+        )
+        # Gradient-like source so opencv-fast surface/Telea paths have work to do.
+        source_arr = np.zeros((64, 64, 3), dtype=np.uint8)
+        for y in range(64):
+            source_arr[y, :, :] = (y * 3, 40, 200 - y)
+        source_arr[20:40, 20:40] = (255, 0, 0)
+        source = Image.fromarray(source_arr, mode="RGB")
+        mask = _rect_mask((64, 64), (20, 20, 40, 40))
+        result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+
+    def test_safety_block_classified_separately_and_zero_cost(self) -> None:
+        error = GenerativeProviderError(
+            "Gemini interactions HTTP 400: Image generation blocked due to copyright/recitation. "
+            "You will not be charged for this request.",
+            is_expected_safety_block=True,
+            may_have_been_billed=False,
+            estimated_cost_usd=0.0,
+        )
+        provider = FakeProvider(fail=True, fail_error=error)
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+        )
+        source = _solid_rgb((48, 48), (90, 90, 90))
+        mask = _rect_mask((48, 48), (12, 12, 36, 36))
+        result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+        self.assertEqual(budget.safety_block_fallbacks, 1)
+        self.assertEqual(budget.api_error_fallbacks, 0)
+        self.assertEqual(budget.estimated_cost_usd, 0.0)
+        payload = budget.to_dict()
+        self.assertEqual(payload["safety_block_fallbacks"], 1)
+        self.assertTrue(any(r.fallback_kind == "safety_block" for r in budget.records))
+        self.assertIn("fallback=1", engine.last_debug_note or "")
+
+    def test_parse_failure_records_uncertain_cost(self) -> None:
+        error = GenerativeProviderError(
+            "Gemini response did not include an output image.",
+            may_have_been_billed=True,
+            estimated_cost_usd=GEMINI_FALLBACK_COST_USD,
+            cost_uncertain=True,
+        )
+        provider = FakeProvider(fail=True, fail_error=error)
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+        )
+        source = _solid_rgb((32, 32), (10, 20, 30))
+        mask = _rect_mask((32, 32), (8, 8, 24, 24))
+        engine.inpaint(source, mask)
+        self.assertGreater(budget.estimated_cost_usd, 0.0)
+        self.assertTrue(budget.cost_uncertain)
+        self.assertEqual(budget.api_error_fallbacks, 1)
 
     def test_ocr_safety_rejection_falls_back(self) -> None:
         provider = FakeProvider(fill_color=(5, 5, 5))
@@ -207,6 +368,14 @@ class GenerativeEngineTests(unittest.TestCase):
         self.assertEqual(restored.size, source.size)
         self.assertEqual(provider.calls, 1)
 
+    def test_is_expected_safety_block_message(self) -> None:
+        self.assertTrue(
+            is_expected_safety_block_message(
+                "Image generation blocked due to copyright/recitation."
+            )
+        )
+        self.assertFalse(is_expected_safety_block_message("HTTP 503 unavailable"))
+
 
 class ResolveAndCliTests(unittest.TestCase):
     def test_resolve_without_api_key_falls_back_locally(self) -> None:
@@ -251,16 +420,19 @@ class ResolveAndCliTests(unittest.TestCase):
                 "7",
                 "--generative-max-cost-usd",
                 "1.25",
+                "--inpaint-mask-dilate-px",
+                "3",
             ]
         )
         self.assertEqual(args.inpaint_engine, "generative-openai")
         self.assertEqual(args.generative_max_calls, 7)
         self.assertEqual(args.generative_max_cost_usd, 1.25)
+        self.assertEqual(args.inpaint_mask_dilate_px, 3)
 
     def test_conversion_report_includes_generative_section(self) -> None:
         budget = GenerativeBudget(max_calls=3, max_cost_usd=1.0)
         budget.record_call(
-            __import__("pdf2ppt.generative_inpaint.budget", fromlist=["GenerativeCallRecord"]).GenerativeCallRecord(
+            GenerativeCallRecord(
                 provider="fake",
                 model="fake-model",
                 width=16,
@@ -268,6 +440,7 @@ class ResolveAndCliTests(unittest.TestCase):
                 estimated_cost_usd=0.05,
                 cache_hit=False,
                 success=True,
+                cost_source="usage",
             )
         )
         report = ConversionReport(
@@ -290,14 +463,13 @@ class ResolveAndCliTests(unittest.TestCase):
         payload = report.to_dict()
         self.assertIn("generative_inpaint", payload)
         self.assertEqual(payload["generative_inpaint"]["calls"], 1)
+        self.assertIn("cost_uncertain", payload["generative_inpaint"])
 
 
 class ProviderUnitTests(unittest.TestCase):
     def test_openai_provider_builds_multipart_and_decodes_b64(self) -> None:
         edited = _solid_rgb((8, 8), (7, 8, 9))
-        buffer = io.BytesIO()
-        edited.save(buffer, format="PNG")
-        b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+        b64 = _png_b64(edited)
 
         def transport(*, body: bytes, content_type: str, api_key: str) -> dict:
             self.assertIn("multipart/form-data", content_type)
@@ -305,31 +477,86 @@ class ProviderUnitTests(unittest.TestCase):
             self.assertIn(b"gpt-image-2", body)
             self.assertIn(b"image.png", body)
             self.assertIn(b"mask.png", body)
-            return {"data": [{"b64_json": b64}], "usage": {"total_tokens": 1}}
+            # Prompt must not ask to remove watermarks/logos.
+            self.assertNotIn(b"watermark", body.lower())
+            return {
+                "data": [{"b64_json": b64}],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 200,
+                    "input_tokens_details": {"text_tokens": 20, "image_tokens": 80},
+                },
+            }
 
         provider = OpenAIImageEditProvider(api_key="sk-test", transport=transport)
         result = provider.edit(
             GenerativeEditRequest(
                 image=_solid_rgb((8, 8), (1, 1, 1)),
                 mask_image=_rect_mask((8, 8), (2, 2, 6, 6)),
-                prompt="remove text",
+                prompt=DEFAULT_TEXT_REMOVAL_PROMPT,
                 model="gpt-image-2",
             )
         )
         self.assertEqual(result.image.size, (8, 8))
         self.assertEqual(result.provider_name, "openai")
+        self.assertEqual(result.cost_source, "usage")
+        self.assertFalse(result.cost_uncertain)
+        self.assertGreater(result.estimated_cost_usd, 0.0)
 
-    def test_gemini_provider_posts_json_and_decodes_output_image(self) -> None:
+    def test_gemini_provider_parses_steps_content_image(self) -> None:
+        """Raw REST shape: steps[].content[] type=image (not output_image)."""
+
         edited = _solid_rgb((8, 8), (3, 4, 5))
-        buffer = io.BytesIO()
-        edited.save(buffer, format="PNG")
-        b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+        b64 = _png_b64(edited)
+        captured: dict[str, object] = {}
 
         def transport(*, body: dict, api_key: str) -> dict:
             self.assertEqual(api_key, "gem-test")
             self.assertEqual(body["model"], "gemini-nano-banana-2.1")
             self.assertEqual(body["input"][0]["type"], "text")
             self.assertEqual(body["input"][1]["type"], "image")
+            self.assertEqual(body["response_format"]["type"], "image")
+            self.assertIn("aspect_ratio", body["response_format"])
+            captured["aspect_ratio"] = body["response_format"]["aspect_ratio"]
+            return {
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [
+                            {"type": "text", "text": "done"},
+                            {"type": "image", "data": b64, "mime_type": "image/jpeg"},
+                        ],
+                    }
+                ],
+                "usage": {
+                    "total_input_tokens": 1200,
+                    "total_thought_tokens": 300,
+                    "total_output_tokens": 1120,
+                    "output_tokens_by_modality": [{"modality": "image", "tokens": 1120}],
+                },
+            }
+
+        provider = GeminiImageEditProvider(api_key="gem-test", transport=transport)
+        result = provider.edit(
+            GenerativeEditRequest(
+                image=_solid_rgb((8, 8), (9, 9, 9)),
+                mask_image=_rect_mask((8, 8), (1, 1, 4, 4)),
+                prompt=DEFAULT_TEXT_REMOVAL_PROMPT,
+                model="gemini-nano-banana-2.1",
+            )
+        )
+        self.assertEqual(result.image.size, (8, 8))
+        self.assertEqual(result.provider_name, "gemini")
+        self.assertEqual(captured["aspect_ratio"], "1:1")
+        self.assertEqual(result.cost_source, "usage")
+        self.assertAlmostEqual(result.estimated_cost_usd, 0.03765, places=5)
+
+    def test_gemini_provider_still_accepts_sdk_output_image(self) -> None:
+        edited = _solid_rgb((8, 8), (3, 4, 5))
+        b64 = _png_b64(edited)
+
+        def transport(*, body: dict, api_key: str) -> dict:
+            del body, api_key
             return {"output_image": {"data": b64}}
 
         provider = GeminiImageEditProvider(api_key="gem-test", transport=transport)
@@ -337,12 +564,62 @@ class ProviderUnitTests(unittest.TestCase):
             GenerativeEditRequest(
                 image=_solid_rgb((8, 8), (9, 9, 9)),
                 mask_image=_rect_mask((8, 8), (1, 1, 4, 4)),
-                prompt="remove text",
+                prompt="continue background",
                 model="gemini-nano-banana-2.1",
             )
         )
         self.assertEqual(result.image.size, (8, 8))
-        self.assertEqual(result.provider_name, "gemini")
+        self.assertTrue(result.cost_uncertain)  # no usage → estimate
+
+    def test_gemini_wide_crop_requests_matching_aspect_and_unpads(self) -> None:
+        # Long thin crop; model "returns" a 4:1 canvas — must not stretch.
+        crop_w, crop_h = 80, 20
+        plan = plan_aspect_pad(crop_w, crop_h)
+        model_canvas = Image.new("RGB", plan.padded_size, (1, 1, 1))
+        left, top, right, bottom = plan.content_box
+        for y in range(top, bottom):
+            for x in range(left, right):
+                model_canvas.putpixel((x, y), (50, 60, 70))
+        b64 = _png_b64(model_canvas)
+        captured: dict[str, object] = {}
+
+        def transport(*, body: dict, api_key: str) -> dict:
+            del api_key
+            captured["aspect_ratio"] = body["response_format"]["aspect_ratio"]
+            return {"steps": [{"type": "model_output", "content": [{"type": "image", "data": b64}]}]}
+
+        provider = GeminiImageEditProvider(api_key="gem-test", transport=transport)
+        result = provider.edit(
+            GenerativeEditRequest(
+                image=_solid_rgb((crop_w, crop_h), (9, 9, 9)),
+                mask_image=_rect_mask((crop_w, crop_h), (10, 5, 70, 15)),
+                prompt="continue background",
+                model="gemini-nano-banana-2.1",
+            )
+        )
+        self.assertEqual(captured["aspect_ratio"], plan.aspect_ratio)
+        self.assertEqual(result.image.size, (crop_w, crop_h))
+        # Content window should be the solid fill, not stretched garbage.
+        arr = np.array(result.image)
+        self.assertTrue(np.all(arr == (50, 60, 70)))
+
+    def test_gemini_missing_image_marks_billed_uncertain(self) -> None:
+        def transport(*, body: dict, api_key: str) -> dict:
+            del body, api_key
+            return {"steps": [{"type": "model_output", "content": [{"type": "text", "text": "nope"}]}]}
+
+        provider = GeminiImageEditProvider(api_key="gem-test", transport=transport)
+        with self.assertRaises(GenerativeProviderError) as ctx:
+            provider.edit(
+                GenerativeEditRequest(
+                    image=_solid_rgb((8, 8), (1, 1, 1)),
+                    mask_image=_rect_mask((8, 8), (2, 2, 4, 4)),
+                    prompt="x",
+                    model="gemini-nano-banana-2.1",
+                )
+            )
+        self.assertTrue(ctx.exception.may_have_been_billed)
+        self.assertTrue(ctx.exception.cost_uncertain)
 
     def test_create_provider_registry(self) -> None:
         openai = create_provider("openai", api_key="x")
@@ -364,6 +641,16 @@ class ProviderUnitTests(unittest.TestCase):
                     model="gpt-image-2",
                 )
             )
+
+
+class MaskDilateOptionTests(unittest.TestCase):
+    def test_default_mask_dilate_option(self) -> None:
+        options = ConversionOptions(
+            input_path=Path("in.pdf"),
+            output_path=Path("out.pptx"),
+            report_path=Path("out.report.json"),
+        )
+        self.assertEqual(options.inpaint_mask_dilate_px, 2)
 
 
 if __name__ == "__main__":

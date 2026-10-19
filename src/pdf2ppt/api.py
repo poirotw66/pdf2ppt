@@ -225,6 +225,7 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         inpaint_engine=base_lama_inpaint_engine(request.inpaint_engine),
         inpaint_lama_patch_hybrid=uses_lama_patch_hybrid(request.inpaint_engine),
         inpaint_padding_px=request.inpaint_padding_px,
+        inpaint_mask_dilate_px=request.inpaint_mask_dilate_px,
         inpaint_max_area_ratio=request.inpaint_max_area_ratio,
         inpaint_model_root=resolve_repo_relative_path(request.inpaint_model_root),
         inpaint_onnx_cuda_provider=request.inpaint_onnx_cuda_provider,

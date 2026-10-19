@@ -21,19 +21,23 @@ from typing import Any
 
 from PIL import Image
 
+from ..pricing import (
+    OPENAI_FALLBACK_COST_USD,
+    cost_from_openai_usage,
+    openai_estimate_cost_usd,
+)
 from .base import (
     GenerativeEditRequest,
     GenerativeEditResult,
     GenerativeProviderError,
+    is_expected_safety_block_message,
 )
 
 logger = logging.getLogger(__name__)
 
 OPENAI_DEFAULT_MODEL = "gpt-image-2"
 OPENAI_IMAGES_EDIT_URL = "https://api.openai.com/v1/images/edits"
-# Conservative per-call estimate for a ~512-1024px edit at medium quality.
-# Token billing varies; this is a budget guardrail, not an invoice.
-OPENAI_DEFAULT_COST_USD = 0.08
+OPENAI_DEFAULT_COST_USD = OPENAI_FALLBACK_COST_USD
 OPENAI_ENV_API_KEY = "OPENAI_API_KEY"
 OPENAI_ENV_MODEL = "PDF2PPT_OPENAI_IMAGE_MODEL"
 
@@ -152,18 +156,25 @@ class OpenAIImageEditProvider:
             image = image.resize(source.size, Image.Resampling.LANCZOS)
 
         usage = response_payload.get("usage") if isinstance(response_payload, dict) else None
-        estimated = self.estimate_cost_usd(model=model, width=source.width, height=source.height)
-        if isinstance(usage, dict):
-            # Prefer provider-reported token usage when present; keep USD estimate as guardrail.
-            estimated = max(estimated, 0.0)
+        cost = cost_from_openai_usage(usage) if isinstance(usage, dict) else None
+        if cost is None:
+            cost = openai_estimate_cost_usd()
+            if self._cost_usd_per_call != OPENAI_FALLBACK_COST_USD:
+                cost = type(cost)(
+                    usd=self._cost_usd_per_call,
+                    source="estimate",
+                    uncertain=True,
+                )
 
         return GenerativeEditResult(
             image=image,
             model=model,
             provider_name=self.name,
-            estimated_cost_usd=estimated,
+            estimated_cost_usd=cost.usd,
             usage=usage if isinstance(usage, dict) else None,
             raw_response_note="openai:/v1/images/edits",
+            cost_source=cost.source,
+            cost_uncertain=cost.uncertain,
         )
 
     def _post_json(self, body: bytes, content_type: str) -> dict[str, Any]:
@@ -184,28 +195,57 @@ class OpenAIImageEditProvider:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
+            message = f"OpenAI images.edit HTTP {error.code}: {detail[:500]}"
+            safety = is_expected_safety_block_message(message)
             raise GenerativeProviderError(
-                f"OpenAI images.edit HTTP {error.code}: {detail[:500]}"
+                message,
+                may_have_been_billed=not safety and error.code < 500,
+                is_expected_safety_block=safety,
+                estimated_cost_usd=0.0 if safety else OPENAI_FALLBACK_COST_USD,
+                cost_uncertain=not safety,
             ) from error
         except urllib.error.URLError as error:
             raise GenerativeProviderError(f"OpenAI images.edit network error: {error}") from error
         except json.JSONDecodeError as error:
-            raise GenerativeProviderError("OpenAI images.edit returned non-JSON payload.") from error
+            raise GenerativeProviderError(
+                "OpenAI images.edit returned non-JSON payload.",
+                may_have_been_billed=True,
+                estimated_cost_usd=OPENAI_FALLBACK_COST_USD,
+                cost_uncertain=True,
+            ) from error
         if not isinstance(payload, dict):
-            raise GenerativeProviderError("OpenAI images.edit returned an unexpected payload type.")
+            raise GenerativeProviderError(
+                "OpenAI images.edit returned an unexpected payload type.",
+                may_have_been_billed=True,
+                estimated_cost_usd=OPENAI_FALLBACK_COST_USD,
+                cost_uncertain=True,
+            )
         return payload
 
     def _extract_image(self, payload: dict[str, Any]) -> Image.Image:
         data = payload.get("data")
         if not isinstance(data, list) or not data:
-            raise GenerativeProviderError("OpenAI images.edit response missing data[].")
+            raise GenerativeProviderError(
+                "OpenAI images.edit response missing data[].",
+                may_have_been_billed=True,
+                estimated_cost_usd=OPENAI_FALLBACK_COST_USD,
+                cost_uncertain=True,
+            )
         first = data[0]
         if not isinstance(first, dict):
-            raise GenerativeProviderError("OpenAI images.edit data[0] is not an object.")
+            raise GenerativeProviderError(
+                "OpenAI images.edit data[0] is not an object.",
+                may_have_been_billed=True,
+                estimated_cost_usd=OPENAI_FALLBACK_COST_USD,
+                cost_uncertain=True,
+            )
         b64 = first.get("b64_json")
         if not isinstance(b64, str) or not b64:
             raise GenerativeProviderError(
-                "OpenAI images.edit response missing b64_json (set response_format/b64)."
+                "OpenAI images.edit response missing b64_json (set response_format/b64).",
+                may_have_been_billed=True,
+                estimated_cost_usd=OPENAI_FALLBACK_COST_USD,
+                cost_uncertain=True,
             )
         return _decode_b64_image(b64)
 

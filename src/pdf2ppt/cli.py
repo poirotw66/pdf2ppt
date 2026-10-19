@@ -186,6 +186,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra mask dilation padding in pixels before background reconstruction.",
     )
     parser.add_argument(
+        "--inpaint-mask-dilate-px",
+        type=int,
+        default=2,
+        help=(
+            "Additional morphological dilation (px) applied to the final text mask so "
+            "anti-aliased glyph edges are covered. Default 2; set 0 to disable. "
+            "Slightly expands the inpainted region for all engines."
+        ),
+    )
+    parser.add_argument(
         "--inpaint-max-area-ratio",
         type=float,
         default=0.12,
@@ -315,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         inpaint_engine=base_lama_inpaint_engine(args.inpaint_engine),
         inpaint_lama_patch_hybrid=uses_lama_patch_hybrid(args.inpaint_engine),
         inpaint_padding_px=args.inpaint_padding_px,
+        inpaint_mask_dilate_px=args.inpaint_mask_dilate_px,
         inpaint_max_area_ratio=args.inpaint_max_area_ratio,
         inpaint_model_root=args.inpaint_model_root,
         inpaint_onnx_cuda_provider=args.inpaint_onnx_cuda_provider,
