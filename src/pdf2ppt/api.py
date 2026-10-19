@@ -232,6 +232,14 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         inpaint_max_side_px=request.inpaint_max_side_px,
         inpaint_lama_repo_root=resolve_repo_relative_path(request.inpaint_lama_repo_root),
         inpaint_lama_device=request.inpaint_lama_device,
+        generative_model=request.generative_model,
+        generative_max_calls=request.generative_max_calls,
+        generative_max_cost_usd=request.generative_max_cost_usd,
+        generative_cache_dir=(
+            Path(request.generative_cache_dir) if request.generative_cache_dir else None
+        ),
+        generative_timeout_s=request.generative_timeout_s,
+        generative_verify_ocr=request.generative_verify_ocr,
         approved_ocr_blocks_by_page=approved_boxes_by_page,
         approved_ocr_image_size_by_page=approved_image_sizes_by_page,
         apply_notebooklm_watermark_fallback=_should_apply_notebooklm_watermark_fallback(record.original_filename),

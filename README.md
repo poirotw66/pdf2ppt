@@ -45,6 +45,7 @@ Core pipeline:
   - `opencv-fast` (recommended)
   - `lama-onnx` (optional CPU/GPU path, explicit opt-in; `lama-onnx-cuda` is a backward-compatible alias)
   - `lama-pytorch` (optional GPU path via official LaMa repo + PyTorch checkpoint, explicit opt-in)
+  - `generative-openai` / `generative-gemini` (optional cloud image-edit backends; explicit opt-in; see [`docs/generative-inpaint.md`](docs/generative-inpaint.md))
   - `auto` routing (uses `lama-onnx` instead of `white-box` for large masks when a LaMa runtime is available)
 - Generate a JSON report for every conversion.
 - Generate per-page debug artifacts for OCR masks and background decisions.
@@ -315,7 +316,7 @@ OCR line merging (enabled by default, no extra flag required):
 
 Background reconstruction:
 
-- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, `lama-onnx` (alias `lama-onnx-cuda`), or `lama-pytorch`
+- `--inpaint-engine`: `auto`, `white-box`, `opencv-fast`, `lama-onnx` (alias `lama-onnx-cuda`), `lama-pytorch`, `generative-openai`, or `generative-gemini`
 - `--inpaint-padding-px`: expand text masks before inpainting
 - `--inpaint-max-area-ratio`: threshold above which `auto` stops using `opencv-fast` for a mask (see the `auto` routing notes above for what happens next)
 - `--inpaint-model-root`: checkpoint directory for `lama-pytorch`, or local directory / `.onnx` file for `lama-onnx`

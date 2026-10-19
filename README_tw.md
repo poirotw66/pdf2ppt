@@ -42,6 +42,7 @@
   - `opencv-fast`（建議優先使用）
   - `lama-onnx`（可選 CPU/GPU 路徑，需明確指定；`lama-onnx-cuda` 為向後相容別名）
   - `lama-pytorch`（可選 GPU 路徑，透過官方 LaMa repo 與 PyTorch checkpoint，需明確指定）
+  - `generative-openai` / `generative-gemini`（可選雲端影像編輯後端，需明確指定與 API key；見 [`docs/generative-inpaint.md`](docs/generative-inpaint.md)）
   - `auto` 自動路由（大遮罩時，若偵測到可用的 LaMa runtime，會優先用 `lama-onnx` 而非 `white-box`）
 - 每次轉換都可輸出 JSON 報告。
 - 可輸出逐頁 debug 圖與分析檔，方便檢查 OCR 與背景處理結果。
@@ -298,7 +299,7 @@ OCR 行合併（預設啟用，無需額外參數）：
 
 背景重建相關：
 
-- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`lama-onnx`（別名 `lama-onnx-cuda`）、`lama-pytorch`
+- `--inpaint-engine`：`auto`、`white-box`、`opencv-fast`、`lama-onnx`（別名 `lama-onnx-cuda`）、`lama-pytorch`、`generative-openai`、`generative-gemini`
 - `--inpaint-padding-px`：在 inpainting 前擴張文字遮罩
 - `--inpaint-max-area-ratio`：`auto` 停止使用 opencv-fast 的遮罩面積門檻（後續行為見上方 `auto` 路由說明）
 - `--inpaint-model-root`：`lama-pytorch` 的 checkpoint 目錄，或 `lama-onnx` 的本地目錄 / `.onnx` 檔案

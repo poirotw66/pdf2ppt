@@ -11,6 +11,11 @@ from .core import DEFAULT_OCR_BATCH_SIZE
 from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
 from .pipeline import ConversionOptions, convert_pdf
 
+GENERATIVE_INPAINT_ENGINE_CHOICES = (
+    "generative-openai",
+    "generative-gemini",
+)
+
 
 def format_progress_line(completed: int, total: int, *, width: int = 24) -> str:
     if total <= 0:
@@ -163,12 +168,15 @@ def build_parser() -> argparse.ArgumentParser:
             "lama-onnx-hybrid",
             "lama-onnx-cuda-hybrid",
             "lama-pytorch-hybrid",
+            *GENERATIVE_INPAINT_ENGINE_CHOICES,
         ),
         default="opencv-fast",
         help=(
             "Background reconstruction engine for overlay pages. 'lama-onnx-cuda' and "
             "'lama-onnx-cuda-hybrid' are backward-compatible aliases for 'lama-onnx' and "
-            "'lama-onnx-hybrid'; the ONNX engine runs on CPU when no CUDA provider is available."
+            "'lama-onnx-hybrid'; the ONNX engine runs on CPU when no CUDA provider is available. "
+            "generative-openai / generative-gemini are opt-in cloud image-edit backends "
+            "(require API keys; never selected by auto)."
         ),
     )
     parser.add_argument(
@@ -229,6 +237,44 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--generative-model",
+        default=None,
+        help=(
+            "Optional model id override for generative-openai / generative-gemini. "
+            "Defaults: gpt-image-2 (OpenAI) or gemini-nano-banana-2.1 (Gemini). "
+            "Also overridable via PDF2PPT_OPENAI_IMAGE_MODEL / PDF2PPT_GEMINI_IMAGE_MODEL."
+        ),
+    )
+    parser.add_argument(
+        "--generative-max-calls",
+        type=int,
+        default=50,
+        help="Per-run maximum number of paid generative API calls (cost brake).",
+    )
+    parser.add_argument(
+        "--generative-max-cost-usd",
+        type=float,
+        default=5.0,
+        help="Per-run estimated USD budget for generative API calls (cost brake).",
+    )
+    parser.add_argument(
+        "--generative-cache-dir",
+        type=Path,
+        default=Path(".pdf2ppt_cache/generative_inpaint"),
+        help="Disk cache directory for generative patch results (keyed by image+mask+model hash).",
+    )
+    parser.add_argument(
+        "--generative-timeout-s",
+        type=float,
+        default=120.0,
+        help="HTTP timeout in seconds for each generative API call.",
+    )
+    parser.add_argument(
+        "--no-generative-verify-ocr",
+        action="store_true",
+        help="Disable the post-generation OCR residual-text safety check (not recommended).",
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -277,6 +323,12 @@ def main(argv: list[str] | None = None) -> int:
         inpaint_lama_repo_root=args.inpaint_lama_repo_root,
         inpaint_lama_device=args.inpaint_lama_device,
         inpaint_lama_python_executable=args.inpaint_lama_python,
+        generative_model=args.generative_model,
+        generative_max_calls=args.generative_max_calls,
+        generative_max_cost_usd=args.generative_max_cost_usd,
+        generative_cache_dir=args.generative_cache_dir,
+        generative_timeout_s=args.generative_timeout_s,
+        generative_verify_ocr=not args.no_generative_verify_ocr,
     )
     report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
     print(

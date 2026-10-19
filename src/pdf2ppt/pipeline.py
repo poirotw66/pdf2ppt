@@ -51,6 +51,11 @@ from .core import (
     PageConversionError,
     PageSignals,
 )
+from .generative_inpaint import (
+    GenerativeBudget,
+    build_ocr_residual_checker,
+    uses_generative_inpaint_engine,
+)
 from .models import ConversionReport, ImagePlacement, PageResult, QualityScore, TextBlock
 from .native_extraction import (
     assign_block_roles,
@@ -129,6 +134,14 @@ def convert_pdf(
         drop_score=options.ocr_drop_score,
         return_word_box=options.ocr_return_word_box,
     )
+    if uses_generative_inpaint_engine(options.inpaint_engine):
+        if options.generative_budget is None:
+            options.generative_budget = GenerativeBudget(
+                max_calls=options.generative_max_calls,
+                max_cost_usd=options.generative_max_cost_usd,
+            )
+        if options.generative_verify_ocr and options.generative_residual_checker is None:
+            options.generative_residual_checker = build_ocr_residual_checker(ocr_engine)
     page_results: list[PageResult] = []
 
     with fitz.open(options.input_path) as document:
@@ -176,10 +189,21 @@ def convert_pdf(
         presentation_save_seconds = perf_counter() - presentation_save_started_at
         logger.info("Presentation save: %.3fs", presentation_save_seconds)
 
+    generative_report = None
+    if isinstance(options.generative_budget, GenerativeBudget):
+        generative_report = options.generative_budget.to_dict()
+        logger.info(
+            "Generative inpaint run stats: calls=%s cache_hits=%s fallbacks=%s est_cost_usd=%.4f",
+            generative_report.get("calls"),
+            generative_report.get("cache_hits"),
+            generative_report.get("fallbacks"),
+            float(generative_report.get("estimated_cost_usd") or 0.0),
+        )
     report = ConversionReport(
         input_path=str(options.input_path),
         output_path=str(options.output_path),
         pages=page_results,
+        generative_inpaint=generative_report,
     )
     options.report_path.write_text(
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2),

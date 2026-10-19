@@ -71,6 +71,17 @@ class ConversionOptions:
     approved_ocr_image_size_by_page: dict[int, tuple[int, int]] = field(default_factory=dict)
     apply_notebooklm_watermark_fallback: bool = True
     inpaint_lama_patch_hybrid: bool = True
+    # Opt-in generative (cloud) image-edit backend. Defaults keep behaviour identical
+    # when no API key is present and when inpaint_engine is not generative-*.
+    generative_model: str | None = None
+    generative_api_key: str | None = None
+    generative_max_calls: int = 50
+    generative_max_cost_usd: float = 5.0
+    generative_cache_dir: Path | None = Path(".pdf2ppt_cache/generative_inpaint")
+    generative_timeout_s: float = 120.0
+    generative_verify_ocr: bool = True
+    generative_budget: Any | None = field(default=None, repr=False)
+    generative_residual_checker: Any | None = field(default=None, repr=False)
 
 
 @dataclass(slots=True)

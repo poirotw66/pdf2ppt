@@ -81,15 +81,19 @@ class ConversionReport:
     input_path: str
     output_path: str
     pages: list[PageResult]
+    generative_inpaint: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         editable_pages = sum(
             1 for page in self.pages if page.background_mode in {"elements", "overlay"}
         )
-        return {
+        payload: dict[str, object] = {
             "input_path": self.input_path,
             "output_path": self.output_path,
             "page_count": len(self.pages),
             "editable_page_count": editable_pages,
             "pages": [page.to_report_dict() for page in self.pages],
         }
+        if self.generative_inpaint is not None:
+            payload["generative_inpaint"] = self.generative_inpaint
+        return payload

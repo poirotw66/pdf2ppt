@@ -10,6 +10,12 @@ import numpy as np
 from PIL import Image
 
 from .core import ConversionOptions
+from .generative_inpaint import (
+    GenerativeBudget,
+    GenerativeInpaintingEngine,
+    provider_name_for_engine,
+    uses_generative_inpaint_engine,
+)
 from .inpainting_engines import (
     DEFAULT_LAMA_MASK_EXTRA_PADDING_PX,
     BackgroundInpaintingEngine,
@@ -975,6 +981,46 @@ def resolve_background_inpainting_engine(
             f"Selected {requested_engine} engine explicitly (mask area ratio {mask_ratio:.4f}, "
             f"repo_root {options.inpaint_lama_repo_root}, device {options.inpaint_lama_device}, "
             f"patch_hybrid={options.inpaint_lama_patch_hybrid})."
+        )
+    if uses_generative_inpaint_engine(requested_engine):
+        provider_name = provider_name_for_engine(requested_engine)
+        assert provider_name is not None
+        budget = options.generative_budget
+        if budget is None:
+            budget = GenerativeBudget(
+                max_calls=options.generative_max_calls,
+                max_cost_usd=options.generative_max_cost_usd,
+            )
+            options.generative_budget = budget
+        engine = GenerativeInpaintingEngine(
+            provider=provider_name,
+            model=options.generative_model,
+            api_key=options.generative_api_key,
+            max_calls=options.generative_max_calls,
+            max_cost_usd=options.generative_max_cost_usd,
+            cache_dir=options.generative_cache_dir,
+            timeout_s=options.generative_timeout_s,
+            verify_ocr=options.generative_verify_ocr,
+            residual_checker=options.generative_residual_checker,
+            budget=budget,
+        )
+        if not engine.is_configured():
+            # Explicit generative request without credentials: soft-degrade to the
+            # same local fallback auto would use, keeping conversions usable.
+            local_engine = (
+                OpenCvFastInpaintingEngine()
+                if mask_ratio <= options.inpaint_max_area_ratio
+                else WhiteBoxInpaintingEngine()
+            )
+            return local_engine, (
+                f"Requested {requested_engine} but no API key was configured; "
+                f"fell back to {local_engine.name} (mask area ratio {mask_ratio:.4f})."
+            )
+        return engine, (
+            f"Selected {requested_engine} engine explicitly (mask area ratio {mask_ratio:.4f}, "
+            f"model {options.generative_model or 'provider-default'}, "
+            f"max_calls={options.generative_max_calls}, "
+            f"max_cost_usd={options.generative_max_cost_usd})."
         )
 
     if mask_ratio > options.inpaint_max_area_ratio:

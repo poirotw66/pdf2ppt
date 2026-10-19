@@ -212,9 +212,15 @@ inpainting/
 
 **目標**：處理 LaMa 也補不好的複雜照片背景，即目前退化為 `white-box` 的最差情境。
 
+> **實作狀態（部分完成）**：`generative-openai` / `generative-gemini` 引擎已落地於
+> `src/pdf2ppt/generative_inpaint/`（見 [`generative-inpaint.md`](./generative-inpaint.md)）。
+> 預設模型為 OpenAI `gpt-image-2` 與 Gemini `gemini-nano-banana-2.1`；含遮罩強制合成、
+> OCR 殘留檢查、呼叫／成本預算、磁碟快取與報告欄位。審框 UI 以引擎下拉選單 + Convert
+> 作為單頁重修入口；獨立 per-region regenerate 按鈕仍待後續。
+
 ### 4.1 可行性結論
 
-Gemini 3.1 Flash-Lite Image 這類模型**可以**接進來，因為既有架構已經解決了兩個主要障礙：
+Gemini / Nano Banana 與 OpenAI GPT Image 這類模型**可以**接進來，因為既有架構已經解決了兩個主要障礙：
 
 - **解析度**：`DEFAULT_LAMA_PATCH_MAX_SIDE_PX = 512`（`inpainting_engines.py:76`），
   patch 路徑本來就不送整頁，512px 的 crop 遠低於該模型 1K 的輸出上限
