@@ -92,8 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--emit-ir",
         type=Path,
         help=(
-            "Write SlideIR JSON (plus a sibling *.assets/ directory for backgrounds and "
-            "cropped images). Can be combined with PPTX output, or used alone with --ir-only."
+            "Write SlideIR JSON (plus a sibling {ir_filename}.assets/ directory for "
+            "backgrounds and cropped images). Can be combined with PPTX output, or used "
+            "alone with --ir-only."
         ),
     )
     parser.add_argument(
