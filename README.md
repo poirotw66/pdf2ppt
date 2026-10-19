@@ -9,6 +9,7 @@ Core pipeline:
 - Native PDF extraction first when text and layout can be recovered directly.
 - PaddleOCR fallback for scanned or image-heavy pages.
 - Post-detection **line box merging** to reduce fragmented title boxes without collapsing multi-column layouts into one giant box.
+- Optional **layout analysis (P2)** for typed regions (title / text / list / figure / table / header-footer), reading order, real PowerPoint bullets, and title-placeholder mapping (`--layout-engine heuristic|ppstructure`; default `heuristic`). See [`docs/layout-analysis.md`](docs/layout-analysis.md).
 - Page classification (`digital`, `scanned`, `hybrid`) to choose the safest rendering path.
 - Conditional background reconstruction for OCR/overlay pages.
 - Style recovery for OCR text, including font size fitting, color estimation, and basic bold detection.
@@ -51,6 +52,11 @@ Core pipeline:
 - **Vector / table nativization (P1):** for digital PDFs, map simple drawings and
   ruled tables to native PowerPoint shapes and tables (`--vector-mode auto` by
   default). See [`docs/vector-nativization.md`](docs/vector-nativization.md).
+- **Layout analysis (P2):** group lines into paragraphs, emit real bullets,
+  map titles to placeholders, crop figures, defer tables to P1, skip
+  headers/footers. Default engine is `heuristic` (no model download); opt into
+  PP-StructureV3 with `--layout-engine ppstructure`. See
+  [`docs/layout-analysis.md`](docs/layout-analysis.md).
 - Generate per-page debug artifacts for OCR masks and background decisions.
 - OCR post-processing: merge adjacent boxes on the same text line by default; opt in to PaddleOCR word-level boxes with `--ocr-return-word-box` for debugging.
 - Show page-level conversion progress in the CLI.
@@ -296,6 +302,9 @@ Main arguments:
 - `--mode`: `editable`, `fidelity`, or `fast`
 - `--vector-mode`: `off`, `auto` (default), or `aggressive` — digital-PDF shape/table nativization ([`docs/vector-nativization.md`](docs/vector-nativization.md))
 - `--vector-complexity-threshold`: max drawings considered in `auto` mode (default `80`)
+- `--layout-engine`: `heuristic` (default, CI-safe) or `ppstructure` (opt-in PP-StructureV3 / LayoutDetection; soft-falls back to heuristic). See [`docs/layout-analysis.md`](docs/layout-analysis.md)
+- `--layout-model-root`: DocLayout / Structure model directory, default `./model`
+- `--keep-header-footer`: keep header/footer/page-number regions (skipped by default)
 - `--lang`: PaddleOCR language code, default `ch`
 - `--ocr-model-root`: local PaddleOCR model directory, default `./model`
 - `--enable-doc-orientation`: enable PaddleOCR document orientation classification; disabled by default for faster startup and OCR
@@ -397,6 +406,9 @@ The JSON report includes:
   shapes/tables by default (`--vector-mode auto`). Gradients, patterns, clips,
   and very dense illustrations still fall back to the raster background; use
   `--vector-mode off` to disable. Details: [`docs/vector-nativization.md`](docs/vector-nativization.md).
+- Layout analysis defaults to `heuristic` so CI/CPU paths need no model
+  download. Opt into PP-StructureV3 with `--layout-engine ppstructure`. Details:
+  [`docs/layout-analysis.md`](docs/layout-analysis.md).
 - Bold and color restoration for OCR text are heuristic-based.
 
 ## Development

@@ -15,3 +15,11 @@ P1 vector/table fixtures (in addition to the Phase 0 inpaint set):
 - `flowchart.pdf` — flowchart boxes and connectors
 - `merged_table.pdf` — bordered table with a merged header cell
 - `geometric_chart.pdf` / `table.pdf` — also used as vector-nativization targets
+
+P2 layout fixtures (plus optional `*.layout.json` ground truth for grouping metrics):
+
+- `bullet_list.pdf` — multi-level bullets, title, footer/page number
+- `title_two_column.pdf` — title + two body columns
+- `figure_caption.pdf` — embedded figure with caption under it
+- `scanned_bullet_list.pdf` — rasterized bullet slide (OCR / scanned path)
+- `flowchart.pdf` — also used to assert side-by-side labels do not merge

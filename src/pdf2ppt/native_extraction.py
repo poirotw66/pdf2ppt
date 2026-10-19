@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import io
 from collections import Counter
+from dataclasses import dataclass, field
 from statistics import median
 
 import fitz
 from PIL import Image
 
-from .models import ImagePlacement, TextBlock
+from .models import BBox, ImagePlacement, TextBlock
+
+
+@dataclass(slots=True)
+class _NativeLinePayload:
+    text: str
+    bbox: BBox
+    fonts: list[str] = field(default_factory=list)
+    sizes: list[float] = field(default_factory=list)
+    colors: list[str] = field(default_factory=list)
+    bold: bool = False
+    italic: bool = False
 
 
 def extract_native_text_blocks(page: fitz.Page) -> tuple[list[TextBlock], list[tuple[float, float, float, float]]]:
@@ -15,6 +27,7 @@ def extract_native_text_blocks(page: fitz.Page) -> tuple[list[TextBlock], list[t
     text_blocks: list[TextBlock] = []
     image_boxes: list[tuple[float, float, float, float]] = []
     order = 1
+    page_width = float(page.rect.width) or 1.0
 
     for block_index, block in enumerate(text_dict.get("blocks", [])):
         block_type = block.get("type")
@@ -26,15 +39,14 @@ def extract_native_text_blocks(page: fitz.Page) -> tuple[list[TextBlock], list[t
         if block_type != 0:
             continue
 
-        lines: list[str] = []
-        span_fonts: list[str] = []
-        span_sizes: list[float] = []
-        span_colors: list[str] = []
-        bold = False
-        italic = False
-
+        line_payloads: list[_NativeLinePayload] = []
         for line in block.get("lines", []):
             parts: list[str] = []
+            span_fonts: list[str] = []
+            span_sizes: list[float] = []
+            span_colors: list[str] = []
+            bold = False
+            italic = False
             for span in line.get("spans", []):
                 text = str(span.get("text", ""))
                 if not text.strip():
@@ -51,32 +63,113 @@ def extract_native_text_blocks(page: fitz.Page) -> tuple[list[TextBlock], list[t
                 if isinstance(color, int):
                     span_colors.append(int_to_hex_color(color))
             line_text = "".join(parts).strip()
-            if line_text:
-                lines.append(line_text)
+            if not line_text:
+                continue
+            line_bbox_raw = line.get("bbox", block.get("bbox", (0, 0, 0, 0)))
+            line_bbox = (
+                float(line_bbox_raw[0]),
+                float(line_bbox_raw[1]),
+                float(line_bbox_raw[2]),
+                float(line_bbox_raw[3]),
+            )
+            line_payloads.append(
+                _NativeLinePayload(
+                    text=line_text,
+                    bbox=line_bbox,
+                    fonts=span_fonts,
+                    sizes=span_sizes,
+                    colors=span_colors,
+                    bold=bold,
+                    italic=italic,
+                )
+            )
 
-        text = "\n".join(lines).strip()
-        if not text:
+        if not line_payloads:
             continue
 
-        text_blocks.append(
-            TextBlock(
-                id=f"native_{page.number + 1}_{block_index}",
-                source="native",
-                bbox=bbox,
-                text=text,
-                confidence=0.99,
-                font_family=most_common_or_none(span_fonts),
-                font_size=median(span_sizes) if span_sizes else None,
-                font_color=most_common_or_none(span_colors),
-                bold=bold,
-                italic=italic,
-                reading_order=order,
+        # Split horizontally disjoint same-band lines (flowchart labels) into
+        # separate text boxes; keep vertically stacked lines as one paragraph.
+        for group_index, group in enumerate(_group_native_line_payloads(line_payloads, page_width=page_width)):
+            texts = [item.text for item in group]
+            boxes = [item.bbox for item in group]
+            fonts: list[str] = []
+            sizes: list[float] = []
+            colors: list[str] = []
+            bold = False
+            italic = False
+            for item in group:
+                fonts.extend(item.fonts)
+                sizes.extend(item.sizes)
+                colors.extend(item.colors)
+                bold = bold or item.bold
+                italic = italic or item.italic
+            group_bbox = (
+                min(box[0] for box in boxes),
+                min(box[1] for box in boxes),
+                max(box[2] for box in boxes),
+                max(box[3] for box in boxes),
             )
-        )
-        order += 1
+            text_blocks.append(
+                TextBlock(
+                    id=f"native_{page.number + 1}_{block_index}_{group_index}",
+                    source="native",
+                    bbox=group_bbox,
+                    text="\n".join(texts).strip(),
+                    confidence=0.99,
+                    font_family=most_common_or_none(fonts),
+                    font_size=median(sizes) if sizes else None,
+                    font_color=most_common_or_none(colors),
+                    bold=bold,
+                    italic=italic,
+                    reading_order=order,
+                )
+            )
+            order += 1
 
     assign_block_roles(text_blocks)
     return sort_text_blocks(text_blocks), image_boxes
+
+
+def _group_native_line_payloads(
+    line_payloads: list[_NativeLinePayload],
+    *,
+    page_width: float,
+) -> list[list[_NativeLinePayload]]:
+    """Group stacked paragraph lines; keep wide horizontal gaps as separate boxes."""
+
+    if not line_payloads:
+        return []
+    groups: list[list[_NativeLinePayload]] = [[line_payloads[0]]]
+    for payload in line_payloads[1:]:
+        previous = groups[-1][-1]
+        prev_bbox = previous.bbox
+        cand_bbox = payload.bbox
+        prev_height = max(1.0, prev_bbox[3] - prev_bbox[1])
+        cand_height = max(1.0, cand_bbox[3] - cand_bbox[1])
+        vertical_overlap = max(
+            0.0,
+            min(prev_bbox[3], cand_bbox[3]) - max(prev_bbox[1], cand_bbox[1]),
+        )
+        min_height = min(prev_height, cand_height)
+        same_band = min_height > 0 and vertical_overlap / min_height >= 0.45
+        horizontal_gap = max(
+            0.0,
+            max(cand_bbox[0] - prev_bbox[2], prev_bbox[0] - cand_bbox[2]),
+        )
+        if same_band and horizontal_gap > page_width * 0.08:
+            groups.append([payload])
+            continue
+        # Vertically stacked continuation of the same column/paragraph.
+        vertical_gap = cand_bbox[1] - prev_bbox[3]
+        avg_height = (prev_height + cand_height) / 2.0
+        if (not same_band) and 0 <= vertical_gap <= avg_height * 1.35:
+            groups[-1].append(payload)
+            continue
+        if same_band and horizontal_gap <= avg_height * 0.6:
+            groups[-1].append(payload)
+            continue
+        groups.append([payload])
+    return groups
 
 
 def extract_image_elements(

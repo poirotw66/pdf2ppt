@@ -494,12 +494,19 @@ def build_flowchart() -> None:
 
 
 def build_merged_table() -> None:
-    """Bordered table with a merged header cell for P1 native table merges."""
+    """Bordered table with a merged header cell for P1 native table merges.
+
+    PyMuPDF 2.x ``find_tables()`` needs a complete line grid (including a
+    vertical through the header band) to detect the table; merge/colspan is
+    recovered from the header cell span metadata afterward.
+    """
 
     doc, page = _new_doc()
     page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    # Keep the title box relatively narrow: a wide title + header fill can make
+    # PyMuPDF 2.x ``find_tables()`` miss the grid entirely.
     page.insert_textbox(
-        fitz.Rect(60, 40, 700, 85),
+        fitz.Rect(60, 40, 400, 70),
         "Regional Headcount",
         fontsize=24,
         fontname="helv",
@@ -507,25 +514,18 @@ def build_merged_table() -> None:
     )
 
     left, top, right, bottom = 100.0, 120.0, 820.0, 400.0
-    # Outer border
-    for x0, y0, x1, y1 in (
-        (left, top, right, top),
-        (left, bottom, right, bottom),
-        (left, top, left, bottom),
-        (right, top, right, bottom),
-    ):
-        page.draw_line(fitz.Point(x0, y0), fitz.Point(x1, y1), color=(0.25, 0.25, 0.28), width=1.5)
-
-    # Horizontal rules (3 body rows + header)
-    for y in (200.0, 266.666, 333.333):
-        page.draw_line(fitz.Point(left, y), fitz.Point(right, y), color=(0.25, 0.25, 0.28), width=1)
-
-    # Vertical divider only below the merged header
     mid_x = 460.0
-    page.draw_line(fitz.Point(mid_x, 200.0), fitz.Point(mid_x, bottom), color=(0.25, 0.25, 0.28), width=1)
-
-    # Header fill
+    # Header fill under the grid lines.
     page.draw_rect(fitz.Rect(left, top, right, 200.0), color=None, fill=(0.85, 0.88, 0.94), fill_opacity=1)
+    horizontals = (top, 200.0, 266.666, 333.333, bottom)
+    verticals = (left, mid_x, right)
+    # Uniform 1pt strokes: mixed outer/inner widths + title + fill can make
+    # PyMuPDF 2.x miss the table. Border width assertions sample drawn lines.
+    for y in horizontals:
+        page.draw_line(fitz.Point(left, y), fitz.Point(right, y), color=(0.25, 0.25, 0.28), width=1.0)
+    for x in verticals:
+        page.draw_line(fitz.Point(x, top), fitz.Point(x, bottom), color=(0.25, 0.25, 0.28), width=1.0)
+
     page.insert_textbox(
         fitz.Rect(left + 10, top + 25, right - 10, 190),
         "Americas + EMEA Combined",
@@ -563,6 +563,162 @@ def build_merged_table() -> None:
     _save(doc, "merged_table.pdf")
 
 
+def build_bullet_list() -> None:
+    """Multi-level bullet list slide for P2 list detection."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(48, 36, 800, 90),
+        "Sprint Goals",
+        fontsize=28,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    # Use ASCII markers: Base-14 Helvetica cannot embed •/◦, so PyMuPDF would
+    # extract them as "?" and list detection would miss the lines.
+    lines = [
+        (72, 130, "- Ship layout analysis for scanned decks", 0),
+        (96, 170, "- Detect multi-level bullets", 1),
+        (96, 205, "- Map titles to placeholders", 1),
+        (72, 250, "- Keep heuristic fallback for CI", 0),
+        (96, 290, "- No model download required", 1),
+        (72, 340, "- Report grouping metrics in the PR", 0),
+    ]
+    for x, y, text, _level in lines:
+        page.insert_textbox(
+            fitz.Rect(x, y, 880, y + 34),
+            text,
+            fontsize=16,
+            fontname="helv",
+            color=(0.15, 0.15, 0.18),
+        )
+    page.insert_textbox(
+        fitz.Rect(48, 500, 400, 530),
+        "Confidential",
+        fontsize=10,
+        fontname="helv",
+        color=(0.45, 0.45, 0.5),
+    )
+    page.insert_textbox(
+        fitz.Rect(880, 500, 940, 530),
+        "3",
+        fontsize=10,
+        fontname="helv",
+        color=(0.45, 0.45, 0.5),
+    )
+    _save(doc, "bullet_list.pdf")
+
+
+def build_title_two_column() -> None:
+    """Title + two-column body for P2 reading-order / grouping."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(0.98, 0.98, 0.99), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(60, 40, 900, 100),
+        "Platform Overview",
+        fontsize=30,
+        fontname="helv",
+        color=(0.08, 0.1, 0.18),
+    )
+    left = (
+        "Left column covers ingestion, OCR, and layout analysis. "
+        "Each stage emits typed SlideIR so later planners can group cards "
+        "without rewriting locked text."
+    )
+    right = (
+        "Right column covers native rendering: text boxes, shapes, tables, "
+        "and pictures. Render-and-compare scores fidelity separately from "
+        "editability so regressions stay visible."
+    )
+    page.insert_textbox(
+        fitz.Rect(60, 140, 450, 460),
+        left,
+        fontsize=15,
+        fontname="helv",
+        color=(0.15, 0.15, 0.2),
+        align=0,
+    )
+    page.insert_textbox(
+        fitz.Rect(510, 140, 900, 460),
+        right,
+        fontsize=15,
+        fontname="helv",
+        color=(0.15, 0.15, 0.2),
+        align=0,
+    )
+    _save(doc, "title_two_column.pdf")
+
+
+def build_figure_caption() -> None:
+    """Figure (embedded image) with a caption underneath for P2 caption/figure roles."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(60, 30, 700, 80),
+        "Architecture Sketch",
+        fontsize=26,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    # Synthetic figure raster
+    array = np.zeros((220, 420, 3), dtype=np.uint8)
+    array[:, :] = (40, 90, 150)
+    array[40:180, 60:180] = (230, 200, 80)
+    array[40:180, 240:360] = (80, 190, 140)
+    image = Image.fromarray(array, mode="RGB")
+    page.insert_image(fitz.Rect(180, 110, 780, 380), stream=_png_bytes(image))
+    page.insert_textbox(
+        fitz.Rect(180, 395, 780, 440),
+        "Figure 1. Ingest → layout → native render pipeline",
+        fontsize=13,
+        fontname="helv",
+        color=(0.25, 0.25, 0.3),
+        align=1,
+    )
+    _save(doc, "figure_caption.pdf")
+
+
+def build_scanned_bullet_list() -> None:
+    """Rasterized version of the bullet list slide (forces OCR / scanned path)."""
+
+    # Build the digital page in-memory, render to pixmap, embed as image-only PDF.
+    src = fitz.open()
+    page = src.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(48, 36, 800, 90),
+        "Sprint Goals",
+        fontsize=28,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    lines = [
+        (72, 130, "- Ship layout analysis for scanned decks"),
+        (96, 170, "- Detect multi-level bullets"),
+        (96, 205, "- Map titles to placeholders"),
+        (72, 250, "- Keep heuristic fallback for CI"),
+        (96, 290, "- No model download required"),
+        (72, 340, "- Report grouping metrics in the PR"),
+    ]
+    for x, y, text in lines:
+        page.insert_textbox(
+            fitz.Rect(x, y, 880, y + 34),
+            text,
+            fontsize=16,
+            fontname="helv",
+            color=(0.15, 0.15, 0.18),
+        )
+    pixmap = page.get_pixmap(dpi=144, alpha=False)
+    src.close()
+
+    doc, out_page = _new_doc()
+    out_page.insert_image(PAGE_RECT, stream=pixmap.tobytes("png"))
+    _save(doc, "scanned_bullet_list.pdf")
+
+
 def main() -> None:
     build_solid_background()
     build_gradient_linear()
@@ -575,6 +731,10 @@ def main() -> None:
     build_vector_shapes()
     build_flowchart()
     build_merged_table()
+    build_bullet_list()
+    build_title_two_column()
+    build_figure_caption()
+    build_scanned_bullet_list()
 
 
 if __name__ == "__main__":

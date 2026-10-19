@@ -44,6 +44,10 @@ lint = [
 # on the host; there is no extra pip package. Declared here so installers see
 # the optional group name next to cpu/gpu/lint.
 slide-quality = []
+# P2 layout analysis (docs/layout-analysis.md). Neural layout uses the same
+# paddleocr stack as OCR (LayoutDetection / PP-StructureV3); the heuristic
+# engine needs no extra packages. Declared for discoverability.
+layout = []
 
 [project.scripts]
 pdf2ppt = "pdf2ppt.cli:main"

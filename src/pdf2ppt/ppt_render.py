@@ -13,7 +13,7 @@ from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Emu, Pt
 
-from .models import ShapeElement, TableElement, TextBlock
+from .models import ShapeElement, TableElement, TextBlock, TextParagraph
 from .text_style import (
     choose_measurement_font,
     classify_text_script,
@@ -55,7 +55,16 @@ def render_page_to_slide(
     slide_width_pt: float,
     slide_height_pt: float,
 ) -> None:
-    slide = presentation.slides.add_slide(blank_layout)
+    title_block = _select_title_placeholder_block(page_result.text_blocks)
+    slide_layout = blank_layout
+    if title_block is not None:
+        title_layout = _find_title_only_layout(presentation)
+        if title_layout is not None:
+            slide_layout = title_layout
+        else:
+            title_block = None
+
+    slide = presentation.slides.add_slide(slide_layout)
     scale_x = slide_width_pt / page_result.width_pt
     scale_y = slide_height_pt / page_result.height_pt
 
@@ -90,8 +99,81 @@ def render_page_to_slide(
     for table in sorted(getattr(page_result, "table_elements", None) or [], key=lambda item: item.z_order):
         add_table_element(slide, table, scale_x=scale_x, scale_y=scale_y)
 
+    if title_block is not None and slide.shapes.title is not None:
+        _apply_title_placeholder(
+            slide.shapes.title,
+            title_block,
+            scale_x=scale_x,
+            scale_y=scale_y,
+        )
+
     for block in sorted(page_result.text_blocks, key=lambda item: item.reading_order):
+        if title_block is not None and block.id == title_block.id:
+            continue
         add_text_block(slide, block, scale_x=scale_x, scale_y=scale_y)
+
+
+def _find_title_only_layout(presentation: Any) -> Any | None:
+    """Return the Title Only layout when present (title placeholder, no body).
+
+    Broader layouts (Title Slide, Section Header, Title and Content) add empty
+    body placeholders that hurt fidelity and confuse shape-index assumptions,
+    so they are intentionally not used.
+    """
+
+    layouts = list(getattr(presentation, "slide_layouts", []) or [])
+    for layout in layouts:
+        name = str(getattr(layout, "name", "") or "").strip().lower()
+        if name == "title only":
+            return layout
+    return None
+
+
+def _select_title_placeholder_block(text_blocks: list[TextBlock]) -> TextBlock | None:
+    for block in text_blocks:
+        if getattr(block, "use_title_placeholder", False):
+            return block
+    return None
+
+
+def _apply_title_placeholder(title_shape: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> None:
+    """Fill the title placeholder and move it onto the PDF title bbox (keeps SSIM stable)."""
+
+    left, top, width, height = bbox_to_shape_geometry(block.bbox, scale_x, scale_y)
+    try:
+        title_shape.left = left
+        title_shape.top = top
+        title_shape.width = max(width, Emu(1))
+        title_shape.height = max(height, Emu(1))
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not reposition title placeholder to PDF bbox", exc_info=True)
+
+    text_frame = title_shape.text_frame
+    text_frame.clear()
+    text_frame.word_wrap = True
+    text_frame.margin_left = 0
+    text_frame.margin_right = 0
+    text_frame.margin_top = 0
+    text_frame.margin_bottom = 0
+    paragraph = text_frame.paragraphs[0]
+    paragraph.alignment = PP_ALIGN.LEFT
+    run = paragraph.add_run()
+    run.text = block.text.splitlines()[0] if block.text else ""
+    script = classify_text_script(block.text)
+    font_family = block.font_family or default_font_family(script)
+    run.font.name = font_family
+    _set_run_typefaces(
+        run,
+        default_ppt_typefaces(script)
+        if not block.font_family
+        else {"latin": font_family, "ea": font_family, "cs": font_family},
+    )
+    if block.font_size:
+        run.font.size = Pt(max(6.0, block.font_size * min(scale_x, scale_y)))
+    if block.font_color:
+        run.font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
+    run.font.bold = True if block.bold or block.block_role == "title" else block.bold
+    run.font.italic = block.italic
 
 
 def add_shape_element(slide: Any, shape: ShapeElement, *, scale_x: float, scale_y: float) -> None:
@@ -483,28 +565,79 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
     text_frame.clear()
     _set_text_frame_wrap(text_frame, should_wrap=should_wrap_text_block(block))
 
-    paragraph = text_frame.paragraphs[0]
-    paragraph.alignment = PP_ALIGN.LEFT
-    run = paragraph.add_run()
-    run.text = block.text
-    used_fit_text = fit_text_frame(text_frame, block, scale_x=scale_x, scale_y=scale_y)
-    _set_text_frame_wrap(text_frame, should_wrap=should_wrap_text_block(block))
+    paragraphs = list(getattr(block, "paragraphs", None) or [])
+    if not paragraphs:
+        paragraphs = [TextParagraph(text=block.text)]
 
-    font = run.font
-    font.name = resolved_font_family
-    _set_run_typefaces(run, resolved_typefaces)
-    if used_fit_text and block.source == "ocr" and "\n" not in block.text:
-        safe_font_size_pt = resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y)
-        current_font_size_pt = getattr(font.size, "pt", None) if font.size is not None else None
-        if current_font_size_pt is None or current_font_size_pt > safe_font_size_pt:
-            font.size = Pt(safe_font_size_pt)
-    if block.font_size and not used_fit_text:
-        font.size = Pt(resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y))
-    if block.font_color:
-        font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
-    font.bold = block.bold
-    font.italic = block.italic
-    _set_paragraph_end_typefaces(paragraph, resolved_typefaces)
+    used_fit_text = False
+    primary_run: Any | None = None
+    for index, item in enumerate(paragraphs):
+        paragraph = text_frame.paragraphs[0] if index == 0 else text_frame.add_paragraph()
+        paragraph.alignment = PP_ALIGN.LEFT
+        # Clear leftover runs on the first paragraph after text_frame.clear().
+        if index == 0 and hasattr(paragraph, "clear"):
+            paragraph.clear()
+        run = paragraph.add_run()
+        run.text = item.text
+        if index == 0:
+            primary_run = run
+        font = run.font
+        font.name = resolved_font_family
+        _set_run_typefaces(run, resolved_typefaces)
+        font_size = item.font_size if item.font_size is not None else block.font_size
+        font_color = item.font_color if item.font_color is not None else block.font_color
+        bold = block.bold if item.bold is None else item.bold
+        italic = block.italic if item.italic is None else item.italic
+        if font_size and len(paragraphs) == 1:
+            # Single-paragraph boxes still go through OCR fit below.
+            pass
+        elif font_size:
+            font.size = Pt(max(6.0, font_size * min(scale_x, scale_y)))
+        if font_color:
+            font.color.rgb = RGBColor.from_string(font_color.lstrip("#"))
+        font.bold = bold
+        font.italic = italic
+        if item.list_level is not None:
+            set_paragraph_bullet(paragraph, level=max(0, int(item.list_level)))
+        _set_paragraph_end_typefaces(paragraph, resolved_typefaces)
+
+    if len(paragraphs) == 1 and paragraphs[0].list_level is None and primary_run is not None:
+        used_fit_text = fit_text_frame(text_frame, block, scale_x=scale_x, scale_y=scale_y)
+        _set_text_frame_wrap(text_frame, should_wrap=should_wrap_text_block(block))
+        font = primary_run.font
+        font.name = resolved_font_family
+        _set_run_typefaces(primary_run, resolved_typefaces)
+        if used_fit_text and block.source == "ocr" and "\n" not in block.text:
+            safe_font_size_pt = resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y)
+            current_font_size_pt = getattr(font.size, "pt", None) if font.size is not None else None
+            if current_font_size_pt is None or current_font_size_pt > safe_font_size_pt:
+                font.size = Pt(safe_font_size_pt)
+        if block.font_size and not used_fit_text:
+            font.size = Pt(resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y))
+        if block.font_color:
+            font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
+        font.bold = block.bold
+        font.italic = block.italic
+
+
+def set_paragraph_bullet(paragraph: Any, *, level: int = 0) -> None:
+    """Emit a real PowerPoint bullet (not a literal • character in the run text)."""
+
+    paragraph.level = max(0, min(int(level), 8))
+    try:
+        p_pr = paragraph._p.get_or_add_pPr()  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        return
+    for child in list(p_pr):
+        tag = child.tag
+        if tag in {qn("a:buFont"), qn("a:buChar"), qn("a:buNone"), qn("a:buAutoNum"), qn("a:buBlip")}:
+            p_pr.remove(child)
+    bu_font = OxmlElement("a:buFont")
+    bu_font.set("typeface", "Arial")
+    bu_char = OxmlElement("a:buChar")
+    bu_char.set("char", "•")
+    p_pr.append(bu_font)
+    p_pr.append(bu_char)
 
 
 def fit_text_frame(text_frame: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> bool:

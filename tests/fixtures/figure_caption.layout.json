@@ -1,0 +1,18 @@
+{
+  "page_number": 1,
+  "expect_title": true,
+  "paragraphs": [
+    {
+      "id": "title",
+      "bbox": [60, 30, 700, 80],
+      "text": "Architecture Sketch",
+      "role": "title"
+    },
+    {
+      "id": "caption",
+      "bbox": [180, 395, 780, 440],
+      "text": "Figure 1. Ingest → layout → native render pipeline",
+      "role": "caption"
+    }
+  ]
+}

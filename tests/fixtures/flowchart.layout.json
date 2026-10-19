@@ -1,0 +1,36 @@
+{
+  "page_number": 1,
+  "expect_title": true,
+  "paragraphs": [
+    {
+      "id": "title",
+      "bbox": [40, 24, 600, 70],
+      "text": "Onboarding Flow",
+      "role": "title"
+    },
+    {
+      "id": "start",
+      "bbox": [128, 138, 312, 182],
+      "text": "Start",
+      "role": "body"
+    },
+    {
+      "id": "collect",
+      "bbox": [128, 268, 312, 312],
+      "text": "Collect Info",
+      "role": "body"
+    },
+    {
+      "id": "verify",
+      "bbox": [528, 268, 752, 312],
+      "text": "Verify",
+      "role": "body"
+    },
+    {
+      "id": "done",
+      "bbox": [328, 418, 552, 462],
+      "text": "Done",
+      "role": "body"
+    }
+  ]
+}

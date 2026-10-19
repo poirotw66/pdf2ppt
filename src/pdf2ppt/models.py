@@ -19,6 +19,56 @@ ShapeKind = Literal[
 ]
 ArrowDirection = Literal["left", "right", "up", "down"]
 VectorMode = Literal["off", "auto", "aggressive"]
+LayoutEngineName = Literal["heuristic", "ppstructure"]
+# Normalized layout region labels used across heuristic + PP-StructureV3 paths.
+LayoutLabel = Literal[
+    "title",
+    "paragraph_title",
+    "text",
+    "list",
+    "figure",
+    "table",
+    "header",
+    "footer",
+    "page_number",
+    "caption",
+    "formula",
+    "chart",
+    "seal",
+    "sidebar",
+    "other",
+]
+
+
+@dataclass(slots=True)
+class TextParagraph:
+    """One paragraph inside a text box (supports real PowerPoint bullets)."""
+
+    text: str
+    list_level: int | None = None  # None = plain; 0+ = bullet indent level
+    bold: bool | None = None
+    italic: bool | None = None
+    font_size: float | None = None
+    font_color: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class LayoutRegion:
+    """Typed page region from layout analysis (heuristic or PP-StructureV3)."""
+
+    id: str
+    label: LayoutLabel
+    bbox: BBox
+    confidence: float = 1.0
+    reading_order: int = 0
+    raw_label: str = ""
+    engine: str = "heuristic"
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -37,6 +87,13 @@ class TextBlock:
     block_role: str = "body"
     image_bbox: BBox | None = None
     image_polygon: Polygon | None = None
+    # P2 layout fields -------------------------------------------------
+    layout_region_id: str | None = None
+    layout_label: str | None = None
+    # When set, ppt_render emits these as separate paragraphs (bullets).
+    paragraphs: list[TextParagraph] | None = None
+    # Prefer mapping into the slide title placeholder when True.
+    use_title_placeholder: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -171,8 +228,11 @@ class PageResult:
     shape_elements: list[ShapeElement] = field(default_factory=list)
     table_elements: list[TableElement] = field(default_factory=list)
     group_elements: list[GroupElement] = field(default_factory=list)
+    layout_regions: list[LayoutRegion] = field(default_factory=list)
     vector_mode: str | None = None
     vector_fallback_reason: str | None = None
+    layout_engine: str | None = None
+    layout_fallback_reason: str | None = None
 
     def to_report_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -188,11 +248,16 @@ class PageResult:
             "shape_elements": [shape.to_dict() for shape in self.shape_elements],
             "table_elements": [table.to_dict() for table in self.table_elements],
             "group_elements": [group.to_dict() for group in self.group_elements],
+            "layout_regions": [region.to_dict() for region in self.layout_regions],
         }
         if self.vector_mode is not None:
             payload["vector_mode"] = self.vector_mode
         if self.vector_fallback_reason is not None:
             payload["vector_fallback_reason"] = self.vector_fallback_reason
+        if self.layout_engine is not None:
+            payload["layout_engine"] = self.layout_engine
+        if self.layout_fallback_reason is not None:
+            payload["layout_fallback_reason"] = self.layout_fallback_reason
         return payload
 
 

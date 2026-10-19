@@ -398,6 +398,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--layout-engine",
+        choices=("heuristic", "ppstructure"),
+        default="heuristic",
+        help=(
+            "Layout analysis for text-box grouping, bullets, titles, figures, and reading "
+            "order. 'heuristic' (default) uses geometric rules and needs no model download "
+            "(CI/CPU-safe). 'ppstructure' opts into PaddleOCR PP-StructureV3 / LayoutDetection "
+            "and soft-falls back to heuristic when the model is unavailable. See "
+            "docs/layout-analysis.md."
+        ),
+    )
+    parser.add_argument(
+        "--layout-model-root",
+        type=Path,
+        default=Path("model"),
+        help="Directory for PP-StructureV3 / DocLayout model storage. Defaults to ./model.",
+    )
+    parser.add_argument(
+        "--keep-header-footer",
+        action="store_true",
+        help=(
+            "Keep header/footer/page-number layout regions as text boxes. "
+            "By default they are skipped for consistent slide cleanup."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -466,6 +492,9 @@ def main(argv: list[str] | None = None) -> int:
         generative_max_attempts=args.generative_max_attempts,
         vector_mode=args.vector_mode,
         vector_complexity_threshold=args.vector_complexity_threshold,
+        layout_engine=args.layout_engine,
+        layout_model_root=args.layout_model_root,
+        layout_skip_header_footer=not args.keep_header_footer,
     )
     report = convert_pdf(options, progress_callback=build_progress_callback(sys.stderr))
     print(
