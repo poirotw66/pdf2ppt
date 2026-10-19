@@ -238,8 +238,8 @@ def format_summary(report: dict[str, Any]) -> str:
     lines.append(f"  ({report['cjk_font_note']})")
 
     header = (
-        f"{'fixture':28s} {'ssim':>7s} {'mae':>8s} {'edgeF1':>7s} "
-        f"{'txtF1':>7s} {'edit':>7s} {'raster%':>8s} {'native':>6s}"
+        f"{'fixture':28s} {'ssim':>7s} {'mae':>8s} {'inpMAE':>8s} {'bndMAE':>8s} "
+        f"{'edgeF1':>7s} {'txtF1':>7s} {'edit':>7s} {'raster%':>8s} {'native':>6s}"
     )
     lines.append(header)
     lines.append("-" * len(header))
@@ -255,6 +255,20 @@ def format_summary(report: dict[str, Any]) -> str:
         # Fixtures are single-page today; still average for robustness.
         ssim = sum(page["fidelity"]["ssim"] for page in pages) / len(pages)
         mae = sum(page["fidelity"]["pixel_mae"] for page in pages) / len(pages)
+        inpaint_values = [
+            page["fidelity"]["inpaint_region_mae"]
+            for page in pages
+            if page["fidelity"].get("inpaint_region_mae") is not None
+        ]
+        boundary_values = [
+            page["fidelity"]["inpaint_boundary_mae"]
+            for page in pages
+            if page["fidelity"].get("inpaint_boundary_mae") is not None
+        ]
+        inpaint_str = f"{sum(inpaint_values) / len(inpaint_values):8.2f}" if inpaint_values else f"{'n/a':>8s}"
+        boundary_str = (
+            f"{sum(boundary_values) / len(boundary_values):8.2f}" if boundary_values else f"{'n/a':>8s}"
+        )
         edge = sum(page["fidelity"]["edge_f1"] for page in pages) / len(pages)
         text_values = [page["fidelity"]["text_f1"] for page in pages if page["fidelity"]["text_f1"] is not None]
         text_str = f"{sum(text_values) / len(text_values):.3f}" if text_values else "n/a"
@@ -262,8 +276,8 @@ def format_summary(report: dict[str, Any]) -> str:
         raster = sum(page["editability"]["raster_background_area_ratio"] for page in pages) / len(pages)
         native = sum(page["editability"]["native_object_count"] for page in pages) / len(pages)
         lines.append(
-            f"{case['name']:28s} {ssim:7.4f} {mae:8.2f} {edge:7.4f} "
-            f"{text_str:>7s} {edit:7.4f} {raster * 100:7.2f}% {native:6.1f}"
+            f"{case['name']:28s} {ssim:7.4f} {mae:8.2f} {inpaint_str} {boundary_str} "
+            f"{edge:7.4f} {text_str:>7s} {edit:7.4f} {raster * 100:7.2f}% {native:6.1f}"
         )
 
     summary = report.get("summary") or {}
@@ -275,6 +289,8 @@ def format_summary(report: dict[str, Any]) -> str:
             "summary: "
             f"ssim={fidelity.get('ssim_mean')}  "
             f"mae={fidelity.get('pixel_mae_mean')}  "
+            f"inpaint_mae={fidelity.get('inpaint_region_mae_mean')}  "
+            f"boundary_mae={fidelity.get('inpaint_boundary_mae_mean')}  "
             f"edge_f1={fidelity.get('edge_f1_mean')}  "
             f"text_f1={fidelity.get('text_f1_mean')}  "
             f"edit={editability.get('score_mean')}  "

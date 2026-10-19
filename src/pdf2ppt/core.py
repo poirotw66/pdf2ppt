@@ -59,10 +59,13 @@ class ConversionOptions:
     use_doc_unwarping: bool = False
     inpaint_engine: str = "opencv-fast"
     inpaint_padding_px: int = 6
-    # Extra morphological dilation after mask build to cover anti-aliased glyph
-    # fringes that sit just outside OCR/PDF boxes. Default 2 is intentional and
-    # slightly expands the inpainted region for all engines (see bench_slide).
+    # Absolute floor for mask dilation (px). Combined with line-height-scaled
+    # dilation below so AA glyph fringes stay covered for all engines.
     inpaint_mask_dilate_px: int = 2
+    # Dilate each text box by this fraction of its line height (clamped).
+    inpaint_mask_dilate_line_height_ratio: float = 0.18
+    inpaint_mask_dilate_min_px: int = 2
+    inpaint_mask_dilate_max_px: int = 16
     inpaint_max_area_ratio: float = 0.12
     inpaint_model_root: Path | None = Path("model/lama")
     inpaint_onnx_cuda_provider: str = "CUDAExecutionProvider"
@@ -84,6 +87,11 @@ class ConversionOptions:
     generative_cache_dir: Path | None = Path(".pdf2ppt_cache/generative_inpaint")
     generative_timeout_s: float = 120.0
     generative_verify_ocr: bool = True
+    # Reject generative patches whose low-frequency content differs from the
+    # local opencv-fast result by more than this masked MAE (0–255). Set <0 to disable.
+    generative_low_freq_mae_threshold: float = 4.0
+    # Retry once on nondeterministic copyright/recitation blocks before local fallback.
+    generative_safety_block_retries: int = 1
     generative_budget: Any | None = field(default=None, repr=False)
     generative_residual_checker: Any | None = field(default=None, repr=False)
 

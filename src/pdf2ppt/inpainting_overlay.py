@@ -32,6 +32,7 @@ from .inpainting_masks import (
     build_refined_text_mask_for_inpainting,
     build_text_mask_image,
     compute_mask_crop_box,
+    dilate_text_mask_by_line_height,
     estimate_background_complexity,
     estimate_low_texture_mask_fraction,
     mask_area_ratio,
@@ -91,12 +92,19 @@ def render_overlay_background(
         padding_px=mask_padding_px,
     )
     mask_image = mask_refinement.mask_image
-    dilate_px = max(0, int(options.inpaint_mask_dilate_px))
-    if dilate_px > 0:
-        # Cover anti-aliased glyph fringes that sit just outside tight text boxes.
-        mask_array = np.array(mask_image, dtype=np.uint8)
-        kernel = np.ones((dilate_px * 2 + 1, dilate_px * 2 + 1), dtype=np.uint8)
-        mask_image = Image.fromarray(cv2.dilate(mask_array, kernel, iterations=1), mode="L")
+    # Line-height-scaled dilation (all engines). ``inpaint_mask_dilate_px`` is an
+    # absolute floor/override so AA glyph tops/bottoms stay covered even when OCR
+    # boxes are vertically tight. Adjacent dilated islands are morphologically
+    # merged so generative patch counts do not explode.
+    mask_image = dilate_text_mask_by_line_height(
+        mask_image,
+        text_blocks,
+        page_rect,
+        ratio=options.inpaint_mask_dilate_line_height_ratio,
+        min_px=options.inpaint_mask_dilate_min_px,
+        max_px=options.inpaint_mask_dilate_max_px,
+        floor_px=max(0, int(options.inpaint_mask_dilate_px)),
+    )
     mask_array = np.array(mask_image, dtype=np.uint8)
     if np.count_nonzero(mask_array) == 0:
         logger.info("No overlay mask pixels were generated for background rendering")
@@ -1009,6 +1017,8 @@ def resolve_background_inpainting_engine(
             verify_ocr=options.generative_verify_ocr,
             residual_checker=options.generative_residual_checker,
             budget=budget,
+            low_freq_mae_threshold=options.generative_low_freq_mae_threshold,
+            safety_block_retries=options.generative_safety_block_retries,
         )
         if not engine.is_configured():
             # Explicit generative request without credentials: soft-degrade to the

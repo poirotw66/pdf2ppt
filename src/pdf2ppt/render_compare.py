@@ -22,7 +22,9 @@ degrade to ``null`` when unavailable, matching ``scripts/bench_inpaint.py``.
 
 from __future__ import annotations
 
+import io
 import logging
+import math
 import os
 import re
 import shutil
@@ -45,6 +47,9 @@ logger = logging.getLogger(__name__)
 RASTER_BACKGROUND_AREA_RATIO = 0.85
 DEFAULT_COMPARE_DPI = 144
 DEFAULT_LIBREOFFICE_TIMEOUT_SECONDS = 180
+# Padding around PDF text boxes when scoring inpaint-region MAE (matches bench reports).
+DEFAULT_INPAINT_REGION_MASK_PADDING_PX = 8
+DEFAULT_INPAINT_BOUNDARY_RING_PX = 4
 CJK_FONT_FAMILY = "Noto Sans CJK TC"
 # Common install locations for Noto Sans CJK (TC / SC / JP share a TTC on Debian).
 CJK_FONT_CANDIDATES = (
@@ -76,8 +81,13 @@ class FidelityMetrics:
     text_precision: float | None = None
     text_recall: float | None = None
     text_f1_note: str | None = None
+    # Inpaint-region metrics vs a text-free PDF background ground truth.
+    inpaint_region_mae: float | None = None
+    inpaint_boundary_mae: float | None = None
+    inpaint_mask_pixel_count: int | None = None
+    inpaint_region_note: str | None = None
 
-    def to_dict(self) -> dict[str, float | str | None]:
+    def to_dict(self) -> dict[str, float | str | int | None]:
         return asdict(self)
 
 
@@ -264,6 +274,202 @@ def compute_pixel_error(reference: Image.Image, candidate: Image.Image) -> dict[
         "pixel_mae": round(mae, 4),
         "pixel_mse": round(mse, 4),
         "pixel_mae_normalized": round(mae / 255.0, 6),
+    }
+
+
+def compute_masked_pixel_mae(
+    reference: Image.Image,
+    candidate: Image.Image,
+    mask_image: Image.Image,
+) -> dict[str, float | int]:
+    """Mean absolute RGB error inside a binary mask (0–255 scale)."""
+
+    ref = _to_rgb_array(reference)
+    hyp = _to_rgb_array(resize_to_match(reference, candidate))
+    mask = np.array(mask_image.convert("L"), dtype=np.uint8)
+    if mask.shape[:2] != ref.shape[:2]:
+        mask = np.array(
+            mask_image.convert("L").resize((ref.shape[1], ref.shape[0]), Image.Resampling.NEAREST),
+            dtype=np.uint8,
+        )
+    binary = mask > 0
+    count = int(np.count_nonzero(binary))
+    if count == 0:
+        return {"masked_mae": 0.0, "mask_pixel_count": 0}
+    diff = np.abs(ref.astype(np.float64) - hyp.astype(np.float64))
+    mae = float(np.mean(diff[binary]))
+    return {"masked_mae": round(mae, 4), "mask_pixel_count": count}
+
+
+def compute_boundary_ring_mae(
+    reference: Image.Image,
+    candidate: Image.Image,
+    mask_image: Image.Image,
+    *,
+    ring_px: int = DEFAULT_INPAINT_BOUNDARY_RING_PX,
+) -> float:
+    """MAE on a thin ring just inside the mask boundary (seam visibility proxy)."""
+
+    mask = np.array(mask_image.convert("L"), dtype=np.uint8)
+    ref = _to_rgb_array(reference)
+    if mask.shape[:2] != ref.shape[:2]:
+        mask = np.array(
+            mask_image.convert("L").resize((ref.shape[1], ref.shape[0]), Image.Resampling.NEAREST),
+            dtype=np.uint8,
+        )
+    binary = (mask > 0).astype(np.uint8)
+    if not np.any(binary) or ring_px <= 0:
+        return 0.0
+    eroded = cv2.erode(binary, np.ones((3, 3), dtype=np.uint8), iterations=max(1, ring_px))
+    ring = (binary > 0) & (eroded == 0)
+    if not np.any(ring):
+        ring = binary > 0
+    ring_image = Image.fromarray((ring.astype(np.uint8) * 255), mode="L")
+    return float(compute_masked_pixel_mae(reference, candidate, ring_image)["masked_mae"])
+
+
+def render_text_free_background(
+    pdf_path: Path,
+    page_index: int,
+    *,
+    dpi: float = DEFAULT_COMPARE_DPI,
+) -> Image.Image:
+    """Rasterize a page after deleting the text layer (images/graphics kept)."""
+
+    with fitz.open(pdf_path) as document:
+        if page_index < 0 or page_index >= document.page_count:
+            raise RenderCompareError(f"Page index {page_index} out of range for {pdf_path}")
+        # Work on a copy so the caller's file is never mutated on disk.
+        scratch = fitz.open()
+        scratch.insert_pdf(document, from_page=page_index, to_page=page_index)
+        page = scratch[0]
+        # Transparent fill so we remove glyphs without painting white boxes over
+        # gradients / photos (images + line art are preserved).
+        page.add_redact_annot(page.rect, fill=False)  # type: ignore[arg-type]
+        page.apply_redactions(
+            images=fitz.PDF_REDACT_IMAGE_NONE,
+            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+        )
+        scale = dpi / 72.0
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+        scratch.close()
+        return image
+
+
+def build_pdf_text_mask(
+    pdf_path: Path,
+    page_index: int,
+    *,
+    image_size: tuple[int, int],
+    padding_px: int = DEFAULT_INPAINT_REGION_MASK_PADDING_PX,
+) -> Image.Image:
+    """Binary mask covering native PDF text boxes, optionally padded in pixels."""
+
+    from PIL import ImageDraw
+
+    mask = Image.new("L", image_size, 0)
+    draw = ImageDraw.Draw(mask)
+    with fitz.open(pdf_path) as document:
+        if page_index < 0 or page_index >= document.page_count:
+            raise RenderCompareError(f"Page index {page_index} out of range for {pdf_path}")
+        page = document[page_index]
+        page_rect = page.rect
+        scale_x = image_size[0] / max(1.0, float(page_rect.width))
+        scale_y = image_size[1] / max(1.0, float(page_rect.height))
+        for block in page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT).get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            x0, y0, x1, y1 = block["bbox"]
+            box = (
+                int(math.floor(x0 * scale_x)) - padding_px,
+                int(math.floor(y0 * scale_y)) - padding_px,
+                int(math.ceil(x1 * scale_x)) + padding_px,
+                int(math.ceil(y1 * scale_y)) + padding_px,
+            )
+            clamped = (
+                max(0, box[0]),
+                max(0, box[1]),
+                min(image_size[0], box[2]),
+                min(image_size[1], box[3]),
+            )
+            if clamped[2] > clamped[0] and clamped[3] > clamped[1]:
+                draw.rectangle(clamped, fill=255)
+    return mask
+
+
+def extract_pptx_background_image(pptx_path: Path, *, slide_index: int = 0) -> Image.Image | None:
+    """Return the largest picture on a slide (typically the full-page overlay background)."""
+
+    presentation = Presentation(str(pptx_path))
+    if slide_index < 0 or slide_index >= len(presentation.slides):
+        return None
+    slide = presentation.slides[slide_index]
+    slide_width = int(presentation.slide_width or 1)
+    slide_height = int(presentation.slide_height or 1)
+    slide_area = float(max(1, slide_width) * max(1, slide_height))
+    best_image: Image.Image | None = None
+    best_ratio = 0.0
+    for shape in slide.shapes:
+        if shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
+            continue
+        area_ratio = _shape_area_emu(shape) / slide_area
+        if area_ratio < best_ratio:
+            continue
+        try:
+            blob = shape.image.blob
+        except Exception:  # pragma: no cover - defensive
+            continue
+        image = Image.open(io.BytesIO(blob)).convert("RGB")
+        best_image = image
+        best_ratio = area_ratio
+    return best_image
+
+
+def compute_inpaint_region_metrics(
+    pdf_path: Path,
+    pptx_path: Path,
+    *,
+    page_index: int = 0,
+    dpi: float = DEFAULT_COMPARE_DPI,
+    mask_padding_px: int = DEFAULT_INPAINT_REGION_MASK_PADDING_PX,
+    boundary_ring_px: int = DEFAULT_INPAINT_BOUNDARY_RING_PX,
+) -> dict[str, float | int | str | None]:
+    """Compare PPTX background vs text-free PDF GT inside the text mask."""
+
+    try:
+        gt = render_text_free_background(pdf_path, page_index, dpi=dpi)
+    except Exception as error:  # pragma: no cover - defensive
+        return {
+            "inpaint_region_mae": None,
+            "inpaint_boundary_mae": None,
+            "inpaint_mask_pixel_count": None,
+            "inpaint_region_note": f"text-free GT failed: {type(error).__name__}: {error}",
+        }
+    background = extract_pptx_background_image(pptx_path, slide_index=page_index)
+    if background is None:
+        return {
+            "inpaint_region_mae": None,
+            "inpaint_boundary_mae": None,
+            "inpaint_mask_pixel_count": None,
+            "inpaint_region_note": "no full-page background picture in PPTX",
+        }
+    background = resize_to_match(gt, background)
+    mask = build_pdf_text_mask(pdf_path, page_index, image_size=gt.size, padding_px=mask_padding_px)
+    masked = compute_masked_pixel_mae(gt, background, mask)
+    if int(masked["mask_pixel_count"]) == 0:
+        return {
+            "inpaint_region_mae": 0.0,
+            "inpaint_boundary_mae": 0.0,
+            "inpaint_mask_pixel_count": 0,
+            "inpaint_region_note": "no native PDF text boxes for inpaint mask",
+        }
+    boundary = compute_boundary_ring_mae(gt, background, mask, ring_px=boundary_ring_px)
+    return {
+        "inpaint_region_mae": float(masked["masked_mae"]),
+        "inpaint_boundary_mae": round(boundary, 4),
+        "inpaint_mask_pixel_count": int(masked["mask_pixel_count"]),
+        "inpaint_region_note": None,
     }
 
 
@@ -562,6 +768,10 @@ def compare_page_images(
     reference_text: str | None = None,
     candidate_text: str | None = None,
     text_f1_note: str | None = None,
+    inpaint_region_mae: float | None = None,
+    inpaint_boundary_mae: float | None = None,
+    inpaint_mask_pixel_count: int | None = None,
+    inpaint_region_note: str | None = None,
 ) -> FidelityMetrics:
     """Compute fidelity metrics for one reference/candidate image pair."""
 
@@ -591,6 +801,10 @@ def compare_page_images(
         text_precision=text_precision,
         text_recall=text_recall,
         text_f1_note=note,
+        inpaint_region_mae=inpaint_region_mae,
+        inpaint_boundary_mae=inpaint_boundary_mae,
+        inpaint_mask_pixel_count=inpaint_mask_pixel_count,
+        inpaint_region_note=inpaint_region_note,
     )
 
 
@@ -618,6 +832,12 @@ def summarize_slide_scores(pages: list[SlideQualityScore]) -> dict[str, Any]:
             "pixel_mse_mean": round(sum(page.fidelity.pixel_mse for page in pages) / len(pages), 4),
             "edge_f1_mean": round(sum(page.fidelity.edge_f1 for page in pages) / len(pages), 6),
             "text_f1_mean": _mean_optional([page.fidelity.text_f1 for page in pages]),
+            "inpaint_region_mae_mean": _mean_optional(
+                [page.fidelity.inpaint_region_mae for page in pages]
+            ),
+            "inpaint_boundary_mae_mean": _mean_optional(
+                [page.fidelity.inpaint_boundary_mae for page in pages]
+            ),
         },
         "editability": {
             "score_mean": round(sum(page.editability.score for page in pages) / len(pages), 6),
@@ -688,12 +908,28 @@ def evaluate_pptx_against_pdf(
         else:
             text_note = "OCR unavailable; text F1 not computed"
 
+        inpaint_metrics = compute_inpaint_region_metrics(
+            pdf_path,
+            pptx_path,
+            page_index=index,
+            dpi=dpi,
+        )
+        region_mae = inpaint_metrics["inpaint_region_mae"]
+        boundary_mae = inpaint_metrics["inpaint_boundary_mae"]
+        mask_count = inpaint_metrics["inpaint_mask_pixel_count"]
+        region_note = inpaint_metrics["inpaint_region_note"]
         fidelity = compare_page_images(
             reference,
             candidate,
             reference_text=reference_text if candidate_text is not None else None,
             candidate_text=candidate_text,
             text_f1_note=text_note,
+            inpaint_region_mae=float(region_mae) if isinstance(region_mae, (int, float)) else None,
+            inpaint_boundary_mae=(
+                float(boundary_mae) if isinstance(boundary_mae, (int, float)) else None
+            ),
+            inpaint_mask_pixel_count=int(mask_count) if isinstance(mask_count, int) else None,
+            inpaint_region_note=str(region_note) if isinstance(region_note, str) else None,
         )
         pages.append(
             SlideQualityScore(

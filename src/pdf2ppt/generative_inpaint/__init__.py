@@ -18,7 +18,13 @@ from __future__ import annotations
 
 from .budget import GenerativeBudget, GenerativeCallRecord
 from .cache import GenerativeInpaintCache, compute_generative_cache_key
+from .blend import (
+    DEFAULT_LOW_FREQ_MAE_THRESHOLD,
+    low_frequency_masked_mae,
+    seamless_clone_masked_edit,
+)
 from .engine import (
+    DEFAULT_SAFETY_BLOCK_RETRIES,
     GENERATIVE_INPAINT_ENGINES,
     GenerativeInpaintingEngine,
     composite_masked_edit,
@@ -45,6 +51,8 @@ from .safety import (
 
 __all__ = [
     "DEFAULT_IMAGE_RESTORE_PROMPT",
+    "DEFAULT_LOW_FREQ_MAE_THRESHOLD",
+    "DEFAULT_SAFETY_BLOCK_RETRIES",
     "DEFAULT_TEXT_REMOVAL_PROMPT",
     "GEMINI_DEFAULT_MODEL",
     "GENERATIVE_INPAINT_ENGINES",
@@ -63,7 +71,9 @@ __all__ = [
     "compute_generative_cache_key",
     "create_provider",
     "is_expected_safety_block_message",
+    "low_frequency_masked_mae",
     "provider_name_for_engine",
     "residual_text_overlap_ratio",
+    "seamless_clone_masked_edit",
     "uses_generative_inpaint_engine",
 ]

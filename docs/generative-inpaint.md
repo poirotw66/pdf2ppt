@@ -57,11 +57,24 @@ stretching long thin patches.
 
 ### Text mask dilation
 
-`--inpaint-mask-dilate-px` (default **2**) applies an extra morphological dilate
-after the text mask is built so anti-aliased glyph fringes just outside OCR/PDF
-boxes are covered. This affects **all** inpaint engines (not only generative) and
-slightly expands the inpainted region; `scripts/bench_slide.py` baselines may
-shift by a small amount versus padding-only masks. Set `0` to disable.
+Each text box is dilated by a fraction of its **line height** (default **18%**,
+clamped by `--inpaint-mask-dilate-min-px` / `--inpaint-mask-dilate-max-px`).
+`--inpaint-mask-dilate-px` (default **2**) is an **absolute floor** on top of
+that, so anti-aliased glyph tops/bottoms stay covered when OCR boxes are
+vertically tight. Adjacent dilated islands are morphologically closed/merged
+before cropping so generative patch counts do not explode (e.g. solid pages
+staying on a single full-page call). This applies to **all** inpaint engines.
+
+### Poisson blending and low-frequency fallback
+
+Generative patches are composited with `cv2.seamlessClone` (NORMAL_CLONE on
+low-texture masks, MIXED_CLONE otherwise) instead of a single mean color match
+on a 4px ring. After compositing, pdf2ppt compares a **heavily blurred**
+generative result to the local `opencv-fast` fill inside the mask. If that
+low-frequency MAE exceeds `--generative-low-freq-mae-threshold` (default
+**4.0** on a 0–255 scale; set negative to disable), the generative patch is
+rejected and the opencv-fast result is kept. The conversion report records
+these under `low_freq_fallbacks`.
 
 ## Safety, budget, and cache
 
@@ -73,8 +86,11 @@ After each generative patch:
 - **API / network errors** also fall back to local inpainting for that patch.
 - **Copyright / recitation / safety blocks** (e.g. Gemini
   `copyright/recitation`) are classified as **expected safety-block fallbacks**,
-  not API outages. Official responses that say the request is not charged are
-  recorded at **0 USD**.
+  not API outages. Because these blocks are nondeterministic, pdf2ppt **retries
+  once** by default (`--generative-safety-block-retries`, default 1) before
+  falling back. Official responses that say the request is not charged are
+  recorded at **0 USD**; retries are counted in `safety_block_retries`.
+- **Low-frequency quality gate** (above) can also fall back to opencv-fast.
 - Local fallback results are **re-composited through the mask** so unmasked
   pixels stay unchanged even when `opencv-fast` would otherwise touch them.
 - **Per-run budget**: `--generative-max-calls` (default 50) and
@@ -82,9 +98,10 @@ After each generative patch:
 - **Disk cache**: keyed by `sha256(provider + model + prompt + image + mask)` under
   `--generative-cache-dir` (default `.pdf2ppt_cache/generative_inpaint`).
 
-Call counts, cache hits, fallbacks (split into `safety_block_fallbacks` vs
-`api_error_fallbacks`), estimated USD cost, and `cost_uncertain` are written into
-the conversion report under `generative_inpaint`.
+Call counts, cache hits, fallbacks (`safety_block_fallbacks`,
+`api_error_fallbacks`, `low_freq_fallbacks`), `safety_block_retries`, estimated
+USD cost, and `cost_uncertain` are written into the conversion report under
+`generative_inpaint`.
 
 ## Cost and non-determinism
 
@@ -94,7 +111,9 @@ the conversion report under `generative_inpaint`.
   rates in `src/pdf2ppt/generative_inpaint/pricing.py` (single config place):
   - Gemini Nano Banana 2.1: **$1.50 / M** input, **$7.50 / M** text+thinking
     output, **$30 / M** image output (≈ **$0.038** per typical 1K edit when
-    usage is missing).
+    usage is missing). When `output_tokens_by_modality` lists only image tokens
+    but `total_output_tokens` is higher, the leftover (~256 text tokens) is
+    priced at the text+thinking rate.
   - OpenAI GPT Image edits: text/image input + image output token rates in the
     same module; flat **$0.08** estimate when usage is missing.
 - Failed calls that may still have been billed (e.g. HTTP 200 with a missing

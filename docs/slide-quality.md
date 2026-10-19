@@ -34,6 +34,14 @@ on mask cleanliness. The slide evaluator scores the **end-to-end PPTX**.
 3. **Edge F1** — Canny edge-map precision/recall F1.
 4. **Text F1** — bag-of-tokens F1: native PDF text (ground truth) vs. OCR on the
    rendered slide. `null` when OCR is unavailable (`--ocr off` / auto-degrade).
+5. **Inpaint-region MAE** — build a text-free ground-truth background by deleting
+   the PDF text layer with PyMuPDF redaction (images/graphics kept), extract the
+   full-page background picture from the PPTX, and compute MAE **only inside**
+   the native text mask (default pad 8px). Also reports **boundary-ring MAE**
+   (thin ring just inside the mask) as a seam-visibility proxy. Useful for
+   comparing inpaint engines on smooth gradients where full-slide SSIM is
+   insensitive. `null` when the PPTX has no background picture or the page has
+   no native text boxes.
 
 ### Editability (from PPTX structure; no render required)
 
@@ -104,7 +112,14 @@ JSON layout (abbreviated):
       "pages": [
         {
           "page_number": 1,
-          "fidelity": { "ssim": 0.91, "pixel_mae": 4.2, "edge_f1": 0.55, "text_f1": null },
+          "fidelity": {
+            "ssim": 0.91,
+            "pixel_mae": 4.2,
+            "edge_f1": 0.55,
+            "text_f1": null,
+            "inpaint_region_mae": 0.49,
+            "inpaint_boundary_mae": 1.2
+          },
           "editability": { "text_box_count": 3, "raster_background_area_ratio": 1.0, "score": 0.31 }
         }
       ]
@@ -121,9 +136,11 @@ Diff two runs by comparing `summary` and per-fixture `pages[*].fidelity` /
 
 The `slide-quality` job in `.github/workflows/ci.yml` is **report-only**
 (`continue-on-error: true`). It installs LibreOffice + Noto CJK, runs the
-metric tests, and attempts a short fixture bench with `--ocr off`. Failures
-there never block merge; the blocking `backend` job still runs the pure metric
-unit tests (LibreOffice cases skip automatically).
+metric tests, and attempts a short fixture bench with `--ocr off`. The printed
+summary and uploaded JSON include `inpaint_region_mae` / `inpaint_boundary_mae`
+alongside SSIM and full-frame MAE. Failures there never block merge; the
+blocking `backend` job still runs the pure metric unit tests (LibreOffice cases
+skip automatically).
 
 ## Interface stability for future backends
 

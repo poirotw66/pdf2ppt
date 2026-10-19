@@ -6,12 +6,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
 from PIL import Image
 
 from ..inpainting_engines.base import (
     DEFAULT_LAMA_PATCH_CONTEXT_PADDING_PX,
+    DEFAULT_LAMA_PATCH_MAX_COMPONENTS_FOR_FULL_PAGE,
     DEFAULT_LAMA_PATCH_MERGE_GAP_PX,
     BackgroundInpaintingEngine,
     BackgroundInpaintingError,
@@ -22,6 +22,13 @@ from ..inpainting_engines.patching import (
     _build_lama_patch_groups,
     _prepare_lama_working_mask,
     _should_use_lama_patch_inpaint,
+)
+from .blend import (
+    DEFAULT_LOW_FREQ_BLUR_SIGMA,
+    DEFAULT_LOW_FREQ_MAE_THRESHOLD,
+    GENERATIVE_COMPOSITE_EDGE_FEATHER_PX,
+    low_frequency_masked_mae,
+    seamless_clone_masked_edit,
 )
 from .budget import GenerativeBudget, GenerativeCallRecord
 from .cache import GenerativeInpaintCache, compute_generative_cache_key
@@ -42,9 +49,7 @@ GENERATIVE_ENGINE_PROVIDER = {
     "generative-openai": "openai",
     "generative-gemini": "gemini",
 }
-# Feather + mild boundary color match reduce visible rectangle seams on gradients.
-GENERATIVE_COMPOSITE_EDGE_FEATHER_PX = 3
-GENERATIVE_BOUNDARY_COLOR_MATCH_RING_PX = 4
+DEFAULT_SAFETY_BLOCK_RETRIES = 1
 
 
 def uses_generative_inpaint_engine(engine: str) -> bool:
@@ -55,43 +60,6 @@ def provider_name_for_engine(engine: str) -> str | None:
     return GENERATIVE_ENGINE_PROVIDER.get(engine)
 
 
-def _color_match_restored_to_boundary(
-    source_rgb: np.ndarray,
-    restored_rgb: np.ndarray,
-    mask_array: np.ndarray,
-    *,
-    ring_px: int = GENERATIVE_BOUNDARY_COLOR_MATCH_RING_PX,
-) -> np.ndarray:
-    """Nudge restored colors near the mask edge toward the source boundary ring.
-
-    Softens faint rectangle seams on gradients without recoloring the whole
-    patched interior (which would erase intentional fill differences).
-    """
-
-    binary = (mask_array > 0).astype(np.uint8)
-    if not np.any(binary) or ring_px <= 0:
-        return restored_rgb
-    kernel = np.ones((ring_px * 2 + 1, ring_px * 2 + 1), dtype=np.uint8)
-    dilated = cv2.dilate(binary, kernel, iterations=1)
-    outside_ring = (dilated > 0) & (binary == 0)
-    if not np.any(outside_ring):
-        return restored_rgb
-    eroded = cv2.erode(binary, np.ones((3, 3), dtype=np.uint8), iterations=1)
-    inner_edge = (binary > 0) & (eroded == 0)
-    if not np.any(inner_edge):
-        return restored_rgb
-    src_mean = source_rgb[outside_ring].astype(np.float32).mean(axis=0)
-    dst_mean = restored_rgb[inner_edge].astype(np.float32).mean(axis=0)
-    delta = src_mean - dst_mean
-    distance = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    # Full correction at the mask edge; fade to zero ``ring_px`` inward.
-    weight = np.clip(1.0 - distance / float(ring_px), 0.0, 1.0)
-    weight[binary == 0] = 0.0
-    matched = restored_rgb.astype(np.float32)
-    matched += delta.reshape(1, 1, 3) * weight[..., None]
-    return np.clip(matched, 0, 255).astype(np.uint8)
-
-
 def composite_masked_edit(
     source: Image.Image,
     edited: Image.Image,
@@ -100,7 +68,12 @@ def composite_masked_edit(
     edge_feather_px: int = GENERATIVE_COMPOSITE_EDGE_FEATHER_PX,
     color_match: bool = True,
 ) -> Image.Image:
-    """Force unmasked pixels to stay identical to ``source`` after a generative edit."""
+    """Force unmasked pixels to stay identical to ``source`` after a generative edit.
+
+    When ``color_match`` is True (default), the generative patch is Poisson-blended
+    into the source via ``cv2.seamlessClone``. Otherwise a plain feathered composite
+    is used.
+    """
 
     source_rgb = np.array(source.convert("RGB"), dtype=np.uint8)
     edited_rgb = np.array(edited.convert("RGB"), dtype=np.uint8)
@@ -112,13 +85,19 @@ def composite_masked_edit(
         mask_image = mask_image.convert("L").resize(source.size, Image.Resampling.NEAREST)
         mask_array = np.array(mask_image, dtype=np.uint8)
     if color_match:
-        edited_rgb = _color_match_restored_to_boundary(source_rgb, edited_rgb, mask_array)
-    blended = _composite_lama_restoration_with_inference_mask(
-        source_rgb,
-        edited_rgb,
-        mask_array,
-        edge_feather_px=edge_feather_px,
-    )
+        blended = seamless_clone_masked_edit(
+            source_rgb,
+            edited_rgb,
+            mask_array,
+            edge_feather_px=edge_feather_px,
+        )
+    else:
+        blended = _composite_lama_restoration_with_inference_mask(
+            source_rgb,
+            edited_rgb,
+            mask_array,
+            edge_feather_px=edge_feather_px,
+        )
     result = Image.fromarray(blended, mode="RGB")
     assert_unmasked_pixels_unchanged(source, result, mask_image)
     return result
@@ -144,6 +123,9 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         budget: GenerativeBudget | None = None,
         prompt: str | None = None,
         transport: Any | None = None,
+        low_freq_mae_threshold: float = DEFAULT_LOW_FREQ_MAE_THRESHOLD,
+        low_freq_blur_sigma: float = DEFAULT_LOW_FREQ_BLUR_SIGMA,
+        safety_block_retries: int = DEFAULT_SAFETY_BLOCK_RETRIES,
     ) -> None:
         resolved_provider: GenerativeImageEditProvider
         if isinstance(provider, str):
@@ -170,6 +152,9 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         self._last_debug_note: str | None = None
         self._last_debug_images: dict[str, Image.Image] = {}
         self._local_fallback = OpenCvFastInpaintingEngine()
+        self._low_freq_mae_threshold = float(low_freq_mae_threshold)
+        self._low_freq_blur_sigma = float(low_freq_blur_sigma)
+        self._safety_block_retries = max(0, int(safety_block_retries))
 
     @property
     def budget(self) -> GenerativeBudget:
@@ -198,7 +183,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         working_mask = _prepare_lama_working_mask(mask_array)
         source_rgb = np.array(source, dtype=np.uint8)
 
-        if _should_use_lama_patch_inpaint(working_mask):
+        if self._should_use_patch_inpaint(working_mask):
             result_rgb, note = self._inpaint_by_patches(source_rgb, working_mask)
         else:
             result_rgb, note = self._inpaint_full_or_single(source_rgb, working_mask)
@@ -262,6 +247,26 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         if restored.size != image.size:
             restored = restored.resize(image.size, Image.Resampling.LANCZOS)
         return restored
+
+    def _should_use_patch_inpaint(self, working_mask: np.ndarray) -> bool:
+        """Route to patch mode without exploding call counts after mask dilation.
+
+        Dilation can push the mask area ratio over the LaMa hybrid threshold and
+        fragment nearby text into more generative crops (solid_background: 1→3).
+        Prefer a single full-page call when the post-merge group count stays within
+        the full-page component budget.
+        """
+
+        if not _should_use_lama_patch_inpaint(working_mask):
+            return False
+        patch_groups = _build_lama_patch_groups(
+            working_mask,
+            context_padding_px=DEFAULT_LAMA_PATCH_CONTEXT_PADDING_PX,
+            merge_gap_px=DEFAULT_LAMA_PATCH_MERGE_GAP_PX,
+        )
+        if len(patch_groups) <= DEFAULT_LAMA_PATCH_MAX_COMPONENTS_FOR_FULL_PAGE:
+            return False
+        return True
 
     def _inpaint_full_or_single(
         self,
@@ -344,8 +349,16 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
                 )
             )
             composited = composite_masked_edit(crop_image, cached, mask_image)
-            if self._passes_safety(composited, mask_image):
-                return np.array(composited, dtype=np.uint8), "generative-cache"
+            accepted, reject_path = self._accept_or_reject_generative(
+                crop_source,
+                crop_mask,
+                composited,
+                mask_image,
+            )
+            if accepted is not None:
+                return accepted, "generative-cache"
+            if reject_path is not None:
+                return reject_path
             self._budget.record_fallback("cache rejected by OCR safety", kind="cache_reject")
 
         if not self._budget.can_afford(estimate):
@@ -358,11 +371,37 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
             prompt=self._prompt,
             model=self._model,
         )
-        try:
-            edit_result = self._provider.edit(request)
-        except GenerativeProviderError as error:
-            path = self._handle_provider_error(error, crop_image=crop_image, crop_source=crop_source, crop_mask=crop_mask)
-            return path
+        edit_result = None
+        last_error: GenerativeProviderError | None = None
+        attempts = 1 + self._safety_block_retries
+        for attempt in range(attempts):
+            try:
+                edit_result = self._provider.edit(request)
+                last_error = None
+                break
+            except GenerativeProviderError as error:
+                last_error = error
+                self._record_provider_failure(
+                    error, width=crop_image.width, height=crop_image.height
+                )
+                if error.is_expected_safety_block and attempt + 1 < attempts:
+                    self._budget.record_safety_block_retry(str(error))
+                    logger.info(
+                        "Generative safety block on attempt %s; retrying once: %s",
+                        attempt + 1,
+                        error,
+                    )
+                    continue
+                path = self._finalize_provider_error(
+                    error, crop_source=crop_source, crop_mask=crop_mask
+                )
+                return path
+
+        if edit_result is None:
+            assert last_error is not None
+            return self._finalize_provider_error(
+                last_error, crop_source=crop_source, crop_mask=crop_mask
+            )
 
         self._budget.record_call(
             GenerativeCallRecord(
@@ -379,12 +418,48 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
             )
         )
         composited = composite_masked_edit(crop_image, edit_result.image, mask_image)
-        if not self._passes_safety(composited, mask_image):
-            self._budget.record_fallback("OCR safety rejected generative patch", kind="ocr_safety")
-            return self._local_inpaint(crop_source, crop_mask), "local-ocr-safety"
+        accepted, reject_path = self._accept_or_reject_generative(
+            crop_source,
+            crop_mask,
+            composited,
+            mask_image,
+        )
+        if accepted is not None:
+            self._cache.put(cache_key, edit_result.image.convert("RGB"))
+            return accepted, "generative"
+        if reject_path is not None:
+            return reject_path
+        self._budget.record_fallback("OCR safety rejected generative patch", kind="ocr_safety")
+        return self._local_inpaint(crop_source, crop_mask), "local-ocr-safety"
 
-        self._cache.put(cache_key, edit_result.image.convert("RGB"))
-        return np.array(composited, dtype=np.uint8), "generative"
+    def _accept_or_reject_generative(
+        self,
+        crop_source: np.ndarray,
+        crop_mask: np.ndarray,
+        composited: Image.Image,
+        mask_image: Image.Image,
+    ) -> tuple[np.ndarray | None, tuple[np.ndarray, str] | None]:
+        """Return (accepted_rgb, None), (None, fallback_path), or (None, None) for OCR reject."""
+
+        if not self._passes_safety(composited, mask_image):
+            return None, None
+        local_rgb = self._local_inpaint(crop_source, crop_mask)
+        generative_rgb = np.array(composited, dtype=np.uint8)
+        if self._low_freq_mae_threshold >= 0:
+            mae = low_frequency_masked_mae(
+                generative_rgb,
+                local_rgb,
+                crop_mask,
+                blur_sigma=self._low_freq_blur_sigma,
+            )
+            if mae > self._low_freq_mae_threshold:
+                self._budget.record_fallback(
+                    f"low-frequency MAE {mae:.2f} exceeded threshold "
+                    f"{self._low_freq_mae_threshold:.2f}",
+                    kind="low_freq",
+                )
+                return None, (local_rgb, "local-low-freq")
+        return generative_rgb, None
 
     def _record_provider_failure(
         self,
@@ -425,11 +500,10 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
             )
         )
 
-    def _handle_provider_error(
+    def _finalize_provider_error(
         self,
         error: GenerativeProviderError,
         *,
-        crop_image: Image.Image,
         crop_source: np.ndarray,
         crop_mask: np.ndarray,
     ) -> tuple[np.ndarray, str]:
@@ -441,7 +515,6 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
             logger.warning("Generative provider failed; using local fallback: %s", error)
             kind = "api_error"
             path = "local-api-error"
-        self._record_provider_failure(error, width=crop_image.width, height=crop_image.height)
         self._budget.record_fallback(str(error), kind=kind)
         return self._local_inpaint(crop_source, crop_mask), path
 
@@ -469,6 +542,8 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
 
 
 __all__ = [
+    "DEFAULT_LOW_FREQ_MAE_THRESHOLD",
+    "DEFAULT_SAFETY_BLOCK_RETRIES",
     "GENERATIVE_INPAINT_ENGINES",
     "GenerativeInpaintingEngine",
     "composite_masked_edit",

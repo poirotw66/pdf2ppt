@@ -25,8 +25,12 @@ from pdf2ppt.generative_inpaint import (
     compute_generative_cache_key,
     create_provider,
     is_expected_safety_block_message,
+    low_frequency_masked_mae,
+    seamless_clone_masked_edit,
     uses_generative_inpaint_engine,
 )
+from pdf2ppt.inpainting_masks import dilate_px_for_line_height, dilate_text_mask_by_line_height
+from pdf2ppt.models import TextBlock
 from pdf2ppt.generative_inpaint.aspect import (
     closest_aspect_ratio,
     plan_aspect_pad,
@@ -136,6 +140,26 @@ class GenerativeHelpersTests(unittest.TestCase):
         mask_arr = np.array(mask) > 0
         self.assertFalse(np.array_equal(source_arr[mask_arr], result_arr[mask_arr]))
 
+    def test_seamless_clone_preserves_unmasked_pixels(self) -> None:
+        source = np.zeros((48, 48, 3), dtype=np.uint8)
+        for y in range(48):
+            source[y, :, :] = (y * 4, 80, 200 - y * 2)
+        edited = source.copy()
+        edited[16:32, 16:32] = (40, 40, 40)
+        mask = np.zeros((48, 48), dtype=np.uint8)
+        mask[16:32, 16:32] = 255
+        blended = seamless_clone_masked_edit(source, edited, mask)
+        self.assertTrue(np.array_equal(blended[mask == 0], source[mask == 0]))
+
+    def test_low_frequency_masked_mae_detects_bright_patch(self) -> None:
+        left = np.full((32, 32, 3), 100, dtype=np.uint8)
+        right = np.full((32, 32, 3), 100, dtype=np.uint8)
+        right[8:24, 8:24] = 220
+        mask = np.zeros((32, 32), dtype=np.uint8)
+        mask[8:24, 8:24] = 255
+        mae = low_frequency_masked_mae(left, right, mask, blur_sigma=8.0)
+        self.assertGreater(mae, 40.0)
+
     def test_cache_roundtrip(self) -> None:
         import tempfile
         import uuid
@@ -196,6 +220,18 @@ class AspectAndPricingTests(unittest.TestCase):
         # 1200*1.5 + 300*7.5 + 1120*30 = 1800+2250+33600 = 37650 / 1e6 = 0.03765
         self.assertAlmostEqual(cost.usd, 0.03765, places=5)
 
+    def test_gemini_usage_prices_unlisted_output_text_tokens(self) -> None:
+        usage = {
+            "total_input_tokens": 1200,
+            "total_thought_tokens": 300,
+            "total_output_tokens": 1376,
+            "output_tokens_by_modality": [{"modality": "image", "tokens": 1120}],
+        }
+        cost = cost_from_gemini_usage(usage)
+        assert cost is not None
+        # leftover 256 text tokens at $7.50/M → +0.00192 vs the 1120-only case
+        self.assertAlmostEqual(cost.usd, 0.03957, places=5)
+
     def test_openai_usage_cost(self) -> None:
         usage = {
             "input_tokens": 1000,
@@ -217,6 +253,7 @@ class GenerativeEngineTests(unittest.TestCase):
             budget=budget,
             cache_dir=None,
             verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
         )
         source = _solid_rgb((64, 64), (180, 180, 180))
         # Draw fake "text" pixels inside the mask region so the source differs.
@@ -239,6 +276,7 @@ class GenerativeEngineTests(unittest.TestCase):
             budget=GenerativeBudget(max_calls=5, max_cost_usd=1.0),
             cache_dir=None,
             verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
         )
         source = _solid_rgb((48, 48), (120, 130, 140))
         mask = _rect_mask((48, 48), (10, 10, 30, 30))
@@ -259,6 +297,7 @@ class GenerativeEngineTests(unittest.TestCase):
             budget=GenerativeBudget(max_calls=5, max_cost_usd=1.0),
             cache_dir=None,
             verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
         )
         # Gradient-like source so opencv-fast surface/Telea paths have work to do.
         source_arr = np.zeros((64, 64, 3), dtype=np.uint8)
@@ -285,16 +324,22 @@ class GenerativeEngineTests(unittest.TestCase):
             budget=budget,
             cache_dir=None,
             verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
+            safety_block_retries=1,
         )
         source = _solid_rgb((48, 48), (90, 90, 90))
         mask = _rect_mask((48, 48), (12, 12, 36, 36))
         result = engine.inpaint(source, mask)
         assert_unmasked_pixels_unchanged(source, result, mask)
+        # One free retry then fallback; both blocked attempts cost 0.
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(budget.safety_block_retries, 1)
         self.assertEqual(budget.safety_block_fallbacks, 1)
         self.assertEqual(budget.api_error_fallbacks, 0)
         self.assertEqual(budget.estimated_cost_usd, 0.0)
         payload = budget.to_dict()
         self.assertEqual(payload["safety_block_fallbacks"], 1)
+        self.assertEqual(payload["safety_block_retries"], 1)
         self.assertTrue(any(r.fallback_kind == "safety_block" for r in budget.records))
         self.assertIn("fallback=1", engine.last_debug_note or "")
 
@@ -312,6 +357,7 @@ class GenerativeEngineTests(unittest.TestCase):
             budget=budget,
             cache_dir=None,
             verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
         )
         source = _solid_rgb((32, 32), (10, 20, 30))
         mask = _rect_mask((32, 32), (8, 8, 24, 24))
@@ -332,12 +378,79 @@ class GenerativeEngineTests(unittest.TestCase):
             cache_dir=None,
             verify_ocr=True,
             residual_checker=reject,
+            low_freq_mae_threshold=-1.0,
         )
         source = _solid_rgb((48, 48), (90, 90, 90))
         mask = _rect_mask((48, 48), (12, 12, 36, 36))
         result = engine.inpaint(source, mask)
         assert_unmasked_pixels_unchanged(source, result, mask)
         self.assertGreaterEqual(engine.budget.fallbacks, 1)
+
+    def test_low_freq_gate_falls_back_to_opencv(self) -> None:
+        # Bright solid generative fill vs smooth source → low-freq MAE trips the gate.
+        provider = FakeProvider(fill_color=(240, 240, 240))
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+            low_freq_mae_threshold=4.0,
+        )
+        source_arr = np.zeros((48, 48, 3), dtype=np.uint8)
+        for y in range(48):
+            source_arr[y, :, :] = (y * 3, 40, 200 - y)
+        source_arr[12:36, 12:36] = (255, 0, 0)
+        source = Image.fromarray(source_arr, mode="RGB")
+        mask = _rect_mask((48, 48), (12, 12, 36, 36))
+        result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(budget.low_freq_fallbacks, 1)
+        self.assertIn("low_freq", budget.to_dict())
+        self.assertTrue(any(r.fallback_kind == "low_freq" for r in budget.records))
+
+    def test_safety_block_retry_recovers_on_second_attempt(self) -> None:
+        class FlakySafetyProvider(FakeProvider):
+            def edit(self, request: GenerativeEditRequest) -> GenerativeEditResult:
+                self.calls += 1
+                if self.calls == 1:
+                    raise GenerativeProviderError(
+                        "Image generation blocked due to copyright/recitation. "
+                        "You will not be charged for this request.",
+                        is_expected_safety_block=True,
+                        may_have_been_billed=False,
+                        estimated_cost_usd=0.0,
+                    )
+                edited = Image.new("RGB", request.image.size, self.fill_color)
+                return GenerativeEditResult(
+                    image=edited,
+                    model=self.default_model,
+                    provider_name=self.name,
+                    estimated_cost_usd=self.cost_usd,
+                    cost_source=self.cost_source,
+                    cost_uncertain=self.cost_uncertain,
+                    raw_response_note="recovered",
+                )
+
+        provider = FlakySafetyProvider(fill_color=(12, 12, 12))
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
+            safety_block_retries=1,
+        )
+        source = _solid_rgb((40, 40), (80, 80, 80))
+        mask = _rect_mask((40, 40), (8, 8, 28, 28))
+        result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(budget.safety_block_retries, 1)
+        self.assertEqual(budget.safety_block_fallbacks, 0)
+        self.assertGreater(budget.estimated_cost_usd, 0.0)
 
     def test_budget_exhaustion_skips_provider(self) -> None:
         provider = FakeProvider()
@@ -347,6 +460,7 @@ class GenerativeEngineTests(unittest.TestCase):
             budget=budget,
             cache_dir=None,
             verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
         )
         source = _solid_rgb((40, 40), (50, 60, 70))
         mask = _rect_mask((40, 40), (5, 5, 20, 20))
@@ -362,6 +476,7 @@ class GenerativeEngineTests(unittest.TestCase):
             budget=GenerativeBudget(max_calls=3, max_cost_usd=1.0),
             cache_dir=None,
             verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
         )
         source = _solid_rgb((24, 24), (200, 200, 200))
         restored = engine.restore_image(source)
@@ -651,6 +766,57 @@ class MaskDilateOptionTests(unittest.TestCase):
             report_path=Path("out.report.json"),
         )
         self.assertEqual(options.inpaint_mask_dilate_px, 2)
+        self.assertAlmostEqual(options.inpaint_mask_dilate_line_height_ratio, 0.18)
+        self.assertEqual(options.generative_low_freq_mae_threshold, 4.0)
+        self.assertEqual(options.generative_safety_block_retries, 1)
+
+    def test_line_height_dilate_scales_and_merges(self) -> None:
+        import fitz
+
+        # Two nearby boxes: after line-height dilation they must merge into one
+        # connected component (avoids solid_background 1→3 generative calls).
+        size = (120, 40)
+        base = Image.new("L", size, 0)
+        for x0, x1 in ((10, 40), (48, 78)):
+            for y in range(12, 28):
+                for x in range(x0, x1):
+                    base.putpixel((x, y), 255)
+        blocks = [
+            TextBlock(
+                id="a",
+                source="ocr",
+                bbox=(10, 12, 40, 28),
+                text="left",
+                confidence=0.9,
+                image_bbox=(10, 12, 40, 28),
+            ),
+            TextBlock(
+                id="b",
+                source="ocr",
+                bbox=(48, 12, 78, 28),
+                text="right",
+                confidence=0.9,
+                image_bbox=(48, 12, 78, 28),
+            ),
+        ]
+        self.assertEqual(dilate_px_for_line_height(16, ratio=0.18, min_px=2, max_px=16, floor_px=2), 3)
+        dilated = dilate_text_mask_by_line_height(
+            base,
+            blocks,
+            fitz.Rect(0, 0, 120, 40),
+            ratio=0.18,
+            min_px=2,
+            max_px=16,
+            floor_px=2,
+        )
+        import cv2
+
+        components, _, _, _ = cv2.connectedComponentsWithStats(
+            (np.array(dilated) > 0).astype(np.uint8),
+            8,
+        )
+        # background + one merged foreground component
+        self.assertEqual(components, 2)
 
 
 if __name__ == "__main__":

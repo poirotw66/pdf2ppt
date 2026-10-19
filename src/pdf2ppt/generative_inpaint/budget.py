@@ -17,7 +17,8 @@ class GenerativeCallRecord:
     note: str | None = None
     cost_source: str = "estimate"  # "usage" | "estimate" | "zero"
     cost_uncertain: bool = False
-    # None | "api_error" | "safety_block" | "budget" | "ocr_safety" | "cache_reject"
+    # None | "api_error" | "safety_block" | "budget" | "ocr_safety" |
+    # "cache_reject" | "low_freq"
     fallback_kind: str | None = None
 
 
@@ -30,6 +31,8 @@ class GenerativeBudget:
     fallbacks: int = 0
     safety_block_fallbacks: int = 0
     api_error_fallbacks: int = 0
+    low_freq_fallbacks: int = 0
+    safety_block_retries: int = 0
     estimated_cost_usd: float = 0.0
     cost_uncertain: bool = False
     records: list[GenerativeCallRecord] = field(default_factory=list)
@@ -55,12 +58,35 @@ class GenerativeBudget:
             self.cost_uncertain = True
         self.records.append(record)
 
+    def record_safety_block_retry(self, note: str | None = None) -> None:
+        """Count a free safety-block retry (no fallback yet; another attempt follows)."""
+
+        self.safety_block_retries += 1
+        if note:
+            self.records.append(
+                GenerativeCallRecord(
+                    provider="retry",
+                    model="safety-block",
+                    width=0,
+                    height=0,
+                    estimated_cost_usd=0.0,
+                    cache_hit=False,
+                    success=False,
+                    note=note,
+                    cost_source="zero",
+                    cost_uncertain=False,
+                    fallback_kind="safety_block_retry",
+                )
+            )
+
     def record_fallback(self, note: str | None = None, *, kind: str | None = None) -> None:
         self.fallbacks += 1
         resolved_kind = kind
         if resolved_kind is None and note:
             lowered = note.lower()
-            if any(
+            if "low-frequency" in lowered or "low_freq" in lowered:
+                resolved_kind = "low_freq"
+            elif any(
                 marker in lowered
                 for marker in (
                     "copyright",
@@ -83,6 +109,8 @@ class GenerativeBudget:
             self.safety_block_fallbacks += 1
         elif resolved_kind == "api_error":
             self.api_error_fallbacks += 1
+        elif resolved_kind == "low_freq":
+            self.low_freq_fallbacks += 1
         if note:
             self.records.append(
                 GenerativeCallRecord(
@@ -109,6 +137,8 @@ class GenerativeBudget:
             "fallbacks": self.fallbacks,
             "safety_block_fallbacks": self.safety_block_fallbacks,
             "api_error_fallbacks": self.api_error_fallbacks,
+            "low_freq_fallbacks": self.low_freq_fallbacks,
+            "safety_block_retries": self.safety_block_retries,
             "estimated_cost_usd": round(self.estimated_cost_usd, 6),
             "cost_uncertain": self.cost_uncertain,
             "records": [

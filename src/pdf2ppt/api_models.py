@@ -128,6 +128,9 @@ class ConvertRequest(BaseModel):
     ] = "opencv-fast"
     inpaint_padding_px: int = Field(default=6, ge=0, le=128)
     inpaint_mask_dilate_px: int = Field(default=2, ge=0, le=32)
+    inpaint_mask_dilate_line_height_ratio: float = Field(default=0.18, ge=0.0, le=1.0)
+    inpaint_mask_dilate_min_px: int = Field(default=2, ge=0, le=64)
+    inpaint_mask_dilate_max_px: int = Field(default=16, ge=0, le=64)
     inpaint_max_area_ratio: float = Field(default=0.12, ge=0.0, le=1.0)
     inpaint_model_root: str | None = "model/lama"
     inpaint_onnx_cuda_provider: str = "CUDAExecutionProvider"
@@ -141,6 +144,8 @@ class ConvertRequest(BaseModel):
     generative_cache_dir: str | None = ".pdf2ppt_cache/generative_inpaint"
     generative_timeout_s: float = Field(default=120.0, ge=1.0, le=600.0)
     generative_verify_ocr: bool = True
+    generative_low_freq_mae_threshold: float = Field(default=4.0, ge=-1.0, le=255.0)
+    generative_safety_block_retries: int = Field(default=1, ge=0, le=5)
     write_debug_artifacts: bool = False
 
 
