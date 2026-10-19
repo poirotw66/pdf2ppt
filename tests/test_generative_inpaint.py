@@ -6,6 +6,7 @@ import base64
 import io
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -14,7 +15,9 @@ from PIL import Image
 from pdf2ppt.cli import build_parser
 from pdf2ppt.core import ConversionOptions
 from pdf2ppt.generative_inpaint import (
+    DEFAULT_FLAT_RING_TEXTURE_STD,
     DEFAULT_TEXT_REMOVAL_PROMPT,
+    DEFAULT_TEXTURED_RING_TEXTURE_STD,
     GeminiImageEditProvider,
     GenerativeBudget,
     GenerativeEditRequest,
@@ -24,7 +27,9 @@ from pdf2ppt.generative_inpaint import (
     OpenAIImageEditProvider,
     composite_masked_edit,
     compute_generative_cache_key,
+    context_ring_highpass_std,
     context_ring_luma_std,
+    context_ring_texture_score,
     create_provider,
     effective_low_freq_mae_threshold,
     is_expected_safety_block_message,
@@ -78,6 +83,34 @@ def _textured_rgb(size: tuple[int, int]) -> Image.Image:
         for x in range(width):
             arr[y, x] = ((x * 37 + y * 91) % 255, (x * 17 + y * 53) % 255, (x * 7 + y * 29) % 255)
     return Image.fromarray(arr, mode="RGB")
+
+
+def _linear_gradient_rgb(size: tuple[int, int]) -> Image.Image:
+    width, height = size
+    ramp = np.linspace(20, 220, width, dtype=np.float32)
+    gray = np.tile(ramp, (height, 1))
+    return Image.fromarray(np.stack([gray, gray, gray], axis=-1).astype(np.uint8), mode="RGB")
+
+
+def _radial_gradient_rgb(size: tuple[int, int]) -> Image.Image:
+    width, height = size
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    cy = (height - 1) / 2.0
+    cx = (width - 1) / 2.0
+    radius = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    gray = (radius / max(float(radius.max()), 1e-6) * 235.0).astype(np.float32)
+    return Image.fromarray(np.stack([gray, gray, gray], axis=-1).astype(np.uint8), mode="RGB")
+
+
+def _center_mask(size: tuple[int, int], frac: float = 0.5) -> Image.Image:
+    width, height = size
+    mask = np.zeros((height, width), dtype=np.uint8)
+    y0 = int(height * (1.0 - frac) / 2.0)
+    y1 = int(height * (1.0 + frac) / 2.0)
+    x0 = int(width * (1.0 - frac) / 2.0)
+    x1 = int(width * (1.0 + frac) / 2.0)
+    mask[y0:y1, x0:x1] = 255
+    return Image.fromarray(mask, mode="L")
 
 
 def _engine_kwargs(**overrides: object) -> dict[str, object]:
@@ -218,6 +251,62 @@ class GenerativeHelpersTests(unittest.TestCase):
         mask[8:24, 8:24] = 255
         mae = low_frequency_masked_mae(left, right, mask, blur_sigma=8.0)
         self.assertGreater(mae, 40.0)
+
+    def test_highpass_ring_classifies_gradients_flat_and_noise_textured(self) -> None:
+        size = (128, 128)
+        mask = np.array(_center_mask(size, frac=0.55))
+        linear = np.array(_linear_gradient_rgb(size))
+        radial = np.array(_radial_gradient_rgb(size))
+        flat = np.full((size[1], size[0], 3), 180, dtype=np.uint8)
+        noisy = np.array(_textured_rgb(size))
+
+        # Raw luma std still sees full-ramp gradients as "textured".
+        self.assertGreater(context_ring_luma_std(linear, mask), 20.0)
+        self.assertGreater(context_ring_luma_std(radial, mask), 10.0)
+
+        for source in (linear, radial, flat):
+            score = context_ring_texture_score(source, mask, measure="highpass")
+            self.assertLessEqual(score, DEFAULT_FLAT_RING_TEXTURE_STD)
+            self.assertLessEqual(context_ring_highpass_std(source, mask), DEFAULT_FLAT_RING_TEXTURE_STD)
+
+        textured_score = context_ring_texture_score(noisy, mask, measure="highpass")
+        self.assertGreater(textured_score, DEFAULT_TEXTURED_RING_TEXTURE_STD)
+        self.assertIsNone(
+            effective_low_freq_mae_threshold(4.0, textured_score, textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD)
+        )
+
+    def test_highpass_textured_threshold_calibrated_to_v5_bench(self) -> None:
+        """v5 Gemini bench: flat ≤ 1.04, photo_texture 6.27, geometric patch 14.91."""
+
+        # Soft photo ring must disable the low-freq gate (legacy textured=16 did not).
+        self.assertIsNone(
+            effective_low_freq_mae_threshold(
+                4.0,
+                6.27,
+                textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+                scale_ref_std=2.0,
+            )
+        )
+        # Mid geometric_chart patch (~14.9) is clearly textured → gate off.
+        self.assertIsNone(
+            effective_low_freq_mae_threshold(
+                4.0,
+                14.91,
+                textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+                scale_ref_std=2.0,
+            )
+        )
+        # Gradient rings stay below flat; mid-band (2–4) still scales the gate.
+        self.assertLessEqual(1.04, DEFAULT_FLAT_RING_TEXTURE_STD)
+        scaled = effective_low_freq_mae_threshold(
+            4.0,
+            3.0,
+            textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+            scale_ref_std=2.0,
+        )
+        self.assertIsNotNone(scaled)
+        assert scaled is not None
+        self.assertAlmostEqual(scaled, 6.0, places=5)
 
     def test_cache_roundtrip(self) -> None:
         import tempfile
@@ -541,7 +630,8 @@ class GenerativeEngineTests(unittest.TestCase):
             verify_ocr=False,
             low_freq_mae_threshold=-1.0,
             skip_flat_ring=True,
-            flat_ring_luma_std=4.0,
+            flat_ring_luma_std=DEFAULT_FLAT_RING_TEXTURE_STD,
+            ring_texture_measure="highpass",
         )
         source = _solid_rgb((48, 48), (200, 200, 200))
         source_arr = np.array(source)
@@ -553,7 +643,63 @@ class GenerativeEngineTests(unittest.TestCase):
         self.assertEqual(provider.calls, 0)
         self.assertEqual(budget.billed_calls, 0)
         self.assertEqual(budget.flat_ring_skips, 1)
+        self.assertEqual(budget.ring_texture_measure, "highpass")
+        self.assertEqual(budget.to_dict()["ring_texture_measure"], "highpass")
         self.assertIn("local-flat-ring", engine.last_debug_note or "")
+        self.assertTrue(any("highpass" in (r.note or "") for r in budget.records))
+
+    def test_gradient_rings_skip_api_with_fake_provider(self) -> None:
+        for label, source in (
+            ("linear", _linear_gradient_rgb((96, 96))),
+            ("radial", _radial_gradient_rgb((96, 96))),
+        ):
+            with self.subTest(label=label):
+                provider = FakeProvider(fill_color=(9, 9, 9))
+                budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+                engine = GenerativeInpaintingEngine(
+                    provider=provider,
+                    budget=budget,
+                    cache_dir=None,
+                    verify_ocr=False,
+                    low_freq_mae_threshold=-1.0,
+                    skip_flat_ring=True,
+                    ring_texture_measure="highpass",
+                    flat_ring_luma_std=DEFAULT_FLAT_RING_TEXTURE_STD,
+                )
+                mask = _center_mask((96, 96), frac=0.5)
+                result = engine.inpaint(source, mask)
+                assert_unmasked_pixels_unchanged(source, result, mask)
+                self.assertEqual(provider.calls, 0, msg=label)
+                self.assertEqual(budget.billed_calls, 0, msg=label)
+                self.assertEqual(budget.flat_ring_skips, 1, msg=label)
+                self.assertIn("local-flat-ring", engine.last_debug_note or "")
+
+    def test_photo_like_ring_keeps_generative_path(self) -> None:
+        """Noisy photo-like rings must not flat-skip; fake provider is still called."""
+
+        provider = FakeProvider(fill_color=(40, 50, 60))
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+            low_freq_mae_threshold=-1.0,
+            skip_flat_ring=True,
+            ring_texture_measure="highpass",
+            flat_ring_luma_std=DEFAULT_FLAT_RING_TEXTURE_STD,
+            textured_ring_luma_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+        )
+        source = _textured_rgb((96, 96))
+        mask = _center_mask((96, 96), frac=0.45)
+        score = context_ring_texture_score(np.array(source), np.array(mask), measure="highpass")
+        self.assertGreater(score, DEFAULT_FLAT_RING_TEXTURE_STD)
+        result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(budget.flat_ring_skips, 0)
+        self.assertEqual(budget.billed_calls, 1)
+        self.assertIn("generative", engine.last_debug_note or "")
 
     def test_textured_ring_skips_low_freq_gate(self) -> None:
         # Photo-like surroundings: low-freq MAE would be high, but gate is skipped.
@@ -566,21 +712,113 @@ class GenerativeEngineTests(unittest.TestCase):
             verify_ocr=False,
             low_freq_mae_threshold=4.0,
             skip_flat_ring=True,
-            textured_ring_luma_std=16.0,
+            ring_texture_measure="highpass",
+            textured_ring_luma_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
         )
         source = _textured_rgb((64, 64))
         source_arr = np.array(source)
         source_arr[20:44, 20:44] = (255, 0, 0)
         source = Image.fromarray(source_arr, mode="RGB")
         mask = _rect_mask((64, 64), (20, 20, 44, 44))
-        ring_std = context_ring_luma_std(np.array(source), np.array(mask))
-        self.assertGreaterEqual(ring_std, 16.0)
-        self.assertIsNone(effective_low_freq_mae_threshold(4.0, ring_std))
+        ring_score = context_ring_texture_score(
+            np.array(source), np.array(mask), measure="highpass"
+        )
+        self.assertGreaterEqual(ring_score, DEFAULT_TEXTURED_RING_TEXTURE_STD)
+        self.assertIsNone(
+            effective_low_freq_mae_threshold(
+                4.0, ring_score, textured_std=DEFAULT_TEXTURED_RING_TEXTURE_STD
+            )
+        )
         result = engine.inpaint(source, mask)
         assert_unmasked_pixels_unchanged(source, result, mask)
         self.assertEqual(provider.calls, 1)
         self.assertEqual(budget.low_freq_fallbacks, 0)
         self.assertEqual(budget.billed_calls, 1)
+        self.assertEqual(budget.flat_ring_skips, 0)
+
+    def test_soft_photo_highpass_keeps_generative_despite_low_freq_mae(self) -> None:
+        """v5 photo_texture regression: highpass ≈ 6.27, low-freq MAE ≈ 14.33.
+
+        With the legacy textured threshold (16), the gate stayed on at 12.54 and
+        rejected Gemini after a billed call. Recalibrated textured=4 skips the gate.
+        """
+
+        provider = FakeProvider(fill_color=(90, 95, 100))
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+            low_freq_mae_threshold=4.0,
+            skip_flat_ring=True,
+            ring_texture_measure="highpass",
+            flat_ring_luma_std=DEFAULT_FLAT_RING_TEXTURE_STD,
+            textured_ring_luma_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+            low_freq_std_scale_ref=2.0,
+        )
+        source = _solid_rgb((64, 64), (120, 110, 100))
+        mask = _rect_mask((64, 64), (16, 16, 48, 48))
+        with (
+            patch(
+                "pdf2ppt.generative_inpaint.engine.context_ring_texture_score",
+                return_value=6.27,
+            ),
+            patch(
+                "pdf2ppt.generative_inpaint.engine.low_frequency_masked_mae",
+                return_value=14.33,
+            ),
+        ):
+            # Legacy textured=16 would keep a loosened gate at 12.54 and reject.
+            legacy = effective_low_freq_mae_threshold(
+                4.0, 6.27, textured_std=16.0, scale_ref_std=2.0
+            )
+            self.assertIsNotNone(legacy)
+            assert legacy is not None
+            self.assertAlmostEqual(legacy, 12.54, places=2)
+            self.assertGreater(14.33, legacy)
+
+            result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(budget.billed_calls, 1)
+        self.assertEqual(budget.low_freq_fallbacks, 0)
+        self.assertEqual(budget.flat_ring_skips, 0)
+        self.assertIn("generative", engine.last_debug_note or "")
+
+    def test_geometric_mid_highpass_patch_skips_low_freq_gate(self) -> None:
+        """v5 geometric_chart patch at highpass ≈ 14.91 stays on the generative path."""
+
+        provider = FakeProvider(fill_color=(200, 200, 200))
+        budget = GenerativeBudget(max_calls=5, max_cost_usd=1.0)
+        engine = GenerativeInpaintingEngine(
+            provider=provider,
+            budget=budget,
+            cache_dir=None,
+            verify_ocr=False,
+            low_freq_mae_threshold=4.0,
+            skip_flat_ring=True,
+            ring_texture_measure="highpass",
+            textured_ring_luma_std=DEFAULT_TEXTURED_RING_TEXTURE_STD,
+        )
+        source = _solid_rgb((112, 64), (240, 240, 240))
+        mask = _rect_mask((112, 64), (20, 16, 92, 48))
+        with (
+            patch(
+                "pdf2ppt.generative_inpaint.engine.context_ring_texture_score",
+                return_value=14.91,
+            ),
+            patch(
+                "pdf2ppt.generative_inpaint.engine.low_frequency_masked_mae",
+                return_value=20.0,
+            ),
+        ):
+            result = engine.inpaint(source, mask)
+        assert_unmasked_pixels_unchanged(source, result, mask)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(budget.low_freq_fallbacks, 0)
+        self.assertEqual(budget.flat_ring_skips, 0)
+        self.assertIn("generative", engine.last_debug_note or "")
 
     def test_safety_blocks_do_not_consume_billed_budget(self) -> None:
         error = GenerativeProviderError(
@@ -978,7 +1216,10 @@ class MaskDilateOptionTests(unittest.TestCase):
         self.assertAlmostEqual(options.inpaint_mask_dilate_line_height_ratio, 0.18)
         self.assertEqual(options.generative_low_freq_mae_threshold, 4.0)
         self.assertTrue(options.generative_skip_flat_ring)
-        self.assertEqual(options.generative_flat_ring_luma_std, 4.0)
+        self.assertEqual(options.generative_ring_texture_measure, "highpass")
+        self.assertEqual(options.generative_ring_texture_blur_sigma, 5.0)
+        self.assertEqual(options.generative_flat_ring_luma_std, 2.0)
+        self.assertEqual(options.generative_textured_ring_luma_std, 4.0)
         self.assertEqual(options.generative_safety_block_retries, 1)
 
     def test_line_height_dilate_scales_and_merges(self) -> None:

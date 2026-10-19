@@ -71,17 +71,32 @@ Generative patches are composited with `cv2.seamlessClone` using
 **`NORMAL_CLONE`** (not `MIXED_CLONE`). Mixed mode keeps the stronger of
 source/destination gradients and was pulling original glyph edges back into
 clean generative fills, which then failed the OCR residual check. After
-compositing, pdf2ppt applies a **texture-aware** low-frequency gate:
+compositing, pdf2ppt applies a **texture-aware** low-frequency gate.
 
-- If the **outside ring** around the mask is flat (luma std ≤
-  `--generative-flat-ring-luma-std`, default **4.0**), the generative API is
-  **skipped entirely** and opencv-fast is used (`flat_ring_skips` in the report).
-  Smooth slides are where classic inpainting already wins — no spend.
+Ring flatness / texture is scored with
+`--generative-ring-texture-measure` (default **`highpass`**: std of ring luma
+minus a Gaussian-blurred copy). That ignores smooth brightness ramps, so
+**full-page linear and radial gradients classify as flat**. Legacy
+`luma_std` (raw ring brightness variation) mis-labels those gradients as
+textured and loosens or disables the gate. `plane_residual` (std after fitting
+a plane to ring pixels) is also available; prefer `highpass` when radial
+gradients must stay flat.
+
+- If the outside ring is flat (texture score ≤
+  `--generative-flat-ring-luma-std`, default **2.0**), the generative API is
+  **skipped entirely** and opencv-fast is used (`flat_ring_skips` in the report;
+  the note records the measure and score). Smooth and gradient slides are where
+  classic inpainting already wins — no spend.
+- **Prefer `opencv-fast` for gradient backgrounds** (linear, radial, large soft
+  ramps): generative fills are usually worse on inpaint-region MAE and cost
+  money. The flat-ring skip is the default path for those pages.
 - On mid-range rings the base `--generative-low-freq-mae-threshold` (default
-  **4.0**) is scaled up by surrounding variance.
-- On highly textured rings (luma std ≥
-  `--generative-textured-ring-luma-std`, default **16.0**) the low-freq gate is
-  skipped so photo backgrounds are not rejected for high-frequency mismatch.
+  **4.0**) is scaled up by the ring texture score.
+- On highly textured rings (score ≥
+  `--generative-textured-ring-luma-std`, default **4.0** for highpass) the
+  low-freq gate is skipped so soft photo backgrounds (bench highpass ≈ 6) are
+  not rejected when generative and opencv disagree on high-frequency detail.
+  Report field `ring_texture_measure` records which measure was used.
 
 ## Safety, budget, and cache
 
@@ -111,9 +126,10 @@ After each generative patch:
 
 Call counts (`billed_calls` / `attempts`), cache hits, fallbacks
 (`safety_block_fallbacks`, `api_error_fallbacks`, `low_freq_fallbacks`,
-`flat_ring_skips`), `safety_block_retries`, estimated USD cost, and
-`cost_uncertain` are written into the conversion report under
-`generative_inpaint`.
+`flat_ring_skips`), `ring_texture_measure`, `safety_block_retries`, estimated
+USD cost, and `cost_uncertain` are written into the conversion report under
+`generative_inpaint`. Flat-ring skip records include the measure name and score
+in `note` (for example `flat context ring (highpass 0.28 <= 2.00)`).
 
 ## Cost and non-determinism
 

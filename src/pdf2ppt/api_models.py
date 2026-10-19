@@ -146,8 +146,10 @@ class ConvertRequest(BaseModel):
     generative_verify_ocr: bool = True
     generative_low_freq_mae_threshold: float = Field(default=4.0, ge=-1.0, le=255.0)
     generative_skip_flat_ring: bool = True
-    generative_flat_ring_luma_std: float = Field(default=4.0, ge=0.0, le=255.0)
-    generative_textured_ring_luma_std: float = Field(default=16.0, ge=0.0, le=255.0)
+    generative_ring_texture_measure: str = "highpass"
+    generative_ring_texture_blur_sigma: float = Field(default=5.0, ge=0.0, le=64.0)
+    generative_flat_ring_luma_std: float = Field(default=2.0, ge=0.0, le=255.0)
+    generative_textured_ring_luma_std: float = Field(default=4.0, ge=0.0, le=255.0)
     generative_safety_block_retries: int = Field(default=1, ge=0, le=5)
     generative_max_attempts: int | None = Field(default=None, ge=1, le=50_000)
     write_debug_artifacts: bool = False
