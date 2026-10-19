@@ -1023,6 +1023,8 @@ def resolve_background_inpainting_engine(
             skip_flat_ring=options.generative_skip_flat_ring,
             flat_ring_luma_std=options.generative_flat_ring_luma_std,
             textured_ring_luma_std=options.generative_textured_ring_luma_std,
+            ring_texture_measure=options.generative_ring_texture_measure,
+            ring_texture_blur_sigma=options.generative_ring_texture_blur_sigma,
             max_attempts=options.generative_max_attempts,
         )
         if not engine.is_configured():

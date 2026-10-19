@@ -311,17 +311,36 @@ def build_parser() -> argparse.ArgumentParser:
         default=4.0,
         help=(
             "Base low-frequency MAE gate vs opencv-fast (0-255). Scaled up on "
-            "textured surroundings and skipped when the outside ring is highly "
-            "textured. Set negative to disable. Flat rings skip the API entirely."
+            "textured surroundings (per --generative-ring-texture-measure) and "
+            "skipped when the outside ring is highly textured. Set negative to "
+            "disable. Flat rings skip the API entirely."
         ),
+    )
+    parser.add_argument(
+        "--generative-ring-texture-measure",
+        choices=["highpass", "plane_residual", "luma_std"],
+        default="highpass",
+        help=(
+            "How to score outside-mask ring texture for flat-API-skip and low-freq "
+            "gate scaling. Default highpass (ring minus Gaussian blur) treats smooth "
+            "gradients as flat; plane_residual fits a plane; luma_std is raw brightness "
+            "variation (legacy, mis-labels full-page gradients as textured)."
+        ),
+    )
+    parser.add_argument(
+        "--generative-ring-texture-blur-sigma",
+        type=float,
+        default=5.0,
+        help="Gaussian sigma for the highpass ring texture measure (ignored otherwise).",
     )
     parser.add_argument(
         "--generative-flat-ring-luma-std",
         type=float,
-        default=4.0,
+        default=2.0,
         help=(
-            "When the outside-mask ring luma std is at or below this value, skip the "
-            "generative API and use opencv-fast (smooth backgrounds)."
+            "When the outside-mask ring texture score is at or below this value, skip "
+            "the generative API and use opencv-fast (smooth / gradient backgrounds). "
+            "Threshold applies to --generative-ring-texture-measure."
         ),
     )
     parser.add_argument(
@@ -334,8 +353,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=16.0,
         help=(
-            "Outside-ring luma std at/above this disables the low-frequency MAE gate "
-            "(photo / textured pages where generative is preferred)."
+            "Outside-ring texture score at/above this disables the low-frequency MAE "
+            "gate (photo / textured pages where generative is preferred). Threshold "
+            "applies to --generative-ring-texture-measure."
         ),
     )
     parser.add_argument(
@@ -418,6 +438,8 @@ def main(argv: list[str] | None = None) -> int:
         generative_verify_ocr=not args.no_generative_verify_ocr,
         generative_low_freq_mae_threshold=args.generative_low_freq_mae_threshold,
         generative_skip_flat_ring=not args.no_generative_skip_flat_ring,
+        generative_ring_texture_measure=args.generative_ring_texture_measure,
+        generative_ring_texture_blur_sigma=args.generative_ring_texture_blur_sigma,
         generative_flat_ring_luma_std=args.generative_flat_ring_luma_std,
         generative_textured_ring_luma_std=args.generative_textured_ring_luma_std,
         generative_safety_block_retries=args.generative_safety_block_retries,

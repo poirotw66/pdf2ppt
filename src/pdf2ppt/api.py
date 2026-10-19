@@ -246,6 +246,8 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         generative_verify_ocr=request.generative_verify_ocr,
         generative_low_freq_mae_threshold=request.generative_low_freq_mae_threshold,
         generative_skip_flat_ring=request.generative_skip_flat_ring,
+        generative_ring_texture_measure=request.generative_ring_texture_measure,
+        generative_ring_texture_blur_sigma=request.generative_ring_texture_blur_sigma,
         generative_flat_ring_luma_std=request.generative_flat_ring_luma_std,
         generative_textured_ring_luma_std=request.generative_textured_ring_luma_std,
         generative_safety_block_retries=request.generative_safety_block_retries,

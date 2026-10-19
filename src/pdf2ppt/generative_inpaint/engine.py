@@ -25,15 +25,18 @@ from ..inpainting_engines.patching import (
 )
 from .blend import (
     DEFAULT_CONTEXT_RING_PX,
-    DEFAULT_FLAT_RING_LUMA_STD,
+    DEFAULT_FLAT_RING_TEXTURE_STD,
     DEFAULT_LOW_FREQ_BLUR_SIGMA,
     DEFAULT_LOW_FREQ_MAE_THRESHOLD,
     DEFAULT_LOW_FREQ_STD_SCALE_REF,
-    DEFAULT_TEXTURED_RING_LUMA_STD,
+    DEFAULT_RING_TEXTURE_BLUR_SIGMA,
+    DEFAULT_RING_TEXTURE_MEASURE,
+    DEFAULT_TEXTURED_RING_TEXTURE_STD,
     GENERATIVE_COMPOSITE_EDGE_FEATHER_PX,
-    context_ring_luma_std,
+    context_ring_texture_score,
     effective_low_freq_mae_threshold,
     low_frequency_masked_mae,
+    normalize_ring_texture_measure,
     seamless_clone_masked_edit,
 )
 from .budget import GenerativeBudget, GenerativeCallRecord
@@ -133,10 +136,12 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         low_freq_blur_sigma: float = DEFAULT_LOW_FREQ_BLUR_SIGMA,
         safety_block_retries: int = DEFAULT_SAFETY_BLOCK_RETRIES,
         skip_flat_ring: bool = True,
-        flat_ring_luma_std: float = DEFAULT_FLAT_RING_LUMA_STD,
-        textured_ring_luma_std: float = DEFAULT_TEXTURED_RING_LUMA_STD,
+        flat_ring_luma_std: float = DEFAULT_FLAT_RING_TEXTURE_STD,
+        textured_ring_luma_std: float = DEFAULT_TEXTURED_RING_TEXTURE_STD,
         low_freq_std_scale_ref: float = DEFAULT_LOW_FREQ_STD_SCALE_REF,
         context_ring_px: int = DEFAULT_CONTEXT_RING_PX,
+        ring_texture_measure: str = DEFAULT_RING_TEXTURE_MEASURE,
+        ring_texture_blur_sigma: float = DEFAULT_RING_TEXTURE_BLUR_SIGMA,
         max_attempts: int | None = None,
     ) -> None:
         resolved_provider: GenerativeImageEditProvider
@@ -176,6 +181,9 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         self._textured_ring_luma_std = float(textured_ring_luma_std)
         self._low_freq_std_scale_ref = float(low_freq_std_scale_ref)
         self._context_ring_px = max(1, int(context_ring_px))
+        self._ring_texture_measure = normalize_ring_texture_measure(ring_texture_measure)
+        self._ring_texture_blur_sigma = float(ring_texture_blur_sigma)
+        self._budget.ring_texture_measure = self._ring_texture_measure
 
     @property
     def budget(self) -> GenerativeBudget:
@@ -344,15 +352,17 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
     ) -> tuple[np.ndarray, str]:
         crop_image = Image.fromarray(crop_source, mode="RGB")
         mask_image = Image.fromarray(crop_mask, mode="L")
-        ring_std = context_ring_luma_std(
+        ring_score = context_ring_texture_score(
             crop_source,
             crop_mask,
+            measure=self._ring_texture_measure,
             ring_px=self._context_ring_px,
+            blur_sigma=self._ring_texture_blur_sigma,
         )
         # Flat surroundings: opencv-fast is more accurate and free — skip the API.
-        if self._skip_flat_ring and ring_std <= self._flat_ring_luma_std:
+        if self._skip_flat_ring and ring_score <= self._flat_ring_luma_std:
             self._budget.record_fallback(
-                f"flat context ring (luma std {ring_std:.2f} <= "
+                f"flat context ring ({self._ring_texture_measure} {ring_score:.2f} <= "
                 f"{self._flat_ring_luma_std:.2f}); skipped generative API",
                 kind="flat_ring",
             )
@@ -390,7 +400,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
                 crop_mask,
                 composited,
                 mask_image,
-                ring_luma_std=ring_std,
+                ring_texture_score=ring_score,
             )
             if accepted is not None:
                 return accepted, "generative-cache"
@@ -459,7 +469,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
             crop_mask,
             composited,
             mask_image,
-            ring_luma_std=ring_std,
+            ring_texture_score=ring_score,
         )
         if accepted is not None:
             self._cache.put(cache_key, edit_result.image.convert("RGB"))
@@ -476,7 +486,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         composited: Image.Image,
         mask_image: Image.Image,
         *,
-        ring_luma_std: float,
+        ring_texture_score: float,
     ) -> tuple[np.ndarray | None, tuple[np.ndarray, str] | None]:
         """Return (accepted_rgb, None), (None, fallback_path), or (None, None) for OCR reject."""
 
@@ -486,7 +496,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
         generative_rgb = np.array(composited, dtype=np.uint8)
         effective = effective_low_freq_mae_threshold(
             self._low_freq_mae_threshold,
-            ring_luma_std,
+            ring_texture_score,
             textured_std=self._textured_ring_luma_std,
             scale_ref_std=self._low_freq_std_scale_ref,
         )
@@ -501,7 +511,7 @@ class GenerativeInpaintingEngine(BackgroundInpaintingEngine):
                 self._budget.record_fallback(
                     f"low-frequency MAE {mae:.2f} exceeded threshold "
                     f"{effective:.2f} (base {self._low_freq_mae_threshold:.2f}, "
-                    f"ring_std {ring_luma_std:.2f})",
+                    f"ring_{self._ring_texture_measure} {ring_texture_score:.2f})",
                     kind="low_freq",
                 )
                 return None, (local_rgb, "local-low-freq")

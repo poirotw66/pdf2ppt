@@ -45,6 +45,8 @@ class GenerativeBudget:
     safety_block_retries: int = 0
     estimated_cost_usd: float = 0.0
     cost_uncertain: bool = False
+    # Set by the engine so reports show which ring-texture measure drove routing.
+    ring_texture_measure: str | None = None
     records: list[GenerativeCallRecord] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -172,6 +174,7 @@ class GenerativeBudget:
             "api_error_fallbacks": self.api_error_fallbacks,
             "low_freq_fallbacks": self.low_freq_fallbacks,
             "flat_ring_skips": self.flat_ring_skips,
+            "ring_texture_measure": self.ring_texture_measure,
             "safety_block_retries": self.safety_block_retries,
             "estimated_cost_usd": round(self.estimated_cost_usd, 6),
             "cost_uncertain": self.cost_uncertain,
