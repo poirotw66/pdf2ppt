@@ -191,13 +191,14 @@ def convert_pdf(
 
     generative_report = None
     if isinstance(options.generative_budget, GenerativeBudget):
-        generative_report = options.generative_budget.to_dict()
+        budget = options.generative_budget
+        generative_report = budget.to_dict()
         logger.info(
             "Generative inpaint run stats: calls=%s cache_hits=%s fallbacks=%s est_cost_usd=%.4f",
-            generative_report.get("calls"),
-            generative_report.get("cache_hits"),
-            generative_report.get("fallbacks"),
-            float(generative_report.get("estimated_cost_usd") or 0.0),
+            budget.calls,
+            budget.cache_hits,
+            budget.fallbacks,
+            budget.estimated_cost_usd,
         )
     report = ConversionReport(
         input_path=str(options.input_path),

@@ -4,7 +4,8 @@
 For every PDF under ``tests/fixtures/`` (or ``--fixtures-dir``), this script:
 
 1. Runs ``convert_pdf`` with the requested conversion options (default path
-   unchanged: ``opencv-fast``, no generative backend required).
+   unchanged: ``opencv-fast``; generative backends are opt-in via
+   ``--inpaint-engine generative-openai|generative-gemini``).
 2. Renders the PPTX headlessly via LibreOffice -> PDF -> PNG.
 3. Compares each slide to the source PDF page (SSIM, pixel error, edge F1,
    optional OCR text F1) and scores editability from PPTX object counts.
@@ -23,8 +24,10 @@ Pin ``Noto Sans CJK TC`` (``fonts-noto-cjk``) for stable CJK metrics; see
 ``docs/slide-quality.md``.
 
 Interface note: ``--inpaint-engine`` and ``--extra-option KEY=VALUE`` keep the
-surface simple so a parallel generative-inpainting backend can be measured
-later without changing this script's contract.
+surface simple so alternate backends (including ``generative-openai`` /
+``generative-gemini``) can be measured without changing this script's contract.
+Pass generative knobs via ``--extra-option``, e.g.
+``--extra-option generative_max_calls=5``.
 """
 
 from __future__ import annotations
@@ -312,7 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--inpaint-engine",
         default="opencv-fast",
         help="Passed to ConversionOptions.inpaint_engine so alternate backends "
-        "(including a future generative inpainting path) can be benched.",
+        "(opencv-fast, lama-*, generative-openai, generative-gemini, …) can be benched.",
     )
     parser.add_argument(
         "--extra-option",

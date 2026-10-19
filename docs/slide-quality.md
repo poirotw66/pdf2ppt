@@ -81,9 +81,12 @@ python scripts/bench_slide.py --ocr off \
   --fixture solid_background --fixture dark_background_light_text \
   --fixture geometric_chart --fixture table
 
-# Alternate conversion knobs (e.g. future generative inpainting backend)
+# Alternate conversion knobs (local + opt-in generative inpainting)
 python scripts/bench_slide.py --inpaint-engine white-box
 python scripts/bench_slide.py --inpaint-engine lama-onnx --extra-option inpaint_model_root=model/lama
+# Requires OPENAI_API_KEY / GEMINI_API_KEY; see docs/generative-inpaint.md
+python scripts/bench_slide.py --inpaint-engine generative-openai \
+  --extra-option generative_max_calls=5 --extra-option generative_max_cost_usd=1.0
 ```
 
 Hybrid fixtures (`gradient_*`, `photo_texture`, `large_mask`) still run
@@ -126,6 +129,6 @@ unit tests (LibreOffice cases skip automatically).
 
 `evaluate_pptx_against_pdf(pptx, pdf, *, dpi, ocr_engine=None)` only needs the
 output PPTX and source PDF. `scripts/bench_slide.py --inpaint-engine …` forwards
-conversion knobs into `ConversionOptions`. A parallel generative-inpainting
-backend can be measured by pointing `--inpaint-engine` (or `--extra-option`) at
-it without changing the evaluator.
+conversion knobs into `ConversionOptions`. Measure the generative backends with
+`--inpaint-engine generative-openai` or `generative-gemini` (plus budget extras);
+see [`generative-inpaint.md`](./generative-inpaint.md).

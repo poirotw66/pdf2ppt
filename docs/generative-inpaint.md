@@ -96,6 +96,21 @@ current reviewed boxes: pick a generative engine, ensure the API server has the
 matching env key, then convert. There is no separate per-box regenerate button
 yet; page-level regenerate is the intentional Phase 4 entry point.
 
+## Benchmarking with the slide evaluator
+
+`scripts/bench_slide.py` already forwards `--inpaint-engine` into
+`ConversionOptions`, so generative backends can be measured with the same
+fidelity / editability JSON as local engines:
+
+```bash
+python scripts/bench_slide.py --ocr off \
+  --inpaint-engine generative-openai \
+  --extra-option generative_max_calls=5 \
+  --extra-option generative_max_cost_usd=1.0
+```
+
+See [`slide-quality.md`](./slide-quality.md).
+
 ## Optional image restore (benchmark hook)
 
 `GenerativeInpaintingEngine.restore_image(image)` is a separate callable for
