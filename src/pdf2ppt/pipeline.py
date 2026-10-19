@@ -62,7 +62,12 @@ from .generative_inpaint import (
     build_ocr_residual_checker,
     uses_generative_inpaint_engine,
 )
-from .layout import LayoutEngine, apply_layout_to_page, split_wide_multiline_blocks
+from .layout import (
+    LayoutEngine,
+    apply_layout_to_page,
+    extract_figure_image_placements,
+    split_wide_multiline_blocks,
+)
 from .models import ConversionReport, ImagePlacement, PageResult, QualityScore, TextBlock
 from .native_extraction import (
     assign_block_roles,
@@ -487,18 +492,29 @@ def analyze_page(
                 note = background_inpaint_note or ""
                 erase_note = f"erased {len(erase_regions)} nativized vector/table region(s)"
                 background_inpaint_note = f"{note}; {erase_note}".strip("; ")
-        if layout_figure_images:
-            # Prefer discrete picture elements for detected figure regions.
-            image_elements = _merge_layout_figures(image_elements, layout_figure_images)
-            figure_erase = [placement.bbox for placement in layout_figure_images]
-            if figure_erase and background_mode == "overlay":
-                background_image = erase_regions_from_image(
-                    background_image,
-                    figure_erase,
+        if layout_figure_images or layout_applied.regions:
+            # Re-crop figures from the text-erased raster so OCR labels aren't
+            # doubled under editable text boxes (scanned_vector_shapes).
+            if background_mode == "overlay" and layout_applied.regions:
+                layout_figure_images = extract_figure_image_placements(
+                    layout_applied.regions,
+                    page_image=background_image,
                     page_width=float(page.rect.width),
                     page_height=float(page.rect.height),
-                    fill_color=resolve_erase_fill_color(vector_result.shapes, background_image),
+                    shape_elements=vector_result.shapes,
+                    table_elements=vector_result.tables,
                 )
+            if layout_figure_images:
+                image_elements = _merge_layout_figures(image_elements, layout_figure_images)
+                figure_erase = [placement.bbox for placement in layout_figure_images]
+                if figure_erase and background_mode == "overlay":
+                    background_image = erase_regions_from_image(
+                        background_image,
+                        figure_erase,
+                        page_width=float(page.rect.width),
+                        page_height=float(page.rect.height),
+                        fill_color=resolve_erase_fill_color(vector_result.shapes, background_image),
+                    )
         background_encode_started_at = perf_counter()
         background_image_format = options.background_image_format
         if background_mode == "overlay":

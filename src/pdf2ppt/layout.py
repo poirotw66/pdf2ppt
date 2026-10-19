@@ -224,6 +224,30 @@ def is_ppstructure_available() -> bool:
         return False
 
 
+def _has_inference_config(directory: Path) -> bool:
+    return (directory / "inference.yml").is_file() or (directory / "inference.json").is_file()
+
+
+def resolve_layout_model_dir(model_root: Path | str | None) -> str | None:
+    """Return a concrete ``model_dir`` only when layout weights already exist.
+
+    Passing a bare ``./model`` (OCR root) without DocLayout files makes PaddleX
+    look for ``model/inference.yml`` and fail — which then silently falls back
+    to heuristic. When nothing is present, return ``None`` so LayoutDetection
+    uses its default download cache.
+    """
+
+    if model_root is None:
+        return None
+    root = Path(model_root).expanduser()
+    named = root / "PP-DocLayout_plus-L"
+    if named.is_dir() and _has_inference_config(named):
+        return str(named)
+    if root.is_dir() and _has_inference_config(root):
+        return str(root)
+    return None
+
+
 def resolve_layout_engine_name(requested: str) -> LayoutEngineName:
     name = (requested or "heuristic").strip().lower()
     if name in {"heuristic", "ppstructure"}:
@@ -280,7 +304,10 @@ class LayoutEngine:
                 return LayoutPageResult(regions=regions, engine="ppstructure")
             except Exception as error:  # noqa: BLE001
                 reason = f"ppstructure unavailable ({error}); fell back to heuristic"
-                logger.warning("Layout engine fallback: %s", reason)
+                logger.warning(
+                    "Layout engine fallback to heuristic (requested=ppstructure): %s",
+                    reason,
+                )
                 self._init_error = str(error)
                 regions = analyze_layout_heuristic(
                     text_blocks or [],
@@ -328,16 +355,15 @@ class LayoutEngine:
         kwargs: dict[str, Any] = {"layout_nms": True, "model_name": "PP-DocLayout_plus-L"}
         if self.threshold is not None:
             kwargs["threshold"] = self.threshold
-        if self.model_root is not None:
-            model_root = Path(self.model_root).expanduser()
-            # Prefer an already-downloaded model directory when present.
-            named = model_root / "PP-DocLayout_plus-L"
-            if named.is_dir():
-                kwargs["model_dir"] = str(named)
-            elif (model_root / "inference.yml").is_file() or (model_root / "inference.json").is_file():
-                kwargs["model_dir"] = str(model_root)
-            else:
-                kwargs["model_dir"] = str(model_root)
+        model_dir = resolve_layout_model_dir(self.model_root)
+        if model_dir is not None:
+            kwargs["model_dir"] = model_dir
+        elif self.model_root is not None:
+            logger.info(
+                "layout_model_root %s has no PP-DocLayout weights; "
+                "LayoutDetection will use the PaddleX default download cache",
+                self.model_root,
+            )
         try:
             self._detector = LayoutDetection(**kwargs)
         except TypeError:
@@ -994,7 +1020,8 @@ def strip_bullet_prefix(text: str, *, left: float, min_left: float) -> tuple[str
     match = _BULLET_PREFIX_RE.match(text)
     cleaned = text[match.end() :].strip() if match else text.strip()
     indent = max(0.0, left - min_left)
-    level = int(round(indent / _INDENT_LEVEL_CHARS))
+    # Floor (not round) so a modest nested indent maps to level 1, not 2.
+    level = int(indent // _INDENT_LEVEL_CHARS)
     # Numbered "1." / "a." at the same indent stays level 0; nested indents rise.
     level = max(0, min(level, 8))
     list_style = "bullet"

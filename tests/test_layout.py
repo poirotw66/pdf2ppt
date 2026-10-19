@@ -19,6 +19,7 @@ from pdf2ppt.layout import (
     apply_layout_to_page,
     normalize_layout_label,
     parse_layout_regions_from_dict,
+    resolve_layout_model_dir,
     strip_bullet_prefix,
 )
 from pdf2ppt.layout_metrics import (
@@ -194,10 +195,14 @@ class HeuristicLayoutTests(unittest.TestCase):
         self.assertEqual(style, "bullet")
         cleaned, level, style = strip_bullet_prefix("1. First", left=96, min_left=72)
         self.assertEqual(cleaned, "First")
-        self.assertGreaterEqual(level, 1)
+        self.assertEqual(level, 1)
         self.assertEqual(style, "arabicPeriod")
         cleaned, level, style = strip_bullet_prefix("a. Nested", left=96, min_left=72)
         self.assertEqual(cleaned, "Nested")
+        self.assertEqual(style, "alphaLcPeriod")
+        # Modest nested indent must map to level 1, not jump to 2 via rounding.
+        cleaned, level, style = strip_bullet_prefix("a. Nested", left=99, min_left=72)
+        self.assertEqual(level, 1)
         self.assertEqual(style, "alphaLcPeriod")
 
 
@@ -493,6 +498,42 @@ class PipelineLayoutOptionTests(unittest.TestCase):
         self.assertFalse(any("Collect Info" in text and "Verify" in text for text in texts))
 
 
+class ModelDirResolutionTests(unittest.TestCase):
+    def test_resolve_layout_model_dir_none_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(resolve_layout_model_dir(Path(tmp) / "model"))
+            self.assertIsNone(resolve_layout_model_dir(Path(tmp)))
+
+    def test_resolve_layout_model_dir_named_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            named = Path(tmp) / "PP-DocLayout_plus-L"
+            named.mkdir()
+            (named / "inference.yml").write_text("model: ok\n", encoding="utf-8")
+            self.assertEqual(resolve_layout_model_dir(tmp), str(named))
+
+    def test_get_detector_omits_model_dir_when_absent(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeDetector:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def predict(self, *_args, **_kwargs):
+                return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = LayoutEngine(engine="ppstructure", model_root=Path(tmp) / "missing-model")
+            with patch("paddleocr.LayoutDetection", FakeDetector):
+                # Clear process cache so this root is exercised.
+                from pdf2ppt import layout as layout_mod
+
+                layout_mod._DETECTOR_CACHE.clear()
+                engine._detector = None
+                engine._get_detector()
+        self.assertNotIn("model_dir", captured)
+        self.assertEqual(captured.get("model_name"), "PP-DocLayout_plus-L")
+
+
 class RealModelOptInTests(unittest.TestCase):
     """Real PP-StructureV3 download is opt-in via PDF2PPT_RUN_LAYOUT_MODEL=1."""
 
@@ -505,8 +546,10 @@ class RealModelOptInTests(unittest.TestCase):
 
         if not is_ppstructure_available():
             self.skipTest("LayoutDetection not importable")
+        # Default model_root is ./model (OCR). Without DocLayout weights there,
+        # detector must still start via PaddleX's default cache — not fall back.
         image = Image.new("RGB", (640, 480), color=(255, 255, 255))
-        engine = LayoutEngine(engine="ppstructure")
+        engine = LayoutEngine(engine="ppstructure", model_root=Path("model"))
         result = engine.analyze(image, page_width=640, page_height=480)
         self.assertEqual(result.engine, "ppstructure")
 
@@ -557,6 +600,65 @@ class TitleZOrderTests(unittest.TestCase):
         pic_els = [child for child in children if child.tag == qn("p:pic")]
         self.assertTrue(pic_els)
         self.assertGreater(children.index(title_el), children.index(pic_els[0]))
+
+    def test_title_above_last_page_background_shape(self) -> None:
+        """figure_caption case: full-page white rect sits above the bg picture."""
+
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.models import PageResult, QualityScore, ShapeElement
+        from pdf2ppt.ppt_render import render_page_to_slide
+
+        presentation = Presentation()
+        blank = presentation.slide_layouts[6]
+        import io
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (16, 16), color=(200, 180, 40)).save(buffer, format="PNG")
+        page = PageResult(
+            page_number=1,
+            page_kind="digital",
+            background_mode="overlay",
+            width_pt=960,
+            height_pt=540,
+            background_image_bytes=buffer.getvalue(),
+            shape_elements=[
+                ShapeElement(
+                    id="bg_rect",
+                    kind="rect",
+                    bbox=(0, 0, 960, 540),
+                    fill_color="#FFFFFF",
+                    is_page_background=True,
+                    z_order=0,
+                )
+            ],
+            text_blocks=[
+                TextBlock(
+                    id="title",
+                    source="native",
+                    bbox=(60, 40, 700, 100),
+                    text="Architecture Sketch",
+                    confidence=1.0,
+                    font_size=28,
+                    block_role="title",
+                    use_title_placeholder=True,
+                    reading_order=1,
+                ),
+            ],
+            quality_score=QualityScore(1, 1, 1, 1),
+            fallback_reason=None,
+        )
+        render_page_to_slide(presentation, blank, page, slide_width_pt=960, slide_height_pt=540)
+        slide = presentation.slides[0]
+        children = list(slide.shapes._spTree)  # noqa: SLF001
+        title_el = slide.shapes.title._element  # noqa: SLF001
+        title_idx = children.index(title_el)
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        sp_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:sp") and child is not title_el]
+        self.assertTrue(pic_idxs)
+        self.assertTrue(sp_idxs)
+        # Title must sit after both the background picture and the page-fill shape.
+        self.assertGreater(title_idx, max(pic_idxs + sp_idxs))
 
 
 class GroupedOcrMaskTests(unittest.TestCase):
@@ -659,6 +761,87 @@ class TableRegionNoMergeTests(unittest.TestCase):
             table_elements=[],
         )
         self.assertEqual(len(applied.text_blocks), 3)
+
+
+class ParagraphPropertiesSchemaOrderTests(unittest.TestCase):
+    def test_spc_bef_precedes_bullet_children(self) -> None:
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.ppt_render import add_text_block, ppr_children_in_schema_order
+
+        presentation = Presentation()
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        block = TextBlock(
+            id="list1",
+            source="native",
+            bbox=(72, 120, 600, 280),
+            text="One\nTwo",
+            confidence=1.0,
+            font_size=16,
+            block_role="list",
+            paragraphs=[
+                TextParagraph(text="One", list_level=0, space_before_pt=0),
+                TextParagraph(text="Two", list_level=1, space_before_pt=6),
+            ],
+        )
+        add_text_block(slide, block, scale_x=1.0, scale_y=1.0)
+        checked = 0
+        for shape in slide.shapes:
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            for paragraph in shape.text_frame.paragraphs:
+                p_pr = paragraph._p.pPr  # noqa: SLF001
+                if p_pr is None:
+                    continue
+                self.assertTrue(ppr_children_in_schema_order(p_pr))
+                tags = [child.tag for child in p_pr]
+                if qn("a:spcBef") in tags and qn("a:buChar") in tags:
+                    self.assertLess(tags.index(qn("a:spcBef")), tags.index(qn("a:buChar")))
+                    checked += 1
+                if qn("a:spcBef") in tags and qn("a:buAutoNum") in tags:
+                    self.assertLess(tags.index(qn("a:spcBef")), tags.index(qn("a:buAutoNum")))
+                    checked += 1
+        self.assertGreaterEqual(checked, 1)
+
+    def test_fixture_outputs_have_valid_ppr_child_order(self) -> None:
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.core import ConversionOptions
+        from pdf2ppt.pipeline import convert_pdf
+        from pdf2ppt.ppt_render import ppr_children_in_schema_order
+
+        for name in ("bullet_list", "flowchart"):
+            pdf = FIXTURES / f"{name}.pdf"
+            if not pdf.exists():
+                self.skipTest(f"missing {name}.pdf")
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / f"{name}.pptx"
+                convert_pdf(
+                    ConversionOptions(
+                        input_path=pdf,
+                        output_path=out,
+                        report_path=Path(tmp) / f"{name}.json",
+                        layout_engine="heuristic",
+                    )
+                )
+                presentation = Presentation(str(out))
+                for slide in presentation.slides:
+                    for shape in slide.shapes:
+                        if not getattr(shape, "has_text_frame", False):
+                            continue
+                        for paragraph in shape.text_frame.paragraphs:
+                            p_pr = getattr(paragraph._p, "pPr", None)  # noqa: SLF001
+                            if p_pr is None:
+                                continue
+                            self.assertTrue(
+                                ppr_children_in_schema_order(p_pr),
+                                msg=f"{name}: pPr children out of schema order: "
+                                f"{[child.tag for child in p_pr]}",
+                            )
+                            tags = [child.tag for child in p_pr]
+                            for bullet_tag in (qn("a:buChar"), qn("a:buAutoNum")):
+                                if qn("a:spcBef") in tags and bullet_tag in tags:
+                                    self.assertLess(tags.index(qn("a:spcBef")), tags.index(bullet_tag))
 
 
 if __name__ == "__main__":
