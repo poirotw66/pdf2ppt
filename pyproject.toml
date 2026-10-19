@@ -59,6 +59,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+pdf2ppt = ["schemas/*.json"]
+
 # --- Phase 2 static analysis gate -------------------------------------
 # Both tools are now blocking in CI (see .github/workflows/ci.yml). The
 # Phase 0 baseline (49 ruff findings, 29 mypy findings) has been cleared,

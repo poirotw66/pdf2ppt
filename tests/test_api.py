@@ -616,6 +616,62 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(report_response.status_code, 200)
         self.assertEqual(report_response.json(), {"ok": True})
 
+    @patch("pdf2ppt.api.convert_pdf")
+    def test_emit_ir_endpoint_writes_ir_only(
+        self,
+        convert_pdf_mock: unittest.mock.Mock,
+    ) -> None:
+        convert_pdf_mock.return_value = SimpleNamespace(pages=[object(), object()])
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+
+        response = self.client.post(f"/jobs/{job_id}/emit-ir", json={"layout_engine": "heuristic"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ir-emitted")
+        self.assertEqual(payload["page_count"], 2)
+        self.assertTrue(payload["slideir_path"].endswith("output.slideir.json"))
+        kwargs = convert_pdf_mock.call_args.kwargs
+        self.assertFalse(kwargs["write_pptx"])
+        self.assertIsNotNone(kwargs["emit_ir_path"])
+
+    @patch("pdf2ppt.api.convert_pdf")
+    def test_convert_emit_ir_flag_is_opt_in(
+        self,
+        convert_pdf_mock: unittest.mock.Mock,
+    ) -> None:
+        convert_pdf_mock.return_value = SimpleNamespace(pages=[object()])
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        self.client.put(
+            f"/jobs/{job_id}/boxes",
+            json={"pages": [{"page": 1, "width": 320, "height": 240, "boxes": []}]},
+        )
+
+        default_response = self.client.post(f"/jobs/{job_id}/convert", json={})
+        self.assertEqual(default_response.status_code, 200)
+        self.assertIsNone(default_response.json().get("slideir_path"))
+        self.assertTrue(convert_pdf_mock.call_args.kwargs.get("write_pptx", True))
+        self.assertIsNone(convert_pdf_mock.call_args.kwargs.get("emit_ir_path"))
+
+        convert_pdf_mock.reset_mock()
+        convert_pdf_mock.return_value = SimpleNamespace(pages=[object()])
+        emit_response = self.client.post(
+            f"/jobs/{job_id}/convert",
+            json={"emit_ir": True, "ir_only": True},
+        )
+        self.assertEqual(emit_response.status_code, 200)
+        self.assertIsNotNone(emit_response.json().get("slideir_path"))
+        self.assertFalse(convert_pdf_mock.call_args.kwargs["write_pptx"])
+
 
 def build_sample_pdf_bytes() -> bytes:
     document = fitz.open()

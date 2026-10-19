@@ -21,6 +21,7 @@ from .api_models import (
     DetectPageResponse,
     DetectRequest,
     DetectResponse,
+    EmitIrResponse,
     ErrorResponse,
     JobResponse,
     OcrBoxResponse,
@@ -35,11 +36,12 @@ from .core import (
     Pdf2PptError,
 )
 from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
+from .ir_io import SlideIrError, default_assets_dir_name
 from .job_store import JobRecord, JobStore
 from .models import TextBlock
 from .ocr import OcrEngine
 from .paths import resolve_repo_relative_path
-from .pipeline import build_notebooklm_watermark_mask_block, convert_pdf
+from .pipeline import build_notebooklm_watermark_mask_block, convert_from_ir, convert_pdf
 from .upload_input import SUPPORTED_UPLOAD_SUFFIXES, is_raster_image_upload, normalize_upload_to_pdf_bytes
 
 logger = logging.getLogger(__name__)
@@ -196,67 +198,23 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
     record = _load_job_or_404(job_id)
     if record.approved_boxes_path is None:
         raise _to_http_exception(InputValidationError("No approved boxes found for this job."))
+    if request.ir_only and not request.emit_ir:
+        raise _to_http_exception(InputValidationError("ir_only requires emit_ir=true."))
 
     approved_boxes_by_page, approved_image_sizes_by_page = _load_approved_boxes_payload(Path(record.approved_boxes_path))
-    output_pptx_path = job_store.job_dir(job_id) / "output.pptx"
-    report_path = job_store.job_dir(job_id) / "output.report.json"
-    debug_dir = job_store.job_dir(job_id) / "debug" if request.write_debug_artifacts else None
+    job_dir = job_store.job_dir(job_id)
+    output_pptx_path = job_dir / "output.pptx"
+    report_path = job_dir / "output.report.json"
+    debug_dir = job_dir / "debug" if request.write_debug_artifacts else None
+    slideir_path = job_dir / "output.slideir.json" if request.emit_ir else None
+    write_pptx = not request.ir_only
 
-    options = ConversionOptions(
+    options = _conversion_options_from_request(
+        request,
         input_path=Path(record.input_pdf_path),
         output_path=output_pptx_path,
         report_path=report_path,
-        mode=request.mode,
-        lang=request.lang,
-        ocr_model_root=resolve_repo_relative_path(request.ocr_model_root),
-        ocr_use_doc_orientation=request.use_doc_orientation,
-        ocr_use_textline_orientation=request.use_textline_orientation,
-        ocr_det_thresh=request.det_thresh,
-        ocr_det_box_thresh=request.det_box_thresh,
-        ocr_drop_score=request.drop_score,
-        ocr_return_word_box=request.return_word_box,
-        ocr_batch_size=request.ocr_batch_size,
-        render_dpi=request.dpi,
-        background_dpi=request.background_dpi,
-        background_image_format=request.background_format,
-        background_jpeg_quality=request.background_jpeg_quality,
         debug_dir=debug_dir,
-        use_doc_unwarping=request.use_doc_unwarping,
-        inpaint_engine=base_lama_inpaint_engine(request.inpaint_engine),
-        inpaint_lama_patch_hybrid=uses_lama_patch_hybrid(request.inpaint_engine),
-        inpaint_padding_px=request.inpaint_padding_px,
-        inpaint_mask_dilate_px=request.inpaint_mask_dilate_px,
-        inpaint_mask_dilate_line_height_ratio=request.inpaint_mask_dilate_line_height_ratio,
-        inpaint_mask_dilate_min_px=request.inpaint_mask_dilate_min_px,
-        inpaint_mask_dilate_max_px=request.inpaint_mask_dilate_max_px,
-        inpaint_max_area_ratio=request.inpaint_max_area_ratio,
-        inpaint_model_root=resolve_repo_relative_path(request.inpaint_model_root),
-        inpaint_onnx_cuda_provider=request.inpaint_onnx_cuda_provider,
-        inpaint_onnx_execution_mode=request.inpaint_onnx_execution_mode,
-        inpaint_max_side_px=request.inpaint_max_side_px,
-        inpaint_lama_repo_root=resolve_repo_relative_path(request.inpaint_lama_repo_root),
-        inpaint_lama_device=request.inpaint_lama_device,
-        generative_model=request.generative_model,
-        generative_max_calls=request.generative_max_calls,
-        generative_max_cost_usd=request.generative_max_cost_usd,
-        generative_cache_dir=(
-            Path(request.generative_cache_dir) if request.generative_cache_dir else None
-        ),
-        generative_timeout_s=request.generative_timeout_s,
-        generative_verify_ocr=request.generative_verify_ocr,
-        generative_low_freq_mae_threshold=request.generative_low_freq_mae_threshold,
-        generative_skip_flat_ring=request.generative_skip_flat_ring,
-        generative_ring_texture_measure=request.generative_ring_texture_measure,
-        generative_ring_texture_blur_sigma=request.generative_ring_texture_blur_sigma,
-        generative_flat_ring_luma_std=request.generative_flat_ring_luma_std,
-        generative_textured_ring_luma_std=request.generative_textured_ring_luma_std,
-        generative_safety_block_retries=request.generative_safety_block_retries,
-        generative_max_attempts=request.generative_max_attempts,
-        vector_mode=request.vector_mode,
-        vector_complexity_threshold=request.vector_complexity_threshold,
-        layout_engine=request.layout_engine,
-        layout_model_root=Path(request.layout_model_root) if request.layout_model_root else None,
-        layout_skip_header_footer=request.layout_skip_header_footer,
         approved_ocr_blocks_by_page=approved_boxes_by_page,
         approved_ocr_image_size_by_page=approved_image_sizes_by_page,
         apply_notebooklm_watermark_fallback=_should_apply_notebooklm_watermark_fallback(record.original_filename),
@@ -264,7 +222,11 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
 
     job_store.update_job(job_id, status="converting")
     try:
-        report = convert_pdf(options)
+        report = convert_pdf(
+            options,
+            write_pptx=write_pptx,
+            emit_ir_path=slideir_path,
+        )
     except (InputValidationError, OcrInitializationError, OcrProcessingError, PageConversionError) as error:
         job_store.update_job(job_id, status="convert-failed")
         raise _to_http_exception(error) from error
@@ -272,19 +234,156 @@ def convert_job(job_id: str, request: ConvertRequest) -> ConvertResponse:
         job_store.update_job(job_id, status="convert-failed")
         raise _to_http_exception(PageConversionError(0, f"Conversion failed: {error}")) from error
 
+    assets_dir = None
+    if slideir_path is not None:
+        assets_dir = str(job_dir / default_assets_dir_name(slideir_path))
+
     job_store.update_job(
         job_id,
         status="converted",
-        output_pptx_path=str(output_pptx_path),
+        output_pptx_path=str(output_pptx_path) if write_pptx else None,
         report_path=str(report_path),
     )
     return ConvertResponse(
         job_id=job_id,
         status="converted",
-        output_pptx_path=str(output_pptx_path),
+        output_pptx_path=str(output_pptx_path) if write_pptx else "",
+        report_path=str(report_path),
+        page_count=len(report.pages),
+        slideir_path=str(slideir_path) if slideir_path is not None else None,
+        slideir_assets_dir=assets_dir,
+    )
+
+
+@app.post(
+    "/jobs/{job_id}/emit-ir",
+    response_model=EmitIrResponse,
+    responses={
+        400: COMMON_ERROR_RESPONSES[400],
+        404: COMMON_ERROR_RESPONSES[404],
+        500: COMMON_ERROR_RESPONSES[500],
+        502: COMMON_ERROR_RESPONSES[502],
+        503: COMMON_ERROR_RESPONSES[503],
+    },
+)
+def emit_ir_job(job_id: str, request: ConvertRequest) -> EmitIrResponse:
+    """Analyze the job PDF and write SlideIR only (no PPTX). Opt-in agent path."""
+    record = _load_job_or_404(job_id)
+    # Approved boxes are optional for emit-ir: agents may want raw analysis.
+    approved_boxes_by_page: dict[int, list[TextBlock]] = {}
+    approved_image_sizes_by_page: dict[int, tuple[int, int]] = {}
+    if record.approved_boxes_path is not None:
+        approved_boxes_by_page, approved_image_sizes_by_page = _load_approved_boxes_payload(
+            Path(record.approved_boxes_path)
+        )
+
+    job_dir = job_store.job_dir(job_id)
+    slideir_path = job_dir / "output.slideir.json"
+    report_path = job_dir / "output.slideir.report.json"
+    placeholder_pptx = job_dir / "output.pptx"
+    debug_dir = job_dir / "debug" if request.write_debug_artifacts else None
+
+    options = _conversion_options_from_request(
+        request,
+        input_path=Path(record.input_pdf_path),
+        output_path=placeholder_pptx,
+        report_path=report_path,
+        debug_dir=debug_dir,
+        approved_ocr_blocks_by_page=approved_boxes_by_page,
+        approved_ocr_image_size_by_page=approved_image_sizes_by_page,
+        apply_notebooklm_watermark_fallback=_should_apply_notebooklm_watermark_fallback(record.original_filename),
+    )
+
+    job_store.update_job(job_id, status="emitting-ir")
+    try:
+        report = convert_pdf(options, write_pptx=False, emit_ir_path=slideir_path)
+    except (InputValidationError, OcrInitializationError, OcrProcessingError, PageConversionError) as error:
+        job_store.update_job(job_id, status="emit-ir-failed")
+        raise _to_http_exception(error) from error
+    except Exception as error:
+        job_store.update_job(job_id, status="emit-ir-failed")
+        raise _to_http_exception(PageConversionError(0, f"Emit-IR failed: {error}")) from error
+
+    assets_dir = job_dir / default_assets_dir_name(slideir_path)
+    job_store.update_job(job_id, status="ir-emitted", report_path=str(report_path))
+    return EmitIrResponse(
+        job_id=job_id,
+        status="ir-emitted",
+        slideir_path=str(slideir_path),
+        slideir_assets_dir=str(assets_dir),
         report_path=str(report_path),
         page_count=len(report.pages),
     )
+
+
+@app.post(
+    "/from-ir",
+    responses={400: COMMON_ERROR_RESPONSES[400], 500: COMMON_ERROR_RESPONSES[500]},
+)
+async def from_ir_upload(
+    ir_file: UploadFile = File(..., description="SlideIR JSON file"),
+    assets_zip: UploadFile | None = File(
+        default=None,
+        description="Optional zip of the assets_dir (paths relative to assets root).",
+    ),
+) -> FileResponse:
+    """Render an uploaded SlideIR JSON (+ optional assets zip) and return the PPTX."""
+    import shutil
+    import tempfile
+    import zipfile
+
+    if not ir_file.filename:
+        raise _http_exception(400, "input-error", "SlideIR upload must have a filename.")
+
+    work = Path(tempfile.mkdtemp(prefix="pdf2ppt-from-ir-", dir=str(job_store.root)))
+    try:
+        ir_path = work / Path(ir_file.filename).name
+        ir_bytes = await ir_file.read()
+        ir_path.write_bytes(ir_bytes)
+
+        if assets_zip is not None and assets_zip.filename:
+            zip_bytes = await assets_zip.read()
+            zip_path = work / "assets.zip"
+            zip_path.write_bytes(zip_bytes)
+            try:
+                with zipfile.ZipFile(zip_path) as archive:
+                    archive.extractall(work)
+            except zipfile.BadZipFile as error:
+                raise _to_http_exception(InputValidationError(f"Invalid assets zip: {error}")) from error
+
+            try:
+                payload = json.loads(ir_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise _to_http_exception(InputValidationError(f"Invalid SlideIR JSON: {error}")) from error
+            assets_name = str(payload.get("assets_dir") or default_assets_dir_name(ir_path))
+            assets_dir = work / assets_name
+            if not assets_dir.exists():
+                nested = work / "pages"
+                if nested.exists():
+                    assets_dir.mkdir(parents=True, exist_ok=True)
+                    nested.rename(assets_dir / "pages")
+
+        output_pptx = work / "output.pptx"
+        report_path = work / "output.report.json"
+        try:
+            convert_from_ir(ir_path, output_pptx, report_path=report_path)
+        except SlideIrError as error:
+            raise _to_http_exception(error) from error
+        except Exception as error:
+            raise _to_http_exception(PageConversionError(0, f"from-ir failed: {error}")) from error
+
+        download_name = f"{Path(ir_file.filename).stem}.pptx"
+        return FileResponse(
+            output_pptx,
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            filename=download_name,
+        )
+    except HTTPException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    except Exception:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
 
 
 @app.get("/jobs/{job_id}/pages/{page_number}.jpg", responses={404: COMMON_ERROR_RESPONSES[404]})
@@ -339,6 +438,76 @@ def download_report_json(job_id: str) -> FileResponse:
 
 def run() -> None:
     uvicorn.run("pdf2ppt.api:app", host="0.0.0.0", port=8008, reload=False)
+
+
+def _conversion_options_from_request(
+    request: ConvertRequest,
+    *,
+    input_path: Path,
+    output_path: Path,
+    report_path: Path,
+    debug_dir: Path | None,
+    approved_ocr_blocks_by_page: dict[int, list[TextBlock]],
+    approved_ocr_image_size_by_page: dict[int, tuple[int, int]],
+    apply_notebooklm_watermark_fallback: bool,
+) -> ConversionOptions:
+    return ConversionOptions(
+        input_path=input_path,
+        output_path=output_path,
+        report_path=report_path,
+        mode=request.mode,
+        lang=request.lang,
+        ocr_model_root=resolve_repo_relative_path(request.ocr_model_root),
+        ocr_use_doc_orientation=request.use_doc_orientation,
+        ocr_use_textline_orientation=request.use_textline_orientation,
+        ocr_det_thresh=request.det_thresh,
+        ocr_det_box_thresh=request.det_box_thresh,
+        ocr_drop_score=request.drop_score,
+        ocr_return_word_box=request.return_word_box,
+        ocr_batch_size=request.ocr_batch_size,
+        render_dpi=request.dpi,
+        background_dpi=request.background_dpi,
+        background_image_format=request.background_format,
+        background_jpeg_quality=request.background_jpeg_quality,
+        debug_dir=debug_dir,
+        use_doc_unwarping=request.use_doc_unwarping,
+        inpaint_engine=base_lama_inpaint_engine(request.inpaint_engine),
+        inpaint_lama_patch_hybrid=uses_lama_patch_hybrid(request.inpaint_engine),
+        inpaint_padding_px=request.inpaint_padding_px,
+        inpaint_mask_dilate_px=request.inpaint_mask_dilate_px,
+        inpaint_mask_dilate_line_height_ratio=request.inpaint_mask_dilate_line_height_ratio,
+        inpaint_mask_dilate_min_px=request.inpaint_mask_dilate_min_px,
+        inpaint_mask_dilate_max_px=request.inpaint_mask_dilate_max_px,
+        inpaint_max_area_ratio=request.inpaint_max_area_ratio,
+        inpaint_model_root=resolve_repo_relative_path(request.inpaint_model_root),
+        inpaint_onnx_cuda_provider=request.inpaint_onnx_cuda_provider,
+        inpaint_onnx_execution_mode=request.inpaint_onnx_execution_mode,
+        inpaint_max_side_px=request.inpaint_max_side_px,
+        inpaint_lama_repo_root=resolve_repo_relative_path(request.inpaint_lama_repo_root),
+        inpaint_lama_device=request.inpaint_lama_device,
+        generative_model=request.generative_model,
+        generative_max_calls=request.generative_max_calls,
+        generative_max_cost_usd=request.generative_max_cost_usd,
+        generative_cache_dir=(Path(request.generative_cache_dir) if request.generative_cache_dir else None),
+        generative_timeout_s=request.generative_timeout_s,
+        generative_verify_ocr=request.generative_verify_ocr,
+        generative_low_freq_mae_threshold=request.generative_low_freq_mae_threshold,
+        generative_skip_flat_ring=request.generative_skip_flat_ring,
+        generative_ring_texture_measure=request.generative_ring_texture_measure,
+        generative_ring_texture_blur_sigma=request.generative_ring_texture_blur_sigma,
+        generative_flat_ring_luma_std=request.generative_flat_ring_luma_std,
+        generative_textured_ring_luma_std=request.generative_textured_ring_luma_std,
+        generative_safety_block_retries=request.generative_safety_block_retries,
+        generative_max_attempts=request.generative_max_attempts,
+        vector_mode=request.vector_mode,
+        vector_complexity_threshold=request.vector_complexity_threshold,
+        layout_engine=request.layout_engine,
+        layout_model_root=Path(request.layout_model_root) if request.layout_model_root else None,
+        layout_skip_header_footer=request.layout_skip_header_footer,
+        approved_ocr_blocks_by_page=approved_ocr_blocks_by_page,
+        approved_ocr_image_size_by_page=approved_ocr_image_size_by_page,
+        apply_notebooklm_watermark_fallback=apply_notebooklm_watermark_fallback,
+    )
 
 
 def _load_job_or_404(job_id: str) -> JobRecord:
