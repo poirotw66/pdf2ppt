@@ -14,7 +14,7 @@ IR ⊆ what P1/P2 already render:
 
 | Field | Source |
 |-------|--------|
-| Text blocks (id, bbox, text, style, role, reading order, paragraphs) | native + OCR + layout |
+| Text blocks (id, bbox, text, style, role, reading order, paragraphs, line_bboxes) | native + OCR + layout |
 | Shapes | vector nativization |
 | Tables | `find_tables()` |
 | Pictures / crops | image elements + figure crops |

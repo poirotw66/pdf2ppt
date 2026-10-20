@@ -125,14 +125,20 @@ def render_page_to_slide(
             scale_x=scale_x,
             scale_y=scale_y,
         )
-        # Title Only layouts put the title placeholder first in spTree, under any
-        # full-slide background picture/shape. Move it after the last background.
-        raise_title_above_background(slide, background_elements=background_elements)
+        # Title Only layouts put the title placeholder first in spTree. Raise it
+        # above every non-text shape (page fills, outlines, pictures, tables).
+        raise_title_above_non_text(slide)
 
     for block in sorted(page_result.text_blocks, key=lambda item: item.reading_order):
         if title_block is not None and block.id == title_block.id:
             continue
-        add_text_block(slide, block, scale_x=scale_x, scale_y=scale_y)
+        add_text_block(
+            slide,
+            block,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            slide_width_pt=slide_width_pt,
+        )
 
 
 def raise_title_above_background(
@@ -141,32 +147,47 @@ def raise_title_above_background(
     background_elements: list[Any] | None = None,
     background_element: Any | None = None,
 ) -> None:
-    """Move the title placeholder after the last page-background picture/shape."""
+    """Backward-compatible alias: raise title above tracked background elements."""
+
+    _ = background_elements, background_element
+    raise_title_above_non_text(slide)
+
+
+def raise_title_above_non_text(slide: Any) -> None:
+    """Move the title placeholder after every non-text shape in the slide tree.
+
+    Ensures titles stay above page fills, stroke outlines, pictures, and tables.
+    """
 
     title_shape = getattr(slide.shapes, "title", None)
     if title_shape is None:
         return
-    elements = list(background_elements or [])
-    if not elements and background_element is not None:
-        elements = [background_element]
     try:
+        from pptx.oxml.ns import qn
+
         title_element = title_shape._element  # noqa: SLF001
         tree = title_element.getparent()
         if tree is None:
             return
         tree.remove(title_element)
-        # Prefer the last background still parented by this spTree (picture + page fills).
+        # Append after the last non-text child (pic / sp / graphicFrame / cxnSp).
+        non_text_tags = {
+            qn("p:pic"),
+            qn("p:sp"),
+            qn("p:cxnSp"),
+            qn("p:graphicFrame"),
+            qn("p:grpSp"),
+        }
         anchor = None
-        for candidate in reversed(elements):
-            if candidate is not None and candidate.getparent() is tree:
-                anchor = candidate
-                break
+        for child in list(tree):
+            if child.tag in non_text_tags and child is not title_element:
+                anchor = child
         if anchor is not None:
             anchor.addnext(title_element)
         else:
             tree.append(title_element)
     except Exception:  # noqa: BLE001
-        logger.debug("Could not raise title above background", exc_info=True)
+        logger.debug("Could not raise title above non-text shapes", exc_info=True)
 
 
 def _find_title_only_layout(presentation: Any) -> Any | None:
@@ -612,7 +633,20 @@ _DEFAULT_HANGING_INDENT_EMU = 342900
 _DEFAULT_HANGING_INDENT_PT = 27.0
 
 
-def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> None:
+# Extra width vs measured longest PDF line so Helvetica→Arial does not reflow.
+_MULTILINE_BODY_WIDTH_SLACK = 1.06
+# Keep text boxes inside the slide with a small right margin (PDF points).
+_SLIDE_RIGHT_MARGIN_PT = 12.0
+
+
+def add_text_block(
+    slide: Any,
+    block: TextBlock,
+    *,
+    scale_x: float,
+    scale_y: float,
+    slide_width_pt: float | None = None,
+) -> None:
     script = classify_text_script(block.text)
     resolved_font_family = block.font_family or default_font_family(script)
     resolved_typefaces = default_ppt_typefaces(script)
@@ -639,20 +673,30 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
             max_mar_l_pt = max(max_mar_l_pt, max(0.0, (para_left - box_left_pt) + hanging_pt))
         extra = int(round(max_mar_l_pt * EMU_PER_PT * scale_x * 1.05))
         width = Emu(max(int(width) + extra, 1))
-    # Single-line paragraphs from the PDF (lists or ordinary multi-line body)
-    # must not reflow — wrapping would invalidate baseline-derived a:spcBef.
+    # Multi-line body: keep wrap ON for editability, but size the box to the
+    # measured longest PDF line (+slack) clamped to the slide's right edge so
+    # original lines do not reflow while edits still wrap within the slide.
     pdf_lines_were_single = all("\n" not in (item.text or "") for item in paragraphs)
     should_wrap = should_wrap_text_block(block)
-    if pdf_lines_were_single and len(paragraphs) > 1:
-        should_wrap = False
-        width = _widen_for_unwrapped_paragraphs(
+    if pdf_lines_were_single and len(paragraphs) > 1 and not list_paras:
+        should_wrap = True
+        slide_width = slide_width_pt
+        if slide_width is None:
+            try:
+                slide_width = float(slide.part.presentation.slide_width) / EMU_PER_PT
+            except Exception:  # noqa: BLE001
+                slide_width = None
+        width = _fit_multiline_body_width(
             width,
+            left_emu=int(left),
             paragraphs=paragraphs,
-            font_family=resolved_font_family,
             scale_x=scale_x,
             scale_y=scale_y,
             bold=block.bold,
+            slide_width_pt=slide_width,
         )
+    elif list_paras and pdf_lines_were_single:
+        should_wrap = False
 
     textbox = slide.shapes.add_textbox(left, top, max(width, Emu(1)), max(height, Emu(1)))
     text_frame = textbox.text_frame
@@ -947,35 +991,45 @@ def should_wrap_text_block(block: TextBlock) -> bool:
     return True
 
 
-def _widen_for_unwrapped_paragraphs(
+def _fit_multiline_body_width(
     width: Any,
     *,
+    left_emu: int,
     paragraphs: list[TextParagraph],
-    font_family: str,
     scale_x: float,
     scale_y: float,
     bold: bool,
+    slide_width_pt: float | None,
+    slack: float = _MULTILINE_BODY_WIDTH_SLACK,
+    right_margin_pt: float = _SLIDE_RIGHT_MARGIN_PT,
 ) -> Any:
-    """Grow the text box so PDF-derived single lines do not clip when wrap is off."""
+    """Size a multi-line body box to the longest line, clamped to the slide edge.
 
-    _ = font_family  # reserved for future face-specific measurement
+    Wrap stays enabled so edits reflow; the width is large enough that original
+    PDF lines (Helvetica→Arial) typically do not re-wrap.
+    """
+
     script = classify_text_script(" ".join(item.text for item in paragraphs if item.text))
     font_path = choose_measurement_font(script, bold=bold)
-    if font_path is None:
-        # ~15% pad when we cannot measure (Helvetica→Arial mismatch).
-        return Emu(max(int(int(width) * 1.15), 1))
-
     max_needed = int(width)
     scale_min = min(scale_x, scale_y)
-    for item in paragraphs:
-        text = (item.text or "").strip()
-        if not text:
-            continue
-        font_size = item.font_size or 12.0
-        size_pt = max(6, int(round(font_size * scale_min)))
-        measured_width_pt, _height = measure_text_dimensions(text, size_pt, font_path)
-        needed = int(round(measured_width_pt * scale_x * EMU_PER_PT * 1.02))
-        max_needed = max(max_needed, needed)
+    if font_path is None:
+        max_needed = max(max_needed, int(int(width) * slack))
+    else:
+        for item in paragraphs:
+            text = (item.text or "").strip()
+            if not text:
+                continue
+            font_size = item.font_size or 12.0
+            size_pt = max(6, int(round(font_size * scale_min)))
+            measured_width_pt, _height = measure_text_dimensions(text, size_pt, font_path)
+            needed = int(round(measured_width_pt * scale_x * EMU_PER_PT * slack))
+            max_needed = max(max_needed, needed)
+
+    if slide_width_pt is not None and slide_width_pt > 0:
+        max_right = int(round((slide_width_pt - right_margin_pt) * scale_x * EMU_PER_PT))
+        max_width = max(1, max_right - left_emu)
+        max_needed = min(max_needed, max_width)
     return Emu(max(max_needed, 1))
 
 

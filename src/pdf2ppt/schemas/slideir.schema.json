@@ -114,6 +114,13 @@
             { "type": "null" }
           ]
         },
+        "line_bboxes": {
+          "anyOf": [
+            { "type": "array", "items": { "$ref": "#/$defs/bbox" } },
+            { "type": "null" }
+          ],
+          "description": "Per-line PDF bboxes when text is newline-joined (native multi-line)."
+        },
         "use_title_placeholder": { "type": "boolean" },
         "provenance": { "type": ["string", "null"] },
         "locked": { "type": "boolean" }

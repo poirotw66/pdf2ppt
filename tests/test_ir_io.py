@@ -119,6 +119,27 @@ class SlideIrRoundTripUnitTests(unittest.TestCase):
             self.assertIsNotNone(restored.background_image_bytes)
             self.assertTrue(restored.background_image_bytes.startswith(b"\xff\xd8"))
 
+    def test_write_read_preserves_line_bboxes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ir_path = Path(temp_dir) / "lines.slideir.json"
+            page = _minimal_page()
+            page.text_blocks[0].text = "Line one\nLine two"
+            page.text_blocks[0].line_bboxes = [
+                (72.0, 72.0, 300.0, 90.0),
+                (72.0, 94.0, 280.0, 112.0),
+            ]
+            write_slide_ir([page], ir_path, slide_width_pt=612.0, slide_height_pt=792.0)
+            payload = json.loads(ir_path.read_text(encoding="utf-8"))
+            self.assertEqual(validate_slide_ir_payload(payload), [])
+            stored = payload["pages"][0]["text_blocks"][0]["line_bboxes"]
+            self.assertEqual(len(stored), 2)
+            self.assertEqual(stored[0], [72.0, 72.0, 300.0, 90.0])
+            restored = read_slide_ir(ir_path).pages[0].text_blocks[0]
+            self.assertIsNotNone(restored.line_bboxes)
+            assert restored.line_bboxes is not None
+            self.assertEqual(len(restored.line_bboxes), 2)
+            self.assertEqual(restored.line_bboxes[1], (72.0, 94.0, 280.0, 112.0))
+
     def test_rejects_path_traversal_in_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             ir_path = Path(temp_dir) / "deck.slideir.json"

@@ -196,7 +196,7 @@ def extract_vector_content(
         if shape is None:
             skipped += 1
             continue
-        shapes.append(shape)
+        shapes.extend(split_page_background_stroke(shape))
         nativized_indices.append(index)
         if len(shapes) > max_shapes:
             # Too dense — abandon shapes, keep tables.
@@ -328,18 +328,73 @@ def is_page_background_fill(
 ) -> bool:
     """Whether a filled path should be treated as a page/slide background.
 
-    Near-page-sized fills with no visible stroke are backgrounds. Stroked frames
-    that happen to be large stay as ordinary shapes.
+    Any fill covering ``area_ratio`` of the page is a backdrop, including stroked
+    frames. Callers should split a visible stroke onto a separate outline shape
+    via :func:`split_page_background_stroke` so the border can sit above content
+    without the opaque fill covering pictures or titles.
     """
 
+    _ = stroke_color, stroke_width  # stroke no longer disqualifies a page fill
     if fill_color is None or page_area <= 0:
         return False
-    if bbox_area(bbox) / page_area < area_ratio:
-        return False
-    has_visible_stroke = stroke_color is not None and (
-        stroke_width is None or float(stroke_width) > 0.0
+    return bbox_area(bbox) / page_area >= area_ratio
+
+
+def split_page_background_stroke(shape: ShapeElement) -> list[ShapeElement]:
+    """Split a stroked page-background fill into fill (bottom) + outline (top).
+
+    The fill stays ``is_page_background``; the outline is a no-fill foreground
+    shape so the border remains visible above a full-slide raster.
+    """
+
+    if not shape.is_page_background:
+        return [shape]
+    has_visible_stroke = shape.stroke_color is not None and (
+        shape.stroke_width is None or float(shape.stroke_width) > 0.0
     )
-    return not has_visible_stroke
+    if not has_visible_stroke:
+        return [shape]
+
+    fill_only = ShapeElement(
+        id=shape.id,
+        kind=shape.kind,
+        bbox=shape.bbox,
+        points=list(shape.points),
+        fill_color=shape.fill_color,
+        stroke_color=None,
+        stroke_width=None,
+        stroke_dash=None,
+        fill_opacity=shape.fill_opacity,
+        stroke_opacity=1.0,
+        z_order=shape.z_order,
+        provenance=shape.provenance,
+        confidence=shape.confidence,
+        locked=shape.locked,
+        drawing_index=shape.drawing_index,
+        is_page_background=True,
+        arrow_direction=shape.arrow_direction,
+    )
+    outline = ShapeElement(
+        id=f"{shape.id}_outline",
+        kind=shape.kind,
+        bbox=shape.bbox,
+        points=list(shape.points),
+        fill_color=None,
+        stroke_color=shape.stroke_color,
+        stroke_width=shape.stroke_width,
+        stroke_dash=shape.stroke_dash,
+        fill_opacity=1.0,
+        stroke_opacity=shape.stroke_opacity,
+        # Above the page fill / typical early drawings; text is raised later.
+        z_order=max(shape.z_order + 1, 1),
+        provenance=shape.provenance,
+        confidence=shape.confidence,
+        locked=shape.locked,
+        drawing_index=shape.drawing_index,
+        is_page_background=False,
+        arrow_direction=shape.arrow_direction,
+    )
+    return [fill_only, outline]
 
 
 def intersection_area(a: BBox, b: BBox) -> float:
@@ -1125,6 +1180,7 @@ __all__ = [
     "filter_text_blocks_outside_tables",
     "is_page_background_fill",
     "parse_dash_style",
+    "split_page_background_stroke",
     "remaining_visuals_after_nativization",
     "resolve_complexity_limits",
     "rgb_tuple_to_hex",

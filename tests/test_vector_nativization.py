@@ -451,6 +451,38 @@ class TransparentEraseTests(unittest.TestCase):
         )
         self.assertEqual(regions, [])
 
+    def test_page_background_and_large_fill_do_not_erase_small_picture(self) -> None:
+        from pdf2ppt.background_erase import regions_for_background_erase, shape_should_erase_background
+        from pdf2ppt.models import ShapeElement
+
+        page_bg = ShapeElement(
+            id="bg",
+            kind="rect",
+            bbox=(0, 0, 960, 540),
+            fill_color="#E8F0FF",
+            fill_opacity=1.0,
+            is_page_background=True,
+        )
+        # ~93% colour card that is NOT flagged page-background.
+        large_card = ShapeElement(
+            id="card",
+            kind="rect",
+            bbox=(20, 20, 940, 510),
+            fill_color="#224466",
+            fill_opacity=1.0,
+            is_page_background=False,
+        )
+        # ~10% of page picture.
+        picture = (400.0, 180.0, 700.0, 360.0)
+        self.assertFalse(shape_should_erase_background(page_bg, image_boxes=[picture]))
+        self.assertFalse(shape_should_erase_background(large_card, image_boxes=[picture]))
+        self.assertEqual(
+            regions_for_background_erase([page_bg, large_card], [], image_boxes=[picture]),
+            [],
+        )
+        # Same large card with no pictures may still be erased.
+        self.assertTrue(shape_should_erase_background(large_card, image_boxes=[]))
+
     def test_uncomposite_restores_pre_tint_luma(self) -> None:
         import numpy as np
         from PIL import Image
@@ -573,8 +605,9 @@ class EditabilityTableCellTests(unittest.TestCase):
 
 
 class PageBackgroundFillTests(unittest.TestCase):
-    def test_is_page_background_fill_requires_near_full_page_and_no_stroke(self) -> None:
-        from pdf2ppt.vector_nativization import is_page_background_fill
+    def test_is_page_background_fill_ignores_stroke(self) -> None:
+        from pdf2ppt.models import ShapeElement
+        from pdf2ppt.vector_nativization import is_page_background_fill, split_page_background_stroke
 
         page_area = 960.0 * 540.0
         full = (0.0, 0.0, 960.0, 540.0)
@@ -586,7 +619,8 @@ class PageBackgroundFillTests(unittest.TestCase):
                 stroke_color=None,
             )
         )
-        self.assertFalse(
+        # Stroked full-page fills are still backgrounds (stroke splits off).
+        self.assertTrue(
             is_page_background_fill(
                 full,
                 page_area=page_area,
@@ -602,6 +636,23 @@ class PageBackgroundFillTests(unittest.TestCase):
                 fill_color="#FFFFFF",
             )
         )
+        stroked = ShapeElement(
+            id="bg",
+            kind="rect",
+            bbox=full,
+            fill_color="#FFFFFF",
+            stroke_color="#111111",
+            stroke_width=2.0,
+            is_page_background=True,
+            z_order=0,
+        )
+        parts = split_page_background_stroke(stroked)
+        self.assertEqual(len(parts), 2)
+        self.assertTrue(parts[0].is_page_background)
+        self.assertIsNone(parts[0].stroke_color)
+        self.assertFalse(parts[1].is_page_background)
+        self.assertIsNone(parts[1].fill_color)
+        self.assertEqual(parts[1].stroke_color, "#111111")
 
     @unittest.skipUnless((FIXTURES_DIR / "figure_caption.pdf").exists(), "fixture missing")
     def test_figure_caption_marks_white_page_fill_as_background(self) -> None:
@@ -702,6 +753,173 @@ class PageBackgroundFillTests(unittest.TestCase):
             elif tag == qn("p:sp"):
                 order.append("sp")
         self.assertEqual(order, ["sp", "pic", "sp"])
+
+    def test_bordered_page_fill_keeps_title_and_figure_visible(self) -> None:
+        """Stroked full-page fill: fill under raster, outline above, title on top."""
+
+        import io
+
+        from PIL import Image
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.models import PageResult, QualityScore, ShapeElement, TextBlock
+        from pdf2ppt.vector_nativization import split_page_background_stroke
+
+        stroked = ShapeElement(
+            id="bg",
+            kind="rect",
+            bbox=(0, 0, 960, 540),
+            fill_color="#FFFFFF",
+            stroke_color="#000000",
+            stroke_width=3.0,
+            is_page_background=True,
+            z_order=0,
+        )
+        shapes = split_page_background_stroke(stroked)
+        buffer = io.BytesIO()
+        # Distinct non-white figure baked into the overlay raster.
+        Image.new("RGB", (64, 40), color=(30, 140, 220)).save(buffer, format="PNG")
+        page = PageResult(
+            page_number=1,
+            page_kind="digital",
+            background_mode="overlay",
+            width_pt=960,
+            height_pt=540,
+            background_image_bytes=buffer.getvalue(),
+            shape_elements=shapes,
+            text_blocks=[
+                TextBlock(
+                    id="title",
+                    source="native",
+                    bbox=(60, 30, 500, 80),
+                    text="Bordered Architecture",
+                    confidence=1.0,
+                    font_size=26,
+                    block_role="title",
+                    use_title_placeholder=True,
+                    reading_order=1,
+                )
+            ],
+            quality_score=QualityScore(1, 1, 1, 1),
+            fallback_reason=None,
+        )
+        presentation = Presentation()
+        presentation.slide_width = 12192000
+        presentation.slide_height = 6858000
+        render_page_to_slide(
+            presentation,
+            presentation.slide_layouts[6],
+            page,
+            slide_width_pt=960,
+            slide_height_pt=540,
+        )
+        slide = presentation.slides[0]
+        children = list(slide.shapes._spTree)  # noqa: SLF001
+        title_el = slide.shapes.title._element  # noqa: SLF001
+        title_idx = children.index(title_el)
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        sp_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:sp") and child is not title_el]
+        self.assertTrue(pic_idxs)
+        self.assertGreaterEqual(len(sp_idxs), 2)
+        # Page fill under picture; outline may sit above picture; title above all shapes.
+        self.assertLess(min(sp_idxs), min(pic_idxs))
+        self.assertGreater(title_idx, max(sp_idxs + pic_idxs))
+        self.assertIn("Bordered Architecture", slide.shapes.title.text_frame.text)
+
+    def test_small_picture_survives_full_page_fill_erase(self) -> None:
+        """~10%-of-page picture on a full-page fill must not be painted away."""
+
+        import numpy as np
+        from PIL import Image
+
+        from pdf2ppt.background_erase import (
+            erase_regions_from_image,
+            regions_for_background_erase,
+            resolve_erase_fill_color,
+        )
+        from pdf2ppt.models import ShapeElement
+
+        page_w, page_h = 960.0, 540.0
+        # Synthetic page raster: white bg + blue picture patch (~10% area).
+        raster = Image.new("RGB", (960, 540), color=(255, 255, 255))
+        pix = raster.load()
+        for y in range(180, 360):
+            for x in range(400, 700):
+                pix[x, y] = (20, 120, 200)
+        page_bg = ShapeElement(
+            id="bg",
+            kind="rect",
+            bbox=(0, 0, page_w, page_h),
+            fill_color="#FFFFFF",
+            fill_opacity=1.0,
+            is_page_background=True,
+        )
+        picture_box = (400.0, 180.0, 700.0, 360.0)
+        regions = regions_for_background_erase([page_bg], [], image_boxes=[picture_box])
+        self.assertEqual(regions, [])
+        erased = erase_regions_from_image(
+            raster,
+            regions,
+            page_width=page_w,
+            page_height=page_h,
+            fill_color=resolve_erase_fill_color([page_bg], raster),
+        )
+        sample = np.asarray(erased)[200:300, 450:550]
+        # Picture blue channel stays dominant — not painted white.
+        self.assertGreater(float(sample[:, :, 2].mean()), 150.0)
+
+
+class MultilineBodyWidthTests(unittest.TestCase):
+    @unittest.skipUnless((FIXTURES_DIR / "large_mask.pdf").exists(), "fixture missing")
+    def test_large_mask_text_box_stays_within_slide(self) -> None:
+        from pdf2ppt.ppt_render import EMU_PER_PT
+
+        pptx_path, _report = _convert("large_mask")
+        presentation = Presentation(str(pptx_path))
+        slide = presentation.slides[0]
+        slide_width_pt = float(presentation.slide_width) / EMU_PER_PT
+        body = None
+        for shape in slide.shapes:
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            joined = "\n".join(paragraph.text for paragraph in shape.text_frame.paragraphs)
+            if "quick brown fox" in joined:
+                body = shape
+                break
+        self.assertIsNotNone(body)
+        assert body is not None
+        right_pt = float(body.left + body.width) / EMU_PER_PT
+        self.assertLessEqual(right_pt, slide_width_pt + 0.5)
+        # Wrap stays on so edits can reflow.
+        self.assertTrue(body.text_frame.word_wrap)
+
+    def test_lengthened_line_box_clamped_with_wrap_on(self) -> None:
+        from pdf2ppt.models import TextBlock, TextParagraph
+        from pdf2ppt.ppt_render import EMU_PER_PT, add_text_block
+
+        presentation = Presentation()
+        presentation.slide_width = int(960 * EMU_PER_PT)
+        presentation.slide_height = int(540 * EMU_PER_PT)
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        base = "The quick brown fox jumps over the lazy dog while the committee reviews"
+        long_line = base + (" extra clause" * 4)  # ~30%+ longer
+        block = TextBlock(
+            id="body",
+            source="native",
+            bbox=(60, 130, 860, 200),
+            text=f"{long_line}\nSecond line stays shorter than the first one here",
+            confidence=1.0,
+            font_size=17,
+            paragraphs=[
+                TextParagraph(text=long_line, font_size=17, space_before_pt=None),
+                TextParagraph(text="Second line stays shorter than the first one here", font_size=17, space_before_pt=4.0),
+            ],
+        )
+        add_text_block(slide, block, scale_x=1.0, scale_y=1.0, slide_width_pt=960.0)
+        textbox = [shape for shape in slide.shapes if getattr(shape, "has_text_frame", False)][-1]
+        right_pt = float(textbox.left + textbox.width) / EMU_PER_PT
+        self.assertLessEqual(right_pt, 960.0 - 11.0)  # slide width minus margin
+        self.assertTrue(textbox.text_frame.word_wrap)
 
 
 if __name__ == "__main__":
