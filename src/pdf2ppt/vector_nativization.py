@@ -16,6 +16,7 @@ from statistics import median
 from typing import Any
 
 import fitz
+import numpy as np
 
 from .models import (
     ArrowDirection,
@@ -46,6 +47,23 @@ DEFAULT_MAX_SHAPES_AGGRESSIVE = 400
 TABLE_TEXT_OVERLAP_RATIO = 0.45
 # Drawing rect mostly inside a table → absorb into table (skip as shape).
 TABLE_DRAWING_CONTAINMENT_RATIO = 0.85
+# find_tables() false positive: tiny cell-count candidates covering almost the
+# whole page (e.g. two side-by-side page fills misread as a 1×2 table).
+SPURIOUS_TABLE_MAX_CELLS = 2
+SPURIOUS_TABLE_PAGE_RATIO = 0.80
+# Inset when matching a cell to a containing filled vector rect.
+CELL_FILL_VECTOR_INSET_PT = 2.0
+# Modal non-text pixel share required to accept a raster-sampled cell fill.
+CELL_FILL_MODAL_MIN_SHARE = 0.60
+# Opaque enough to trust the vector fill colour (else use rendered pixels).
+CELL_FILL_OPAQUE_OPACITY = 0.99
+# Word/Excel hairline gridlines drawn as thin filled rects, not strokes.
+HAIRLINE_RULE_MAX_SHORT_PT = 1.5
+HAIRLINE_RULE_MIN_LONG_PT = 8.0
+# Quantise RGB to this many bits/channel before the modal share test.
+CELL_FILL_QUANTIZE_BITS = 4
+# Backwards-compatible alias (pre-tighten empty-cell guard threshold).
+LARGE_EMPTY_CELL_PAGE_RATIO = SPURIOUS_TABLE_PAGE_RATIO
 
 
 @dataclass(slots=True)
@@ -825,6 +843,20 @@ def _table_to_element(
         return None
 
     column_widths, row_heights = _estimate_table_geometry(rows, bbox, row_count, col_count)
+    page_area = max(float(page.rect.width * page.rect.height), 1.0)
+    if _is_spurious_table_candidate(
+        cells,
+        table_bbox=bbox,
+        page_area=page_area,
+        page=page,
+    ):
+        logger.debug(
+            "Rejecting table %s on page %s: spurious fill-edge / page-covering candidate",
+            table_index,
+            page_number,
+        )
+        return None
+
     border_color, border_width, outer_width, inner_width = _infer_table_border_style(page, bbox)
     return TableElement(
         id=f"table_{page_number}_{table_index}",
@@ -841,6 +873,78 @@ def _table_to_element(
         z_order=10_000 + table_index,
         confidence=0.9,
     )
+
+
+def _is_spurious_table_candidate(
+    cells: list[TableCell],
+    *,
+    table_bbox: BBox,
+    page_area: float,
+    page: fitz.Page,
+    max_cells: int = SPURIOUS_TABLE_MAX_CELLS,
+    page_ratio: float = SPURIOUS_TABLE_PAGE_RATIO,
+) -> bool:
+    """True for find_tables() false positives (page fills, not ruled tables).
+
+    Reject when:
+
+    * the candidate has ``<= max_cells`` cells and covers ``>= page_ratio`` of the
+      page (side-by-side page fills misread as a 1×2 table), or
+    * the grid is derived only from fill edges (no stroked rules near the bbox).
+    """
+
+    if page_area <= 0 or not cells:
+        return False
+    covers_page = bbox_area(table_bbox) / page_area >= page_ratio
+    if len(cells) <= max_cells and covers_page:
+        return True
+    if not _table_has_stroked_rules(page, table_bbox):
+        return True
+    return False
+
+
+def _table_has_stroked_rules(page: fitz.Page, table_bbox: BBox, *, pad: float = 2.0) -> bool:
+    """True when the table has stroked rules or Word/Excel hairline filled-rect rules.
+
+    Large page fills (``probe_straddle``) are not rules: only thin filled rects with
+    short side ≤1.5pt and long side ≥8pt count as hairline gridlines.
+    """
+
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001
+        return False
+    outer = (
+        table_bbox[0] - pad,
+        table_bbox[1] - pad,
+        table_bbox[2] + pad,
+        table_bbox[3] + pad,
+    )
+    for path in drawings:
+        rect = path.get("rect")
+        if rect is None:
+            continue
+        line_bbox = _rect_to_bbox(rect)
+        if not _bbox_center_inside(line_bbox, outer, padding=pad):
+            continue
+        path_type = path.get("type")
+        if path_type in {"s", "fs"}:
+            color = path.get("color")
+            width = path.get("width")
+            if color is None or width is None:
+                continue
+            if float(width) <= 0 or float(width) > 4.0:
+                continue
+            return True
+        # Hairline filled rects (Word/Excel gridlines exported as fills, not strokes).
+        if path_type == "f" and path.get("fill") is not None:
+            width = abs(line_bbox[2] - line_bbox[0])
+            height = abs(line_bbox[3] - line_bbox[1])
+            short_side = min(width, height)
+            long_side = max(width, height)
+            if short_side <= HAIRLINE_RULE_MAX_SHORT_PT and long_side >= HAIRLINE_RULE_MIN_LONG_PT:
+                return True
+    return False
 
 
 def _span_bbox(
@@ -1134,45 +1238,290 @@ def _estimate_table_geometry(
     return column_widths, row_heights
 
 
+def apply_cell_fills(
+    table: TableElement,
+    page: fitz.Page,
+    *,
+    dpi: int = 72,
+) -> None:
+    """Resolve solid cell fills without sampling centred glyphs.
+
+    Preference order per cell:
+
+    1. Opaque fill of the smallest filled vector rect containing the cell
+       (inset 2pt). If that smallest rect is translucent, skip the vector step
+       entirely (do not fall through to a larger opaque page fill).
+    2. Modal colour of non-text raster pixels (4-bit quantised), when the mode
+       covers ≥60% of remaining pixels.
+    3. Median of non-text raster pixels (covers gradients / soft fills).
+    """
+
+    if not table.cells:
+        return
+    filled_rects = _collect_filled_vector_rects(page)
+    word_boxes = _collect_word_boxes(page)
+    pixmap: Any | None = None
+    scale = dpi / 72.0
+    for cell in table.cells:
+        cell_bbox = _cell_bbox_from_geometry(table, cell)
+        vector_fill = _opaque_vector_fill_for_cell(cell_bbox, filled_rects)
+        if vector_fill is not None:
+            cell.fill_color = vector_fill
+            continue
+        if pixmap is None:
+            try:
+                pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+            except Exception:  # noqa: BLE001
+                return
+        raster_fill = _raster_fill_for_cell(
+            cell_bbox,
+            pixmap=pixmap,
+            scale=scale,
+            word_boxes=word_boxes,
+        )
+        if raster_fill is not None:
+            cell.fill_color = raster_fill
+
+
 def apply_header_cell_fills(
     table: TableElement,
     page: fitz.Page,
     *,
     dpi: int = 72,
 ) -> None:
-    """Sample cell center colors for header-row fills when available."""
+    """Backwards-compatible alias for :func:`apply_cell_fills`."""
 
-    if not table.cells:
-        return
+    apply_cell_fills(table, page, dpi=dpi)
+
+
+def _cell_bbox_from_geometry(table: TableElement, cell: TableCell) -> BBox:
+    x0 = table.bbox[0] + sum(table.column_widths[: cell.col])
+    y0 = table.bbox[1] + sum(table.row_heights[: cell.row])
+    x1 = x0 + sum(table.column_widths[cell.col : cell.col + cell.colspan])
+    y1 = y0 + sum(table.row_heights[cell.row : cell.row + cell.rowspan])
+    return (x0, y0, x1, y1)
+
+
+def _collect_filled_vector_rects(page: fitz.Page) -> list[tuple[BBox, str, float]]:
+    """Filled drawing rects as ``(bbox, #RRGGBB, opacity)``."""
+
+    results: list[tuple[BBox, str, float]] = []
     try:
-        pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+        drawings = page.get_drawings()
     except Exception:  # noqa: BLE001
-        return
-    scale = dpi / 72.0
-    samples = pixmap.samples
-    width = pixmap.width
-    n = pixmap.n
-    for cell in table.cells:
-        if cell.row != 0:
+        return results
+    for path in drawings:
+        fill = path.get("fill")
+        if fill is None:
             continue
-        # Locate cell bbox via equal split if needed.
-        x0 = table.bbox[0] + sum(table.column_widths[: cell.col])
-        y0 = table.bbox[1] + sum(table.row_heights[: cell.row])
-        x1 = x0 + sum(table.column_widths[cell.col : cell.col + cell.colspan])
-        y1 = y0 + sum(table.row_heights[cell.row : cell.row + cell.rowspan])
-        cx = int(((x0 + x1) / 2.0) * scale)
-        cy = int(((y0 + y1) / 2.0) * scale)
-        if not (0 <= cx < width and 0 <= cy < pixmap.height):
+        fill_hex = rgb_tuple_to_hex(fill)
+        if fill_hex is None:
             continue
-        offset = (cy * width + cx) * n
-        if offset + 2 >= len(samples):
+        rect = path.get("rect")
+        if rect is None:
             continue
-        cell.fill_color = f"#{samples[offset]:02X}{samples[offset + 1]:02X}{samples[offset + 2]:02X}"
+        raw_opacity = path.get("fill_opacity")
+        opacity = float(raw_opacity) if isinstance(raw_opacity, (int, float)) else 1.0
+        results.append((_rect_to_bbox(rect), fill_hex, max(0.0, min(1.0, opacity))))
+    return results
+
+
+def _opaque_vector_fill_for_cell(
+    cell_bbox: BBox,
+    filled_rects: list[tuple[BBox, str, float]],
+    *,
+    inset_pt: float = CELL_FILL_VECTOR_INSET_PT,
+    opaque_opacity: float = CELL_FILL_OPAQUE_OPACITY,
+) -> str | None:
+    """Opaque fill of the smallest containing vector rect, or ``None``.
+
+    When the smallest containing rect is translucent, returns ``None`` so the
+    caller samples rendered pixels instead of picking a larger opaque backdrop.
+    """
+
+    inner = (
+        cell_bbox[0] + inset_pt,
+        cell_bbox[1] + inset_pt,
+        cell_bbox[2] - inset_pt,
+        cell_bbox[3] - inset_pt,
+    )
+    if inner[2] <= inner[0] or inner[3] <= inner[1]:
+        inner = cell_bbox
+    best_area: float | None = None
+    best_fill: str | None = None
+    best_opacity = 1.0
+    for rect_bbox, fill_hex, opacity in filled_rects:
+        if not (
+            rect_bbox[0] <= inner[0]
+            and rect_bbox[1] <= inner[1]
+            and rect_bbox[2] >= inner[2]
+            and rect_bbox[3] >= inner[3]
+        ):
+            continue
+        # Skip hairline gridline rects — they are rules, not cell fills.
+        width = abs(rect_bbox[2] - rect_bbox[0])
+        height = abs(rect_bbox[3] - rect_bbox[1])
+        if min(width, height) <= HAIRLINE_RULE_MAX_SHORT_PT:
+            continue
+        area = bbox_area(rect_bbox)
+        if best_area is None or area < best_area:
+            best_area = area
+            best_fill = fill_hex
+            best_opacity = opacity
+    if best_fill is None:
+        return None
+    if best_opacity < opaque_opacity:
+        return None
+    return best_fill
+
+
+def _collect_word_boxes(page: fitz.Page) -> list[BBox]:
+    boxes: list[BBox] = []
+    try:
+        words = page.get_text("words") or []
+    except Exception:  # noqa: BLE001
+        return boxes
+    for word in words:
+        if not isinstance(word, (tuple, list)) or len(word) < 4:
+            continue
+        try:
+            boxes.append((float(word[0]), float(word[1]), float(word[2]), float(word[3])))
+        except (TypeError, ValueError):
+            continue
+    return boxes
+
+
+def _non_text_pixels_for_cell(
+    cell_bbox: BBox,
+    *,
+    pixmap: Any,
+    scale: float,
+    word_boxes: list[BBox],
+) -> np.ndarray | None:
+    """RGB pixels inside ``cell_bbox`` with word boxes masked out."""
+
+    left = max(0, int(cell_bbox[0] * scale))
+    top = max(0, int(cell_bbox[1] * scale))
+    right = min(pixmap.width, int(math.ceil(cell_bbox[2] * scale)))
+    bottom = min(pixmap.height, int(math.ceil(cell_bbox[3] * scale)))
+    if right <= left or bottom <= top:
+        return None
+
+    samples = np.frombuffer(pixmap.samples, dtype=np.uint8)
+    n = int(pixmap.n)
+    if n < 3:
+        return None
+    pixels = samples.reshape(pixmap.height, pixmap.width, n)[top:bottom, left:right, :3]
+    if pixels.size == 0:
+        return None
+
+    mask = np.ones(pixels.shape[:2], dtype=bool)
+    for word_bbox in word_boxes:
+        if (
+            word_bbox[2] <= cell_bbox[0]
+            or word_bbox[0] >= cell_bbox[2]
+            or word_bbox[3] <= cell_bbox[1]
+            or word_bbox[1] >= cell_bbox[3]
+        ):
+            continue
+        w_left = max(left, int(word_bbox[0] * scale))
+        w_top = max(top, int(word_bbox[1] * scale))
+        w_right = min(right, int(math.ceil(word_bbox[2] * scale)))
+        w_bottom = min(bottom, int(math.ceil(word_bbox[3] * scale)))
+        if w_right > w_left and w_bottom > w_top:
+            mask[w_top - top : w_bottom - top, w_left - left : w_right - left] = False
+
+    remaining = pixels[mask]
+    if remaining.size == 0:
+        return None
+    return remaining
+
+
+def _quantize_rgb(pixels: np.ndarray, *, bits: int = CELL_FILL_QUANTIZE_BITS) -> np.ndarray:
+    """Round each channel to ``bits`` bits (reduces JPEG / AA noise for modal tests)."""
+
+    shift = max(0, 8 - bits)
+    if shift == 0:
+        return pixels
+    # Floor to the bin (avoid ``255 + round`` overflowing past 255 → 0).
+    return (pixels.astype(np.uint16) >> shift << shift).astype(np.uint8)
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int] | np.ndarray) -> str:
+    channels = [int(max(0, min(255, round(float(channel))))) for channel in rgb[:3]]
+    return f"#{channels[0]:02X}{channels[1]:02X}{channels[2]:02X}"
+
+
+def _raster_fill_for_cell(
+    cell_bbox: BBox,
+    *,
+    pixmap: Any,
+    scale: float,
+    word_boxes: list[BBox],
+    min_share: float = CELL_FILL_MODAL_MIN_SHARE,
+) -> str | None:
+    """Modal (quantised) non-text colour, else median — covers soft / gradient fills."""
+
+    remaining = _non_text_pixels_for_cell(
+        cell_bbox,
+        pixmap=pixmap,
+        scale=scale,
+        word_boxes=word_boxes,
+    )
+    if remaining is None:
+        return None
+
+    quantised = _quantize_rgb(remaining)
+    packed = (
+        quantised[:, 0].astype(np.int32) << 16
+        | quantised[:, 1].astype(np.int32) << 8
+        | quantised[:, 2].astype(np.int32)
+    )
+    values, counts = np.unique(packed, return_counts=True)
+    best_index = int(np.argmax(counts))
+    share = float(counts[best_index]) / float(packed.size)
+    if share >= min_share:
+        # Quantisation only groups noise; emit the median of the original pixels
+        # in the winning bucket so translucent composites stay accurate.
+        bucket = remaining[packed == values[best_index]]
+        return _rgb_to_hex(np.median(bucket.astype(np.float64), axis=0))
+
+    # Gradient / soft fills: no single bucket dominates — use median RGB.
+    median_rgb = np.median(remaining.astype(np.float64), axis=0)
+    return _rgb_to_hex(median_rgb)
+
+
+# Backwards-compatible name used by earlier unit tests / call sites.
+def _modal_fill_for_cell(
+    cell_bbox: BBox,
+    *,
+    pixmap: Any,
+    scale: float,
+    word_boxes: list[BBox],
+    min_share: float = CELL_FILL_MODAL_MIN_SHARE,
+) -> str | None:
+    return _raster_fill_for_cell(
+        cell_bbox,
+        pixmap=pixmap,
+        scale=scale,
+        word_boxes=word_boxes,
+        min_share=min_share,
+    )
 
 
 __all__ = [
+    "CELL_FILL_MODAL_MIN_SHARE",
+    "CELL_FILL_OPAQUE_OPACITY",
+    "CELL_FILL_QUANTIZE_BITS",
+    "CELL_FILL_VECTOR_INSET_PT",
+    "HAIRLINE_RULE_MAX_SHORT_PT",
+    "HAIRLINE_RULE_MIN_LONG_PT",
+    "LARGE_EMPTY_CELL_PAGE_RATIO",
     "PAGE_BACKGROUND_AREA_RATIO",
+    "SPURIOUS_TABLE_MAX_CELLS",
+    "SPURIOUS_TABLE_PAGE_RATIO",
     "VectorExtractionResult",
+    "apply_cell_fills",
     "apply_header_cell_fills",
     "bbox_area",
     "extract_tables",

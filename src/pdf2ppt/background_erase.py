@@ -339,13 +339,18 @@ def parse_bboxlog_paint_events(
     return events
 
 
-def paint_events_from_page(page: Any) -> list[tuple[int, PaintKind, BBox]]:
-    """Read PDF paint order from ``page.get_bboxlog()`` when available."""
+def paint_events_from_page(page: Any) -> list[tuple[int, PaintKind, BBox]] | None:
+    """Read PDF paint order from ``page.get_bboxlog()`` when available.
+
+    Returns ``None`` when ``get_bboxlog`` raises so callers can fall back to the
+    conservative size/overlap promotion rule instead of treating a hard failure
+    as an empty paint log (which would promote nothing).
+    """
 
     try:
         bboxlog = page.get_bboxlog()
     except Exception:  # noqa: BLE001 - PyMuPDF may raise on odd pages
-        return []
+        return None
     return parse_bboxlog_paint_events(list(bboxlog or []))
 
 
@@ -397,11 +402,13 @@ def shape_should_render_under_raster(
 ) -> bool:
     """Whether an opaque fill must sit under the page raster in PPTX z-order.
 
-    Only promote when:
+    Promote when the fill overlaps an embedded picture enough that erase skipped
+    it, and either:
 
-    * the fill overlaps an embedded picture enough that erase skipped it, and
-    * PDF paint order drew the fill **before** that picture, and
-    * the fill is not smaller than that picture (badges stay editable on top).
+    * PDF paint order is known and drew the fill **before** that picture
+      (size is ignored — small strips under larger photos still promote), or
+    * paint order is unknown (``paint_events is None``) and the fill is not
+      smaller than that picture (conservative badge-safe fallback).
 
     True page-background fills are handled via ``is_page_background`` instead.
     """
@@ -431,12 +438,11 @@ def shape_should_render_under_raster(
         sits_on_picture = shape_area > 0 and overlap / shape_area >= IMAGE_OVERLAP_RATIO
         if not (covers_picture or sits_on_picture):
             continue
-        # Skip badges / icons smaller than the picture they overlap.
-        if shape_area + 1e-6 < image_area:
-            continue
         if paint_events is None:
-            # Without paint order, keep the conservative PR #12 behaviour for
-            # large overlapping fills (used only when bboxlog is unavailable).
+            # Without paint order, keep the conservative PR #12 size rule so
+            # badges / icons smaller than the picture stay editable on top.
+            if shape_area + 1e-6 < image_area:
+                continue
             return True
         if shape_order is None:
             continue

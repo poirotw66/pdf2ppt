@@ -264,20 +264,23 @@ class SlideIrFixtureRoundTripTests(unittest.TestCase):
                 ocr_model_root=None,
                 layout_engine="heuristic",
             )
-            convert_pdf(options)
-            convert_pdf(
-                ConversionOptions(
-                    input_path=pdf_path,
-                    output_path=work / "unused.pptx",
-                    report_path=work / "ir.report.json",
-                    vector_mode="auto",
-                    ocr_model_root=None,
-                    layout_engine="heuristic",
-                ),
-                write_pptx=False,
-                emit_ir_path=ir_path,
-            )
-            convert_from_ir(ir_path, via_ir)
+            # Freeze wall clock so ZIP local-file timestamps in the two PPTX
+            # archives match when the converts straddle a second boundary.
+            with patch("time.time", return_value=1_700_000_000.0):
+                convert_pdf(options)
+                convert_pdf(
+                    ConversionOptions(
+                        input_path=pdf_path,
+                        output_path=work / "unused.pptx",
+                        report_path=work / "ir.report.json",
+                        vector_mode="auto",
+                        ocr_model_root=None,
+                        layout_engine="heuristic",
+                    ),
+                    write_pptx=False,
+                    emit_ir_path=ir_path,
+                )
+                convert_from_ir(ir_path, via_ir)
             self.assertEqual(direct.read_bytes(), via_ir.read_bytes())
 
 

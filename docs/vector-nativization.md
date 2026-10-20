@@ -31,8 +31,13 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
 
 - Detected with `find_tables()` (prefers `refine=True` when available).
 - Emits a native `pptx` table with cell text, column widths / row heights,
-  header fills (sampled), borders, and merges (`colspan` / `rowspan`) when
-  PyMuPDF reports them.
+  cell fills, borders, and merges (`colspan` / `rowspan`) when PyMuPDF reports
+  them. Cell fills prefer an **opaque** containing filled vector rect, then the
+  modal non-text pixel colour (≥60% share, 4-bit quantised), then the median of
+  non-text pixels (gradients / soft fills). Translucent vector fills skip the
+  vector step so composited colours are sampled from the rendered page.
+  Candidates with ≤2 cells covering ≥80% of the page, or grids with neither
+  stroked rules nor Word/Excel hairline filled-rect rules, are rejected.
 - Grid lines and fills that sit inside the table bbox are **not** also emitted
   as shapes.
 - Text blocks whose content belongs to the table are **not** also emitted as
@@ -47,10 +52,11 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
   uses the median colour of a small ring around the region (falling back to an
   underneath opaque fill) so white halos do not appear when a large card sits
   under the page raster.
-- Opaque fills painted **before** an overlapping picture (and not smaller than
-  that picture) are marked `render_under_raster` so PPTX places them under the
-  background image; badges / cards painted after a photo stay editable above.
-  This is distinct from `is_page_background` (≥95% page fills).
+- Opaque fills painted **before** an overlapping picture are marked
+  `render_under_raster` so PPTX places them under the background image (paint
+  order alone when `get_bboxlog()` is available; size/overlap fallback when it
+  is not). Badges / cards painted after a photo stay editable above. This is
+  distinct from `is_page_background` (≥95% page fills).
 - Translucent solid fills are **un-composited** from the raster
   (`bg = (pix − α·fill) / (1 − α)`) before the native shape is drawn, so
   caption boxes over photos are not darkened twice.
