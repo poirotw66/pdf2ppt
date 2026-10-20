@@ -1779,6 +1779,360 @@ class FidelityProbeRegressionTests(unittest.TestCase):
         self.assertLess(min(card_idxs), min(pic_idxs))
 
 
+class TableFillAndGuardRegressionTests(unittest.TestCase):
+    """Centred-text fills + tightened spurious-table guard (PR #13 follow-up)."""
+
+    @staticmethod
+    def _centered_text(
+        page: fitz.Page,
+        rect: fitz.Rect,
+        text: str,
+        *,
+        fontsize: float,
+        color: tuple[float, float, float],
+        fontname: str = "helv",
+    ) -> None:
+        width = fitz.get_text_length(text, fontname=fontname, fontsize=fontsize)
+        x = rect.x0 + max(0.0, (rect.width - width) / 2.0)
+        page.insert_text(
+            fitz.Point(x, rect.y0 + fontsize * 0.85),
+            text,
+            fontsize=fontsize,
+            fontname=fontname,
+            color=color,
+        )
+
+    @staticmethod
+    def _draw_grid(
+        page: fitz.Page,
+        *,
+        x0: float,
+        y0: float,
+        col_widths: list[float],
+        row_heights: list[float],
+        rows: list[list[str]],
+        fills: object,
+        border: tuple[float, float, float] = (0.3, 0.3, 0.3),
+        border_width: float = 1.0,
+    ) -> list[tuple[int, int, fitz.Rect, str]]:
+        placed: list[tuple[int, int, fitz.Rect, str]] = []
+        y = y0
+        for row_index, row in enumerate(rows):
+            x = x0
+            for col_index, value in enumerate(row):
+                fill = fills(row_index, col_index) if callable(fills) else (1.0, 1.0, 1.0)
+                cell_rect = fitz.Rect(x, y, x + col_widths[col_index], y + row_heights[row_index])
+                page.draw_rect(cell_rect, color=border, fill=fill, width=border_width)
+                if value:
+                    placed.append((row_index, col_index, cell_rect, value))
+                x += col_widths[col_index]
+            y += row_heights[row_index]
+        return placed
+
+    def test_centered_number_cells_keep_vector_fills(self) -> None:
+        """Centred glyphs must not be sampled as black cell fills (header + body)."""
+
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.vector_nativization import apply_cell_fills, extract_tables
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.insert_textbox(
+            fitz.Rect(60, 30, 800, 70),
+            "Quarterly numbers (centred cells)",
+            fontsize=24,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        rows = [
+            ["Region", "Q1", "Q2", "Q3", "Q4"],
+            ["North", "8888", "4521", "9090", "1234"],
+            ["South", "1111", "8080", "8888", "5555"],
+            ["East", "9999", "8686", "3838", "8181"],
+            ["West", "4848", "8008", "9449", "8338"],
+        ]
+        placed = self._draw_grid(
+            page,
+            x0=80,
+            y0=100,
+            col_widths=[180, 130, 130, 130, 130],
+            row_heights=[40] * 5,
+            rows=rows,
+            fills=lambda r, _c: (0.15, 0.3, 0.6) if r == 0 else (1.0, 1.0, 1.0),
+        )
+        for row_index, _col, cell_rect, value in placed:
+            self._centered_text(
+                page,
+                cell_rect,
+                value,
+                fontsize=16,
+                color=(1.0, 1.0, 1.0) if row_index == 0 else (0.0, 0.0, 0.0),
+                fontname="helv",
+            )
+        # Extra body text for digital classification without OCR.
+        page.insert_textbox(
+            fitz.Rect(60, 340, 700, 500),
+            "Extra caption text so native character coverage keeps this page digital for CI "
+            "without PaddleOCR while centred table cells keep vector fills.",
+            fontsize=12,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-centered-"))
+        pdf_path = work / "t_centered_numbers.pdf"
+        pptx_path = work / "t_centered_numbers.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+
+        with fitz.open(pdf_path) as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+            self.assertEqual(len(tables), 1)
+            apply_cell_fills(tables[0], page)
+            header = [cell.fill_color for cell in tables[0].cells if cell.row == 0]
+            body = [cell.fill_color for cell in tables[0].cells if cell.row > 0]
+            self.assertTrue(header)
+            self.assertTrue(all(color == "#264D99" for color in header))
+            self.assertTrue(body)
+            self.assertTrue(all(color == "#FFFFFF" for color in body))
+
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=pdf_path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        self.assertTrue(report.pages[0].table_elements)
+        table = report.pages[0].table_elements[0]
+        self.assertTrue(all(cell.fill_color == "#264D99" for cell in table.cells if cell.row == 0))
+        self.assertTrue(all(cell.fill_color == "#FFFFFF" for cell in table.cells if cell.row > 0))
+
+    def test_zebra_centered_cells_keep_stripe_fills(self) -> None:
+        """Zebra stripes + centred text must resolve to header / stripe / white fills only."""
+
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.vector_nativization import apply_cell_fills, extract_tables
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.draw_rect(fitz.Rect(0, 0, 960, 540), color=None, fill=(0.97, 0.96, 0.92))
+        page.insert_textbox(
+            fitz.Rect(60, 30, 800, 70),
+            "Zebra table",
+            fontsize=24,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        rows = [["ID", "Name", "Status", "Score"]] + [
+            [str(i), f"Item {i}", "OK" if i % 2 else "WAIT", str(80 + i)] for i in range(1, 8)
+        ]
+
+        def _zebra_fill(row: int, _col: int) -> tuple[float, float, float]:
+            if row == 0:
+                return (0.2, 0.2, 0.25)
+            return (0.9, 0.94, 1.0) if row % 2 else (1.0, 1.0, 1.0)
+
+        placed = self._draw_grid(
+            page,
+            x0=80,
+            y0=90,
+            col_widths=[100, 260, 200, 160],
+            row_heights=[34] * 8,
+            rows=rows,
+            fills=_zebra_fill,
+            border=(0.7, 0.7, 0.7),
+        )
+        for row_index, _col, cell_rect, value in placed:
+            self._centered_text(
+                page,
+                cell_rect,
+                value,
+                fontsize=15,
+                color=(1.0, 1.0, 1.0) if row_index == 0 else (0.05, 0.05, 0.05),
+            )
+        page.insert_textbox(
+            fitz.Rect(60, 400, 700, 520),
+            "Extra caption text so native character coverage keeps this page digital for CI "
+            "without PaddleOCR while zebra stripes stay vector fills.",
+            fontsize=12,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-zebra-"))
+        pdf_path = work / "t_zebra_centered.pdf"
+        pdf_path.write_bytes(pdf_bytes)
+
+        with fitz.open(pdf_path) as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+            self.assertEqual(len(tables), 1)
+            apply_cell_fills(tables[0], page)
+            header = {cell.fill_color for cell in tables[0].cells if cell.row == 0}
+            odd = {cell.fill_color for cell in tables[0].cells if cell.row > 0 and cell.row % 2 == 1}
+            even = {cell.fill_color for cell in tables[0].cells if cell.row > 0 and cell.row % 2 == 0}
+            self.assertEqual(header, {"#333340"})
+            self.assertEqual(odd, {"#E5F0FF"})
+            self.assertEqual(even, {"#FFFFFF"})
+            self.assertEqual(
+                {cell.fill_color for cell in tables[0].cells},
+                {"#333340", "#E5F0FF", "#FFFFFF"},
+            )
+
+    def test_form_and_sparse_grid_stay_native_tables(self) -> None:
+        """Large empty notes cells must not trip the tightened page-cover guard."""
+
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.render_compare import inspect_pptx_editability
+        from pdf2ppt.vector_nativization import extract_tables
+
+        # Review form with a large empty lower cell (stroked rules).
+        form_doc = fitz.open()
+        form_page = form_doc.new_page(width=960, height=540)
+        form_page.insert_textbox(fitz.Rect(40, 10, 800, 40), "Review form", fontsize=20, fontname="helv")
+        form_page.draw_rect(fitz.Rect(40, 50, 920, 520), color=(0, 0, 0), width=1.5)
+        for y in (90, 130):
+            form_page.draw_line(fitz.Point(40, y), fitz.Point(920, y), color=(0, 0, 0), width=1)
+        form_page.draw_line(fitz.Point(260, 50), fitz.Point(260, 130), color=(0, 0, 0), width=1)
+        form_page.insert_textbox(fitz.Rect(48, 62, 255, 88), "Reviewer", fontsize=13, fontname="helv")
+        form_page.insert_textbox(fitz.Rect(268, 62, 900, 88), "A. Chen", fontsize=13, fontname="helv")
+        form_page.insert_textbox(fitz.Rect(48, 102, 255, 128), "Date", fontsize=13, fontname="helv")
+        form_page.insert_textbox(fitz.Rect(268, 102, 900, 128), "2026-10-20", fontsize=13, fontname="helv")
+        form_page.insert_textbox(
+            fitz.Rect(48, 150, 500, 220),
+            "Notes area stays empty on purpose while the stroked form remains a native table.",
+            fontsize=12,
+            fontname="helv",
+        )
+        form_bytes = form_doc.tobytes(garbage=4, deflate=True)
+        form_doc.close()
+
+        # Sparse 3×3 grid with large empty body cells.
+        sparse_doc = fitz.open()
+        sparse_page = sparse_doc.new_page(width=960, height=540)
+        for row_index, col_index, cell_rect, value in self._draw_grid(
+            sparse_page,
+            x0=40,
+            y0=40,
+            col_widths=[293, 293, 294],
+            row_heights=[60, 200, 200],
+            rows=[["Plan", "Owner", "Due"], ["", "", ""], ["", "", ""]],
+            fills=lambda _r, _c: (1.0, 1.0, 1.0),
+            border=(0.0, 0.0, 0.0),
+            border_width=1.2,
+        ):
+            sparse_page.insert_textbox(
+                fitz.Rect(cell_rect.x0 + 8, cell_rect.y0 + 20, cell_rect.x1, cell_rect.y1),
+                value,
+                fontsize=16,
+                fontname="helv",
+            )
+        sparse_page.insert_textbox(
+            fitz.Rect(40, 480, 700, 530),
+            "Sparse grid body cells are empty but stroked rules keep this a native table.",
+            fontsize=12,
+            fontname="helv",
+        )
+        sparse_bytes = sparse_doc.tobytes(garbage=4, deflate=True)
+        sparse_doc.close()
+
+        # Merged empty notes / sketch regions.
+        merged_doc = fitz.open()
+        merged_page = merged_doc.new_page(width=960, height=540)
+        merged_page.draw_rect(fitz.Rect(40, 20, 920, 520), color=(0, 0, 0), width=1.2)
+        merged_page.draw_line(fitz.Point(200, 20), fitz.Point(200, 520), color=(0, 0, 0))
+        merged_page.draw_line(fitz.Point(600, 20), fitz.Point(600, 60), color=(0, 0, 0))
+        merged_page.draw_line(fitz.Point(40, 60), fitz.Point(920, 60), color=(0, 0, 0))
+        merged_page.draw_line(fitz.Point(40, 290), fitz.Point(200, 290), color=(0, 0, 0))
+        for y, label in ((20, "Topic"), (60, "Morning"), (290, "Afternoon")):
+            merged_page.insert_textbox(
+                fitz.Rect(48, y + 12, 195, y + 40),
+                label,
+                fontsize=13,
+                fontname="helv",
+            )
+        merged_page.insert_textbox(fitz.Rect(208, 32, 595, 58), "Notes", fontsize=13, fontname="helv")
+        merged_page.insert_textbox(fitz.Rect(608, 32, 915, 58), "Sketch", fontsize=13, fontname="helv")
+        merged_page.insert_textbox(
+            fitz.Rect(220, 80, 700, 140),
+            "Large empty Notes and Sketch cells must remain a native merged table.",
+            fontsize=12,
+            fontname="helv",
+        )
+        merged_bytes = merged_doc.tobytes(garbage=4, deflate=True)
+        merged_doc.close()
+
+        for label, pdf_bytes in (
+            ("t_form_big_empty", form_bytes),
+            ("t_sparse_grid", sparse_bytes),
+            ("t_merged_empty_42", merged_bytes),
+        ):
+            work = Path(tempfile.mkdtemp(prefix=f"pdf2ppt-{label}-"))
+            pdf_path = work / f"{label}.pdf"
+            pptx_path = work / f"{label}.pptx"
+            pdf_path.write_bytes(pdf_bytes)
+            with fitz.open(pdf_path) as document:
+                page = document[0]
+                blocks, _images = extract_native_text_blocks(page)
+                tables = extract_tables(page, blocks, page_number=1)
+                self.assertGreaterEqual(len(tables), 1, label)
+            report = convert_pdf(
+                ConversionOptions(
+                    input_path=pdf_path,
+                    output_path=pptx_path,
+                    report_path=work / "report.json",
+                    ocr_model_root=None,
+                    layout_engine="heuristic",
+                )
+            )
+            self.assertTrue(report.pages[0].table_elements, label)
+            metrics = inspect_pptx_editability(pptx_path)[0]
+            self.assertGreaterEqual(metrics.table_count, 1, label)
+
+    def test_straddle_still_rejected_as_non_table(self) -> None:
+        """Two page fills with no stroked rules must still not become a native table."""
+
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.vector_nativization import extract_tables
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.draw_rect(fitz.Rect(0, 0, 960, 540), color=None, fill=(0.97, 0.97, 0.97))
+        page.draw_rect(fitz.Rect(0, 0, 480, 540), color=None, fill=(0.85, 0.9, 0.98))
+        page.insert_textbox(
+            fitz.Rect(60, 30, 600, 80),
+            "Icons straddling two fills",
+            fontsize=26,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(60, 90, 400, 380),
+            "Left-panel body copy keeps native character coverage above the digital "
+            "threshold so conversion never initializes PaddleOCR.",
+            fontsize=14,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+            self.assertEqual(tables, [])
+
+
 class MultilineBodyWidthTests(unittest.TestCase):
     @unittest.skipUnless((FIXTURES_DIR / "large_mask.pdf").exists(), "fixture missing")
     def test_large_mask_text_box_stays_within_slide(self) -> None:

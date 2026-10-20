@@ -31,9 +31,11 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
 
 - Detected with `find_tables()` (prefers `refine=True` when available).
 - Emits a native `pptx` table with cell text, column widths / row heights,
-  cell fills (sampled for every cell), borders, and merges (`colspan` /
-  `rowspan`) when PyMuPDF reports them. Candidates with an empty cell covering
-  ≥40% of the page are rejected (side-by-side page fills misread as a 1×2 table).
+  cell fills, borders, and merges (`colspan` / `rowspan`) when PyMuPDF reports
+  them. Cell fills prefer the smallest containing filled vector rect, then the
+  modal non-text pixel colour (≥60% share); otherwise the cell stays unfilled
+  (avoids sampling centred glyphs). Candidates with ≤2 cells covering ≥80% of
+  the page, or grids with no stroked rules (fill edges only), are rejected.
 - Grid lines and fills that sit inside the table bbox are **not** also emitted
   as shapes.
 - Text blocks whose content belongs to the table are **not** also emitted as

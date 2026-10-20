@@ -16,6 +16,7 @@ from statistics import median
 from typing import Any
 
 import fitz
+import numpy as np
 
 from .models import (
     ArrowDirection,
@@ -46,9 +47,16 @@ DEFAULT_MAX_SHAPES_AGGRESSIVE = 400
 TABLE_TEXT_OVERLAP_RATIO = 0.45
 # Drawing rect mostly inside a table → absorb into table (skip as shape).
 TABLE_DRAWING_CONTAINMENT_RATIO = 0.85
-# find_tables() false positive: empty cell covering this fraction of the page
-# (e.g. two side-by-side page fills misread as a 1×2 table).
-LARGE_EMPTY_CELL_PAGE_RATIO = 0.40
+# find_tables() false positive: tiny cell-count candidates covering almost the
+# whole page (e.g. two side-by-side page fills misread as a 1×2 table).
+SPURIOUS_TABLE_MAX_CELLS = 2
+SPURIOUS_TABLE_PAGE_RATIO = 0.80
+# Inset when matching a cell to a containing filled vector rect.
+CELL_FILL_VECTOR_INSET_PT = 2.0
+# Modal non-text pixel share required to accept a raster-sampled cell fill.
+CELL_FILL_MODAL_MIN_SHARE = 0.60
+# Backwards-compatible alias (pre-tighten empty-cell guard threshold).
+LARGE_EMPTY_CELL_PAGE_RATIO = SPURIOUS_TABLE_PAGE_RATIO
 
 
 @dataclass(slots=True)
@@ -829,17 +837,16 @@ def _table_to_element(
 
     column_widths, row_heights = _estimate_table_geometry(rows, bbox, row_count, col_count)
     page_area = max(float(page.rect.width * page.rect.height), 1.0)
-    if _table_has_spurious_large_empty_cell(
+    if _is_spurious_table_candidate(
         cells,
-        column_widths=column_widths,
-        row_heights=row_heights,
+        table_bbox=bbox,
         page_area=page_area,
+        page=page,
     ):
         logger.debug(
-            "Rejecting table %s on page %s: empty cell covers >= %.0f%% of page",
+            "Rejecting table %s on page %s: spurious fill-edge / page-covering candidate",
             table_index,
             page_number,
-            LARGE_EMPTY_CELL_PAGE_RATIO * 100.0,
         )
         return None
 
@@ -861,24 +868,61 @@ def _table_to_element(
     )
 
 
-def _table_has_spurious_large_empty_cell(
+def _is_spurious_table_candidate(
     cells: list[TableCell],
     *,
-    column_widths: list[float],
-    row_heights: list[float],
+    table_bbox: BBox,
     page_area: float,
-    area_ratio: float = LARGE_EMPTY_CELL_PAGE_RATIO,
+    page: fitz.Page,
+    max_cells: int = SPURIOUS_TABLE_MAX_CELLS,
+    page_ratio: float = SPURIOUS_TABLE_PAGE_RATIO,
 ) -> bool:
-    """True when an empty cell covers so much of the page it is likely a fill, not a table."""
+    """True for find_tables() false positives (page fills, not ruled tables).
 
-    if page_area <= 0 or area_ratio <= 0:
+    Reject when:
+
+    * the candidate has ``<= max_cells`` cells and covers ``>= page_ratio`` of the
+      page (side-by-side page fills misread as a 1×2 table), or
+    * the grid is derived only from fill edges (no stroked rules near the bbox).
+    """
+
+    if page_area <= 0 or not cells:
         return False
-    for cell in cells:
-        if cell.text.strip():
+    covers_page = bbox_area(table_bbox) / page_area >= page_ratio
+    if len(cells) <= max_cells and covers_page:
+        return True
+    if not _table_has_stroked_rules(page, table_bbox):
+        return True
+    return False
+
+
+def _table_has_stroked_rules(page: fitz.Page, table_bbox: BBox, *, pad: float = 2.0) -> bool:
+    """True when at least one stroked path hugs the table (ruled grid, not fill edges)."""
+
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001
+        return False
+    outer = (
+        table_bbox[0] - pad,
+        table_bbox[1] - pad,
+        table_bbox[2] + pad,
+        table_bbox[3] + pad,
+    )
+    for path in drawings:
+        if path.get("type") not in {"s", "fs"}:
             continue
-        width = sum(column_widths[cell.col : cell.col + cell.colspan])
-        height = sum(row_heights[cell.row : cell.row + cell.rowspan])
-        if width * height / page_area >= area_ratio:
+        color = path.get("color")
+        width = path.get("width")
+        if color is None or width is None:
+            continue
+        if float(width) <= 0 or float(width) > 4.0:
+            continue
+        rect = path.get("rect")
+        if rect is None:
+            continue
+        line_bbox = _rect_to_bbox(rect)
+        if _bbox_center_inside(line_bbox, outer, padding=pad):
             return True
     return False
 
@@ -1180,32 +1224,41 @@ def apply_cell_fills(
     *,
     dpi: int = 72,
 ) -> None:
-    """Sample each cell's center colour so native tables keep header and body fills."""
+    """Resolve solid cell fills without sampling centred glyphs.
+
+    Preference order per cell:
+
+    1. Fill of the smallest filled vector rect that contains the cell (inset 2pt).
+    2. Modal colour of the cell's raster pixels after masking ``get_text('words')``
+       boxes, only when that mode covers ≥60% of the remaining pixels.
+    3. Otherwise leave ``fill_color`` unset (transparent / theme default).
+    """
 
     if not table.cells:
         return
-    try:
-        pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-    except Exception:  # noqa: BLE001
-        return
+    filled_rects = _collect_filled_vector_rects(page)
+    word_boxes = _collect_word_boxes(page)
+    pixmap: Any | None = None
     scale = dpi / 72.0
-    samples = pixmap.samples
-    width = pixmap.width
-    n = pixmap.n
     for cell in table.cells:
-        # Locate cell bbox via column/row geometry.
-        x0 = table.bbox[0] + sum(table.column_widths[: cell.col])
-        y0 = table.bbox[1] + sum(table.row_heights[: cell.row])
-        x1 = x0 + sum(table.column_widths[cell.col : cell.col + cell.colspan])
-        y1 = y0 + sum(table.row_heights[cell.row : cell.row + cell.rowspan])
-        cx = int(((x0 + x1) / 2.0) * scale)
-        cy = int(((y0 + y1) / 2.0) * scale)
-        if not (0 <= cx < width and 0 <= cy < pixmap.height):
+        cell_bbox = _cell_bbox_from_geometry(table, cell)
+        vector_fill = _vector_fill_for_cell(cell_bbox, filled_rects)
+        if vector_fill is not None:
+            cell.fill_color = vector_fill
             continue
-        offset = (cy * width + cx) * n
-        if offset + 2 >= len(samples):
-            continue
-        cell.fill_color = f"#{samples[offset]:02X}{samples[offset + 1]:02X}{samples[offset + 2]:02X}"
+        if pixmap is None:
+            try:
+                pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+            except Exception:  # noqa: BLE001
+                return
+        modal = _modal_fill_for_cell(
+            cell_bbox,
+            pixmap=pixmap,
+            scale=scale,
+            word_boxes=word_boxes,
+        )
+        if modal is not None:
+            cell.fill_color = modal
 
 
 def apply_header_cell_fills(
@@ -1219,9 +1272,152 @@ def apply_header_cell_fills(
     apply_cell_fills(table, page, dpi=dpi)
 
 
+def _cell_bbox_from_geometry(table: TableElement, cell: TableCell) -> BBox:
+    x0 = table.bbox[0] + sum(table.column_widths[: cell.col])
+    y0 = table.bbox[1] + sum(table.row_heights[: cell.row])
+    x1 = x0 + sum(table.column_widths[cell.col : cell.col + cell.colspan])
+    y1 = y0 + sum(table.row_heights[cell.row : cell.row + cell.rowspan])
+    return (x0, y0, x1, y1)
+
+
+def _collect_filled_vector_rects(page: fitz.Page) -> list[tuple[BBox, str]]:
+    """Filled drawing rects as ``(bbox, #RRGGBB)``, smallest-first consumers sort later."""
+
+    results: list[tuple[BBox, str]] = []
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001
+        return results
+    for path in drawings:
+        fill = path.get("fill")
+        if fill is None:
+            continue
+        fill_hex = rgb_tuple_to_hex(fill)
+        if fill_hex is None:
+            continue
+        rect = path.get("rect")
+        if rect is None:
+            continue
+        results.append((_rect_to_bbox(rect), fill_hex))
+    return results
+
+
+def _vector_fill_for_cell(
+    cell_bbox: BBox,
+    filled_rects: list[tuple[BBox, str]],
+    *,
+    inset_pt: float = CELL_FILL_VECTOR_INSET_PT,
+) -> str | None:
+    """Fill of the smallest vector rect containing the cell inset by ``inset_pt``."""
+
+    inner = (
+        cell_bbox[0] + inset_pt,
+        cell_bbox[1] + inset_pt,
+        cell_bbox[2] - inset_pt,
+        cell_bbox[3] - inset_pt,
+    )
+    if inner[2] <= inner[0] or inner[3] <= inner[1]:
+        inner = cell_bbox
+    best_area: float | None = None
+    best_fill: str | None = None
+    for rect_bbox, fill_hex in filled_rects:
+        if not (
+            rect_bbox[0] <= inner[0]
+            and rect_bbox[1] <= inner[1]
+            and rect_bbox[2] >= inner[2]
+            and rect_bbox[3] >= inner[3]
+        ):
+            continue
+        area = bbox_area(rect_bbox)
+        if best_area is None or area < best_area:
+            best_area = area
+            best_fill = fill_hex
+    return best_fill
+
+
+def _collect_word_boxes(page: fitz.Page) -> list[BBox]:
+    boxes: list[BBox] = []
+    try:
+        words = page.get_text("words") or []
+    except Exception:  # noqa: BLE001
+        return boxes
+    for word in words:
+        if not isinstance(word, (tuple, list)) or len(word) < 4:
+            continue
+        try:
+            boxes.append((float(word[0]), float(word[1]), float(word[2]), float(word[3])))
+        except (TypeError, ValueError):
+            continue
+    return boxes
+
+
+def _modal_fill_for_cell(
+    cell_bbox: BBox,
+    *,
+    pixmap: Any,
+    scale: float,
+    word_boxes: list[BBox],
+    min_share: float = CELL_FILL_MODAL_MIN_SHARE,
+) -> str | None:
+    """Dominant non-text pixel colour inside ``cell_bbox``, or ``None`` if unclear."""
+
+    left = max(0, int(cell_bbox[0] * scale))
+    top = max(0, int(cell_bbox[1] * scale))
+    right = min(pixmap.width, int(math.ceil(cell_bbox[2] * scale)))
+    bottom = min(pixmap.height, int(math.ceil(cell_bbox[3] * scale)))
+    if right <= left or bottom <= top:
+        return None
+
+    samples = np.frombuffer(pixmap.samples, dtype=np.uint8)
+    n = int(pixmap.n)
+    if n < 3:
+        return None
+    pixels = samples.reshape(pixmap.height, pixmap.width, n)[top:bottom, left:right, :3]
+    if pixels.size == 0:
+        return None
+
+    mask = np.ones(pixels.shape[:2], dtype=bool)
+    for word_bbox in word_boxes:
+        # Skip words that miss this cell entirely.
+        if (
+            word_bbox[2] <= cell_bbox[0]
+            or word_bbox[0] >= cell_bbox[2]
+            or word_bbox[3] <= cell_bbox[1]
+            or word_bbox[1] >= cell_bbox[3]
+        ):
+            continue
+        w_left = max(left, int(word_bbox[0] * scale))
+        w_top = max(top, int(word_bbox[1] * scale))
+        w_right = min(right, int(math.ceil(word_bbox[2] * scale)))
+        w_bottom = min(bottom, int(math.ceil(word_bbox[3] * scale)))
+        if w_right > w_left and w_bottom > w_top:
+            mask[w_top - top : w_bottom - top, w_left - left : w_right - left] = False
+
+    remaining = pixels[mask]
+    if remaining.size == 0:
+        return None
+    # Pack RGB into a single int for a fast mode count.
+    packed = (
+        remaining[:, 0].astype(np.int32) << 16
+        | remaining[:, 1].astype(np.int32) << 8
+        | remaining[:, 2].astype(np.int32)
+    )
+    values, counts = np.unique(packed, return_counts=True)
+    best_index = int(np.argmax(counts))
+    share = float(counts[best_index]) / float(packed.size)
+    if share < min_share:
+        return None
+    best = int(values[best_index])
+    return f"#{(best >> 16) & 0xFF:02X}{(best >> 8) & 0xFF:02X}{best & 0xFF:02X}"
+
+
 __all__ = [
+    "CELL_FILL_MODAL_MIN_SHARE",
+    "CELL_FILL_VECTOR_INSET_PT",
     "LARGE_EMPTY_CELL_PAGE_RATIO",
     "PAGE_BACKGROUND_AREA_RATIO",
+    "SPURIOUS_TABLE_MAX_CELLS",
+    "SPURIOUS_TABLE_PAGE_RATIO",
     "VectorExtractionResult",
     "apply_cell_fills",
     "apply_header_cell_fills",
