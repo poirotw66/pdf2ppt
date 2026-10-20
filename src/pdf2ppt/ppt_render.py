@@ -70,7 +70,25 @@ def render_page_to_slide(
 
     # Track every page-background picture/shape so the title can sit above all of them.
     background_elements: list[Any] = []
-    if page_result.background_image_bytes is not None:
+    shape_elements = list(getattr(page_result, "shape_elements", None) or [])
+    background_shapes = [shape for shape in shape_elements if shape.is_page_background]
+    foreground_shapes = [shape for shape in shape_elements if not shape.is_page_background]
+    has_raster_background = page_result.background_image_bytes is not None
+
+    # PDF paint order: page-sized background fills are painted first. When a
+    # full-slide raster already carries that fill (and any embedded figures),
+    # emitting the fill as a native shape above the picture hides content
+    # (figure_caption regression). Skip those shapes in that case; otherwise
+    # place them at the absolute bottom of the slide z-order.
+    if not has_raster_background:
+        for shape in sorted(background_shapes, key=lambda item: item.z_order):
+            added = add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
+            if added is not None:
+                element = getattr(added, "_element", None)
+                if element is not None:
+                    background_elements.append(element)
+
+    if has_raster_background:
         background_picture = slide.shapes.add_picture(
             io.BytesIO(page_result.background_image_bytes),
             0,
@@ -80,23 +98,20 @@ def render_page_to_slide(
         )
         background_elements.append(background_picture._element)  # noqa: SLF001
 
-    # Z-order: page-background shapes → other shapes → pictures → tables → text.
-    shape_elements = list(getattr(page_result, "shape_elements", None) or [])
-    background_shapes = [shape for shape in shape_elements if shape.is_page_background]
-    foreground_shapes = [shape for shape in shape_elements if not shape.is_page_background]
-    for shape in sorted(background_shapes, key=lambda item: item.z_order):
-        added = add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
-        if added is not None:
-            element = getattr(added, "_element", None)
-            if element is not None:
-                background_elements.append(element)
-    for shape in sorted(foreground_shapes, key=lambda item: item.z_order):
-        add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
-
-    for image_element in page_result.image_elements:
-        left, top, width, height = bbox_to_shape_geometry(image_element.bbox, scale_x, scale_y)
+    # Foreground shapes and cropped pictures follow PDF paint order via z_order.
+    layered_items: list[tuple[int, int, str, Any]] = []
+    for index, shape in enumerate(foreground_shapes):
+        layered_items.append((int(shape.z_order), index, "shape", shape))
+    for index, image_element in enumerate(page_result.image_elements or []):
+        image_z = int(getattr(image_element, "z_order", 0) or 0)
+        layered_items.append((image_z, index, "image", image_element))
+    for _z_order, _index, kind, item in sorted(layered_items, key=lambda entry: (entry[0], entry[1], entry[2])):
+        if kind == "shape":
+            add_shape_element(slide, item, scale_x=scale_x, scale_y=scale_y)
+            continue
+        left, top, width, height = bbox_to_shape_geometry(item.bbox, scale_x, scale_y)
         slide.shapes.add_picture(
-            io.BytesIO(image_element.png_bytes),
+            io.BytesIO(item.png_bytes),
             left,
             top,
             width=width,

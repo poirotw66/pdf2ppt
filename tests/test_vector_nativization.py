@@ -572,5 +572,141 @@ class EditabilityTableCellTests(unittest.TestCase):
         self.assertGreater(metrics.score, 0.7)
 
 
+class PageBackgroundFillTests(unittest.TestCase):
+    def test_is_page_background_fill_requires_near_full_page_and_no_stroke(self) -> None:
+        from pdf2ppt.vector_nativization import is_page_background_fill
+
+        page_area = 960.0 * 540.0
+        full = (0.0, 0.0, 960.0, 540.0)
+        self.assertTrue(
+            is_page_background_fill(
+                full,
+                page_area=page_area,
+                fill_color="#FFFFFF",
+                stroke_color=None,
+            )
+        )
+        self.assertFalse(
+            is_page_background_fill(
+                full,
+                page_area=page_area,
+                fill_color="#FFFFFF",
+                stroke_color="#000000",
+                stroke_width=1.0,
+            )
+        )
+        self.assertFalse(
+            is_page_background_fill(
+                (0.0, 0.0, 400.0, 300.0),
+                page_area=page_area,
+                fill_color="#FFFFFF",
+            )
+        )
+
+    @unittest.skipUnless((FIXTURES_DIR / "figure_caption.pdf").exists(), "fixture missing")
+    def test_figure_caption_marks_white_page_fill_as_background(self) -> None:
+        with fitz.open(FIXTURES_DIR / "figure_caption.pdf") as document:
+            page = document[0]
+            result = extract_vector_content(page, [], vector_mode="auto", page_kind="digital")
+        self.assertEqual(len(result.shapes), 1)
+        self.assertTrue(result.shapes[0].is_page_background)
+        self.assertEqual(result.shapes[0].fill_color, "#FFFFFF")
+
+    @unittest.skipUnless((FIXTURES_DIR / "figure_caption.pdf").exists(), "fixture missing")
+    def test_figure_caption_page_fill_does_not_cover_raster(self) -> None:
+        from pptx.oxml.ns import qn
+
+        pptx_path, report = _convert("figure_caption")
+        page = report.pages[0]
+        self.assertEqual(page.background_mode, "overlay")
+        self.assertIsNotNone(page.background_image_bytes)
+        self.assertTrue(any(shape.is_page_background for shape in page.shape_elements))
+
+        presentation = Presentation(str(pptx_path))
+        slide = presentation.slides[0]
+        children = list(slide.shapes._spTree)  # noqa: SLF001
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        # Full-page white fill must not be emitted as a shape above the picture.
+        rect_idxs = []
+        for index, child in enumerate(children):
+            if child.tag != qn("p:sp"):
+                continue
+            nv = child.find(".//{http://schemas.openxmlformats.org/presentationml/2006/main}cNvPr")
+            name = (nv.get("name") if nv is not None else "") or ""
+            if name.startswith("Rectangle"):
+                sp_pr = child.find(qn("p:spPr"))
+                xfrm = None if sp_pr is None else sp_pr.find(qn("a:xfrm"))
+                ext = None if xfrm is None else xfrm.find(qn("a:ext"))
+                if ext is None:
+                    continue
+                cx = int(ext.get("cx") or 0)
+                cy = int(ext.get("cy") or 0)
+                # Near full-slide rectangle (960x540 pt → EMU).
+                if cx >= int(960 * 12700 * 0.95) and cy >= int(540 * 12700 * 0.95):
+                    rect_idxs.append(index)
+        self.assertTrue(pic_idxs)
+        self.assertEqual(rect_idxs, [])
+
+    def test_render_interleaves_shapes_and_pictures_by_z_order(self) -> None:
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.models import ImagePlacement, PageResult, QualityScore, ShapeElement
+
+        import io
+
+        buffer = io.BytesIO()
+        from PIL import Image
+
+        Image.new("RGB", (8, 8), color=(10, 120, 200)).save(buffer, format="PNG")
+        page_result = PageResult(
+            page_number=1,
+            page_kind="digital",
+            background_mode="elements",
+            width_pt=960,
+            height_pt=540,
+            text_blocks=[],
+            quality_score=QualityScore(1.0, 1.0, 1.0, 1.0),
+            fallback_reason=None,
+            shape_elements=[
+                ShapeElement(
+                    id="early",
+                    kind="rect",
+                    bbox=(40, 40, 120, 100),
+                    fill_color="#AABBCC",
+                    z_order=1,
+                ),
+                ShapeElement(
+                    id="late",
+                    kind="rect",
+                    bbox=(200, 200, 280, 260),
+                    fill_color="#112233",
+                    z_order=5,
+                ),
+            ],
+            image_elements=[
+                ImagePlacement(bbox=(140, 120, 300, 220), png_bytes=buffer.getvalue(), z_order=3),
+            ],
+        )
+        presentation = Presentation()
+        presentation.slide_width = 12192000
+        presentation.slide_height = 6858000
+        render_page_to_slide(
+            presentation,
+            presentation.slide_layouts[6],
+            page_result,
+            slide_width_pt=960,
+            slide_height_pt=540,
+        )
+        children = list(presentation.slides[0].shapes._spTree)  # noqa: SLF001
+        order: list[str] = []
+        for child in children:
+            tag = child.tag
+            if tag == qn("p:pic"):
+                order.append("pic")
+            elif tag == qn("p:sp"):
+                order.append("sp")
+        self.assertEqual(order, ["sp", "pic", "sp"])
+
+
 if __name__ == "__main__":
     unittest.main()

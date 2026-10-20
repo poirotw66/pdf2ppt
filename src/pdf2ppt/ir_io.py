@@ -300,7 +300,7 @@ def _serialize_page(page: PageResult, *, assets_root: Path) -> dict[str, Any]:
                 "id": f"img_{page.page_number}_{index}",
                 "bbox": list(placement.bbox),
                 "asset": {"path": f"{rel_page}/{filename}", "media_type": "image/png"},
-                "z_order": index,
+                "z_order": int(getattr(placement, "z_order", index) or index),
                 "provenance": "pipeline_crop",
                 "confidence": 1.0,
             }
@@ -418,7 +418,13 @@ def _deserialize_page(
         if not isinstance(asset, dict) or not asset.get("path"):
             raise SlideIrError(f"pages[{page_index}].images[{image_index}] needs asset.path")
         png_bytes = _load_asset_bytes(asset["path"], assets_root=assets_root)
-        image_elements.append(ImagePlacement(bbox=bbox, png_bytes=png_bytes))
+        image_elements.append(
+            ImagePlacement(
+                bbox=bbox,
+                png_bytes=png_bytes,
+                z_order=int(item.get("z_order", image_index) or image_index),
+            )
+        )
 
     background_bytes: bytes | None = None
     background = payload.get("background")

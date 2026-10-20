@@ -209,6 +209,40 @@ class SlideIrFixtureRoundTripTests(unittest.TestCase):
             convert_from_ir(ir_path, pptx_path)
             self.assertTrue(pptx_path.exists())
 
+    @unittest.skipUnless((FIXTURES_DIR / "figure_caption.pdf").exists(), "fixture missing")
+    def test_figure_caption_from_ir_pptx_byte_matches_convert(self) -> None:
+        """SlideIR round-trip must produce the same PPTX bytes as direct convert."""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work = Path(temp_dir)
+            pdf_path = FIXTURES_DIR / "figure_caption.pdf"
+            direct = work / "direct.pptx"
+            via_ir = work / "via_ir.pptx"
+            ir_path = work / "figure.slideir.json"
+            options = ConversionOptions(
+                input_path=pdf_path,
+                output_path=direct,
+                report_path=work / "direct.report.json",
+                vector_mode="auto",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+            convert_pdf(options)
+            convert_pdf(
+                ConversionOptions(
+                    input_path=pdf_path,
+                    output_path=work / "unused.pptx",
+                    report_path=work / "ir.report.json",
+                    vector_mode="auto",
+                    ocr_model_root=None,
+                    layout_engine="heuristic",
+                ),
+                write_pptx=False,
+                emit_ir_path=ir_path,
+            )
+            convert_from_ir(ir_path, via_ir)
+            self.assertEqual(direct.read_bytes(), via_ir.read_bytes())
+
 
 class SlideIrCliTests(unittest.TestCase):
     def test_parser_accepts_emit_and_from_flags(self) -> None:

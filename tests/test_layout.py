@@ -603,8 +603,8 @@ class TitleZOrderTests(unittest.TestCase):
         self.assertTrue(pic_els)
         self.assertGreater(children.index(title_el), children.index(pic_els[0]))
 
-    def test_title_above_last_page_background_shape(self) -> None:
-        """figure_caption case: full-page white rect sits above the bg picture."""
+    def test_page_background_shape_dropped_when_raster_present(self) -> None:
+        """figure_caption: full-page white fill must not cover the overlay picture."""
 
         from pptx.oxml.ns import qn
 
@@ -656,11 +656,68 @@ class TitleZOrderTests(unittest.TestCase):
         title_el = slide.shapes.title._element  # noqa: SLF001
         title_idx = children.index(title_el)
         pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
-        sp_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:sp") and child is not title_el]
+        # Page-background fills are omitted when a full-slide raster already
+        # includes them; only the picture (+ title) should remain.
+        sp_idxs = [
+            i
+            for i, child in enumerate(children)
+            if child.tag == qn("p:sp") and child is not title_el
+        ]
         self.assertTrue(pic_idxs)
-        self.assertTrue(sp_idxs)
-        # Title must sit after both the background picture and the page-fill shape.
-        self.assertGreater(title_idx, max(pic_idxs + sp_idxs))
+        self.assertEqual(sp_idxs, [])
+        self.assertGreater(title_idx, max(pic_idxs))
+
+    def test_page_background_shape_below_foreground_without_raster(self) -> None:
+        """Elements mode: page fill stays at the bottom of z-order."""
+
+        from pptx.oxml.ns import qn
+
+        from pdf2ppt.models import PageResult, QualityScore, ShapeElement
+        from pdf2ppt.ppt_render import render_page_to_slide
+
+        presentation = Presentation()
+        blank = presentation.slide_layouts[6]
+        page = PageResult(
+            page_number=1,
+            page_kind="digital",
+            background_mode="elements",
+            width_pt=960,
+            height_pt=540,
+            shape_elements=[
+                ShapeElement(
+                    id="bg_rect",
+                    kind="rect",
+                    bbox=(0, 0, 960, 540),
+                    fill_color="#FFFFFF",
+                    is_page_background=True,
+                    z_order=0,
+                ),
+                ShapeElement(
+                    id="fg_rect",
+                    kind="rect",
+                    bbox=(100, 100, 300, 200),
+                    fill_color="#336699",
+                    z_order=2,
+                ),
+            ],
+            text_blocks=[],
+            quality_score=QualityScore(1, 1, 1, 1),
+            fallback_reason=None,
+        )
+        render_page_to_slide(presentation, blank, page, slide_width_pt=960, slide_height_pt=540)
+        slide = presentation.slides[0]
+        children = list(slide.shapes._spTree)  # noqa: SLF001
+        sp_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:sp")]
+        self.assertEqual(len(sp_idxs), 2)
+        # First auto-shape is the page background; second is the foreground rect.
+        names = []
+        for child in children:
+            if child.tag != qn("p:sp"):
+                continue
+            nv = child.find(".//{http://schemas.openxmlformats.org/presentationml/2006/main}cNvPr")
+            names.append(nv.get("name") if nv is not None else "")
+        self.assertEqual(len(names), 2)
+        self.assertLess(sp_idxs[0], sp_idxs[1])
 
 
 class GroupedOcrMaskTests(unittest.TestCase):
@@ -982,6 +1039,102 @@ class BulletListPositionTests(unittest.TestCase):
         self.assertIsNotNone(paragraphs[1].space_before_pt)
         assert paragraphs[1].space_before_pt is not None
         self.assertGreater(paragraphs[1].space_before_pt, 18.5)
+
+
+class MultilineBodySpacingTests(unittest.TestCase):
+    """Ordinary multi-line paragraphs must keep PDF baseline spacing (large_mask)."""
+
+    @unittest.skipUnless((FIXTURES / "large_mask.pdf").exists(), "fixture missing")
+    def test_large_mask_layout_baselines_within_3pt_of_pdf(self) -> None:
+        import fitz
+
+        from pdf2ppt.layout import _LINE_HEIGHT_FACTOR
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+
+        pdf_path = FIXTURES / "large_mask.pdf"
+        pdf_line_tops: list[float] = []
+        with fitz.open(pdf_path) as document:
+            page = document[0]
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                for line in block.get("lines", []):
+                    text = "".join(span["text"] for span in line.get("spans", [])).strip()
+                    if not text:
+                        continue
+                    pdf_line_tops.append(float(line["bbox"][1]))
+            native_blocks, _images = extract_native_text_blocks(page)
+
+        self.assertGreaterEqual(len(pdf_line_tops), 4)
+        regions = analyze_layout_heuristic(native_blocks, page_width=960, page_height=540)
+        applied = apply_layout_to_page(
+            native_blocks,
+            LayoutPageResult(regions=regions, engine="heuristic"),
+            page_width=960,
+            page_height=540,
+        )
+        body = next(
+            (block for block in applied.text_blocks if (block.paragraphs or []) and len(block.paragraphs or []) >= 4),
+            None,
+        )
+        self.assertIsNotNone(body)
+        assert body is not None
+        paragraphs = body.paragraphs or []
+        self.assertEqual(len(paragraphs), len(pdf_line_tops))
+
+        # Reconstruct rendered line tops the same way PPT single-spacing + spcBef does.
+        cursor_y = float(body.bbox[1])
+        prev_font = paragraphs[0].font_size or 17.0
+        for index, paragraph in enumerate(paragraphs):
+            font = paragraph.font_size or prev_font
+            if index > 0:
+                spc = paragraph.space_before_pt or 0.0
+                cursor_y += _LINE_HEIGHT_FACTOR * prev_font + spc
+            self.assertLessEqual(
+                abs(cursor_y - pdf_line_tops[index]),
+                3.0,
+                msg=(
+                    f"line {index}: ppt≈{cursor_y:.2f} pdf={pdf_line_tops[index]:.2f} "
+                    f"spcBef={paragraph.space_before_pt}"
+                ),
+            )
+            # Multi-line body must carry positive baseline extras after the first line.
+            if index > 0:
+                self.assertIsNotNone(paragraph.space_before_pt)
+                assert paragraph.space_before_pt is not None
+                self.assertGreater(paragraph.space_before_pt, 0.5)
+            prev_font = font
+
+    def test_multiline_member_block_gets_sliced_baseline_spacing(self) -> None:
+        # Lines longer than 40 chars so split_wide_multiline_blocks keeps one box.
+        text = (
+            "First wrapped line of the paragraph continues with more words here\n"
+            "Second wrapped line continues with still more wording on this row"
+        )
+        blocks = [_block("body", text, (60, 130, 860, 180), font_size=17)]
+        regions = [
+            LayoutRegion(
+                id="r1",
+                label="text",
+                bbox=(60, 130, 860, 180),
+                confidence=1.0,
+                reading_order=1,
+            )
+        ]
+        applied = apply_layout_to_page(
+            blocks,
+            LayoutPageResult(regions=regions, engine="heuristic"),
+            page_width=960,
+            page_height=540,
+        )
+        self.assertEqual(len(applied.text_blocks), 1)
+        paragraphs = applied.text_blocks[0].paragraphs or []
+        self.assertEqual(len(paragraphs), 2)
+        self.assertIsNotNone(paragraphs[1].space_before_pt)
+        assert paragraphs[1].space_before_pt is not None
+        # Equal slice of a 50pt-tall 2-line box → ~25pt slots; gap above 1.2*17≈20.4.
+        self.assertGreater(paragraphs[1].space_before_pt, 2.0)
+        self.assertNotEqual(paragraphs[0].baseline_pt, paragraphs[1].baseline_pt)
 
 
 if __name__ == "__main__":

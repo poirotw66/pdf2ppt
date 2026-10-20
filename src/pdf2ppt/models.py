@@ -219,6 +219,8 @@ class QualityScore:
 class ImagePlacement:
     bbox: BBox
     png_bytes: bytes = field(repr=False)
+    # PDF paint-order key; interleaved with ShapeElement.z_order when rendering.
+    z_order: int = 0
 
 
 @dataclass(slots=True)

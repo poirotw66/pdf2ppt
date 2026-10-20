@@ -854,7 +854,10 @@ def extract_figure_image_placements(
             continue
         from .native_extraction import pil_to_png_bytes
 
-        placements.append(ImagePlacement(bbox=region.bbox, png_bytes=pil_to_png_bytes(crop)))
+        # Figure crops sit above page fills / earlier drawings in PDF paint order.
+        placements.append(
+            ImagePlacement(bbox=region.bbox, png_bytes=pil_to_png_bytes(crop), z_order=1000 + len(placements))
+        )
     return placements
 
 
@@ -1014,6 +1017,29 @@ def _role_for_label(label: LayoutLabel) -> str:
     return "body"
 
 
+def _line_bboxes_for_block(block: TextBlock, line_count: int) -> list[BBox]:
+    """Per-line bboxes for a multi-line text box.
+
+    Native extraction often keeps a paragraph as one block with ``\\n``-joined
+    lines sharing a union bbox. Slice that bbox evenly so baseline gaps (and
+    thus a:spcBef) match PDF line positions the same way bullet lists do.
+    """
+
+    if line_count <= 1:
+        return [block.bbox]
+    box_height = max(1.0, block.bbox[3] - block.bbox[1])
+    line_slot = box_height / float(line_count)
+    return [
+        (
+            block.bbox[0],
+            block.bbox[1] + index * line_slot,
+            block.bbox[2],
+            block.bbox[1] + (index + 1) * line_slot,
+        )
+        for index in range(line_count)
+    ]
+
+
 def _paragraphs_from_members(
     members: list[TextBlock],
     *,
@@ -1025,8 +1051,10 @@ def _paragraphs_from_members(
     prev_baseline: float | None = None
     prev_font: float | None = None
     for block in members:
-        for line in block.text.splitlines() or [block.text]:
-            raw = line.strip()
+        lines = [line for line in block.text.splitlines() if line.strip()] or [block.text]
+        line_bboxes = _line_bboxes_for_block(block, len(lines))
+        for line_index, raw_line in enumerate(lines):
+            raw = raw_line.strip()
             if not raw:
                 continue
             is_list = region_label == "list" or _looks_like_list_line(raw)
@@ -1037,7 +1065,8 @@ def _paragraphs_from_members(
             font_size = block.font_size
             if font_size is None:
                 font_size = _estimate_font_size_from_bbox(block.bbox)
-            baseline = _estimate_baseline_pt(block.bbox, font_size)
+            line_bbox = line_bboxes[min(line_index, len(line_bboxes) - 1)]
+            baseline = _estimate_baseline_pt(line_bbox, font_size)
             space_before = _space_before_from_baselines(
                 baseline, prev_baseline=prev_baseline, prev_font_size=prev_font
             )
@@ -1100,9 +1129,7 @@ def _enrich_block_paragraphs(block: TextBlock) -> TextBlock:
         return block
     min_left = block.bbox[0]
     font_size = block.font_size or _estimate_font_size_from_bbox(block.bbox)
-    # Estimate per-line baselines by slicing the shared bbox (large_mask etc.).
-    box_height = max(1.0, block.bbox[3] - block.bbox[1])
-    line_slot = box_height / max(len(lines), 1)
+    line_bboxes = _line_bboxes_for_block(block, len(lines))
     paragraphs: list[TextParagraph] = []
     any_list = False
     prev_baseline: float | None = None
@@ -1112,12 +1139,7 @@ def _enrich_block_paragraphs(block: TextBlock) -> TextBlock:
         is_list = _looks_like_list_line(raw)
         any_list = any_list or is_list
         cleaned, level, list_style, prefix = strip_bullet_prefix(raw, left=block.bbox[0], min_left=min_left)
-        line_bbox: BBox = (
-            block.bbox[0],
-            block.bbox[1] + index * line_slot,
-            block.bbox[2],
-            block.bbox[1] + (index + 1) * line_slot,
-        )
+        line_bbox = line_bboxes[min(index, len(line_bboxes) - 1)]
         baseline = _estimate_baseline_pt(line_bbox, font_size)
         space_before = _space_before_from_baselines(
             baseline, prev_baseline=prev_baseline, prev_font_size=prev_font
