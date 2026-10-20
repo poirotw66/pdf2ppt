@@ -29,6 +29,7 @@ from .background import (
 )
 from .background_erase import (
     erase_regions_from_image,
+    promote_shapes_under_background,
     regions_for_background_erase,
     resolve_erase_fill_color,
     uncomposite_translucent_shapes_from_image,
@@ -588,6 +589,9 @@ def analyze_page(
                 note = background_inpaint_note or ""
                 erase_note = f"erased {len(erase_regions)} nativized vector/table region(s)"
                 background_inpaint_note = f"{note}; {erase_note}".strip("; ")
+            # Opaque fills kept in the raster (overlap pictures) must render
+            # under that raster so the baked-in photo stays visible.
+            promote_shapes_under_background(vector_result.shapes, image_boxes=image_boxes)
         if layout_figure_images or layout_applied.regions:
             # Re-crop figures from the text-erased raster so OCR labels aren't
             # doubled under editable text boxes (scanned_vector_shapes).

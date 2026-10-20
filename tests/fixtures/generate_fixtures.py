@@ -681,6 +681,69 @@ def build_figure_caption() -> None:
     _save(doc, "figure_caption.pdf")
 
 
+def build_card_93pct() -> None:
+    """~93% opaque card with a ~10% photo on top (below page-background cutoff)."""
+
+    doc, page = _new_doc()
+    page.draw_rect(
+        fitz.Rect(17.1, 9.6, 942.9, 530.4),
+        color=None,
+        fill=(0.85, 0.92, 1.0),
+        fill_opacity=1,
+    )
+    texture = synthetic_photo_texture((220, 150), seed=11)
+    # Warm orange cast so the photo is easy to spot against the light-blue card.
+    warm = np.clip(texture.astype(np.int16) + np.array([40, -20, -60]), 0, 255).astype(np.uint8)
+    page.insert_image(fitz.Rect(560, 152.7, 860, 357.3), stream=_png_bytes(Image.fromarray(warm, mode="RGB")))
+    page.insert_textbox(
+        fitz.Rect(80, 60, 520, 110),
+        "Card at 93% of the page",
+        fontsize=28,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    page.insert_textbox(
+        fitz.Rect(80, 140, 520, 230),
+        "This body paragraph sits on a large colored card. It wraps across several "
+        "lines in the PDF so we can check line spacing and z-order together on one slide.",
+        fontsize=14,
+        fontname="helv",
+        color=(0.15, 0.15, 0.2),
+    )
+    _save(doc, "card_93pct.pdf")
+
+
+def build_dark_97pct() -> None:
+    """~97% dark fill (≥95% page-background) with a photo; must stay under raster."""
+
+    doc, page = _new_doc()
+    page.draw_rect(
+        fitz.Rect(8, 6, 952, 534),
+        color=None,
+        fill=(0.10, 0.12, 0.18),
+        fill_opacity=1,
+    )
+    texture = synthetic_photo_texture((220, 150), seed=13)
+    warm = np.clip(texture.astype(np.int16) + np.array([50, -30, -70]), 0, 255).astype(np.uint8)
+    page.insert_image(fitz.Rect(600, 144.5, 880, 335.5), stream=_png_bytes(Image.fromarray(warm, mode="RGB")))
+    page.insert_textbox(
+        fitz.Rect(60, 40, 520, 90),
+        "Dark 97% backdrop",
+        fontsize=28,
+        fontname="helv",
+        color=(0.95, 0.97, 1.0),
+    )
+    page.insert_textbox(
+        fitz.Rect(60, 120, 560, 190),
+        "Light body text on a dark backdrop that covers almost the whole page "
+        "but not quite all of it, wrapping over multiple lines.",
+        fontsize=14,
+        fontname="helv",
+        color=(0.90, 0.92, 0.96),
+    )
+    _save(doc, "dark_97pct.pdf")
+
+
 def build_scanned_bullet_list() -> None:
     """Rasterized version of the bullet list slide (forces OCR / scanned path)."""
 
@@ -734,6 +797,8 @@ def main() -> None:
     build_bullet_list()
     build_title_two_column()
     build_figure_caption()
+    build_card_93pct()
+    build_dark_97pct()
     build_scanned_bullet_list()
 
 

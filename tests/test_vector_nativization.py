@@ -483,6 +483,51 @@ class TransparentEraseTests(unittest.TestCase):
         # Same large card with no pictures may still be erased.
         self.assertTrue(shape_should_erase_background(large_card, image_boxes=[]))
 
+    def test_large_fill_overlapping_picture_renders_under_background(self) -> None:
+        from pdf2ppt.background_erase import (
+            promote_shapes_under_background,
+            shape_should_render_under_background,
+        )
+        from pdf2ppt.models import ShapeElement
+
+        large_card = ShapeElement(
+            id="card",
+            kind="rect",
+            bbox=(20, 20, 940, 510),
+            fill_color="#224466",
+            fill_opacity=1.0,
+            is_page_background=False,
+        )
+        small_card = ShapeElement(
+            id="badge",
+            kind="rect",
+            bbox=(40, 40, 120, 80),
+            fill_color="#FF0000",
+            fill_opacity=1.0,
+            is_page_background=False,
+        )
+        translucent = ShapeElement(
+            id="cap",
+            kind="rect",
+            bbox=(60, 340, 620, 460),
+            fill_color="#000000",
+            fill_opacity=0.35,
+            is_page_background=False,
+        )
+        picture = (400.0, 180.0, 700.0, 360.0)
+        self.assertTrue(shape_should_render_under_background(large_card, image_boxes=[picture]))
+        self.assertFalse(shape_should_render_under_background(small_card, image_boxes=[picture]))
+        self.assertFalse(shape_should_render_under_background(translucent, image_boxes=[picture]))
+        self.assertFalse(shape_should_render_under_background(large_card, image_boxes=[]))
+        promoted = promote_shapes_under_background(
+            [large_card, small_card, translucent],
+            image_boxes=[picture],
+        )
+        self.assertEqual(promoted, 1)
+        self.assertTrue(large_card.is_page_background)
+        self.assertFalse(small_card.is_page_background)
+        self.assertFalse(translucent.is_page_background)
+
     def test_uncomposite_restores_pre_tint_luma(self) -> None:
         import numpy as np
         from PIL import Image
@@ -867,6 +912,187 @@ class PageBackgroundFillTests(unittest.TestCase):
         sample = np.asarray(erased)[200:300, 450:550]
         # Picture blue channel stays dominant — not painted white.
         self.assertGreater(float(sample[:, :, 2].mean()), 150.0)
+
+    def test_card_below_page_background_cutoff_keeps_photo_visible(self) -> None:
+        """~93% opaque card + ~10% photo: card under raster so photo stays visible.
+
+        Generates the PDF in-process (no OCR / Paddle). Asserts paint order and
+        that the orange photo region is not covered by the light-blue card fill.
+        """
+
+        import io
+
+        import numpy as np
+        from PIL import Image
+        from pptx.oxml.ns import qn
+
+        page_w, page_h = 960.0, 540.0
+        # ~93% card (below PAGE_BACKGROUND_AREA_RATIO=0.95).
+        card = fitz.Rect(17, 10, 943, 530)
+        self.assertAlmostEqual(card.get_area() / (page_w * page_h), 0.93, delta=0.01)
+        # Distinct orange photo (~10% of page).
+        photo = fitz.Rect(560, 153, 860, 357)
+        self.assertAlmostEqual(photo.get_area() / (page_w * page_h), 0.10, delta=0.02)
+
+        texture = np.zeros((150, 220, 3), dtype=np.uint8)
+        texture[:, :] = (230, 110, 40)
+        noise = np.random.default_rng(0).integers(0, 25, size=(150, 220, 3), dtype=np.uint8)
+        texture = np.clip(texture.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        png_buf = io.BytesIO()
+        Image.fromarray(texture, mode="RGB").save(png_buf, format="PNG")
+
+        doc = fitz.open()
+        page = doc.new_page(width=page_w, height=page_h)
+        page.draw_rect(card, color=None, fill=(0.85, 0.92, 1.0), fill_opacity=1)
+        page.insert_image(photo, stream=png_buf.getvalue())
+        page.insert_textbox(
+            fitz.Rect(80, 60, 500, 110),
+            "Card at 93% of the page",
+            fontsize=28,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(80, 140, 520, 220),
+            "This body paragraph sits on a large colored card.",
+            fontsize=14,
+            fontname="helv",
+            color=(0.15, 0.15, 0.2),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-card93-"))
+        pdf_path = work / "card_93pct.pdf"
+        pptx_path = work / "card_93pct.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        options = ConversionOptions(
+            input_path=pdf_path,
+            output_path=pptx_path,
+            report_path=work / "card_93pct.report.json",
+            ocr_model_root=None,
+            layout_engine="heuristic",
+        )
+        report = convert_pdf(options)
+        page_result = report.pages[0]
+        self.assertEqual(page_result.background_mode, "overlay")
+        self.assertIsNotNone(page_result.background_image_bytes)
+        self.assertTrue(page_result.shape_elements)
+        card_shapes = [
+            shape
+            for shape in page_result.shape_elements
+            if shape.fill_color and not (shape.stroke_color and shape.fill_color is None)
+        ]
+        self.assertTrue(any(shape.is_page_background for shape in card_shapes))
+
+        presentation = Presentation(str(pptx_path))
+        slide = presentation.slides[0]
+        children = list(slide.shapes._spTree)  # noqa: SLF001
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        card_idxs: list[int] = []
+        for index, child in enumerate(children):
+            if child.tag != qn("p:sp"):
+                continue
+            sp_pr = child.find(qn("p:spPr"))
+            xfrm = None if sp_pr is None else sp_pr.find(qn("a:xfrm"))
+            ext = None if xfrm is None else xfrm.find(qn("a:ext"))
+            if ext is None:
+                continue
+            cx = int(ext.get("cx") or 0)
+            cy = int(ext.get("cy") or 0)
+            # Large card (~93% of 960×540 slide).
+            if cx >= int(960 * 12700 * 0.90) and cy >= int(540 * 12700 * 0.90):
+                card_idxs.append(index)
+        self.assertTrue(pic_idxs, "expected full-slide background picture")
+        self.assertTrue(card_idxs, "expected ~93% card auto-shape")
+        # Card must sit under the raster that still contains the photo.
+        self.assertLess(min(card_idxs), min(pic_idxs))
+
+        # Title / body text stays above the background picture.
+        text_idxs = []
+        for index, child in enumerate(children):
+            if child.tag != qn("p:sp"):
+                continue
+            if index in card_idxs:
+                continue
+            if child.find(".//{http://schemas.openxmlformats.org/drawingml/2006/main}t") is not None:
+                text_idxs.append(index)
+        self.assertTrue(text_idxs)
+        self.assertGreater(min(text_idxs), min(pic_idxs))
+
+    def test_dark_97pct_page_fill_stays_under_raster(self) -> None:
+        """≥95% dark fill + photo: already page-background; keep under raster."""
+
+        import io
+
+        import numpy as np
+        from PIL import Image
+        from pptx.oxml.ns import qn
+
+        page_w, page_h = 960.0, 540.0
+        card = fitz.Rect(8, 6, 952, 534)
+        self.assertGreaterEqual(card.get_area() / (page_w * page_h), 0.95)
+        photo = fitz.Rect(600, 145, 880, 335)
+
+        texture = np.full((120, 180, 3), (200, 90, 30), dtype=np.uint8)
+        png_buf = io.BytesIO()
+        Image.fromarray(texture, mode="RGB").save(png_buf, format="PNG")
+
+        doc = fitz.open()
+        page = doc.new_page(width=page_w, height=page_h)
+        page.draw_rect(card, color=None, fill=(0.10, 0.12, 0.18), fill_opacity=1)
+        page.insert_image(photo, stream=png_buf.getvalue())
+        page.insert_textbox(
+            fitz.Rect(60, 40, 500, 90),
+            "Dark 97% backdrop",
+            fontsize=28,
+            fontname="helv",
+            color=(0.95, 0.97, 1.0),
+        )
+        page.insert_textbox(
+            fitz.Rect(60, 120, 560, 200),
+            "Light body text on a dark backdrop that covers almost the whole page "
+            "but not quite all of it, wrapping over multiple lines.",
+            fontsize=14,
+            fontname="helv",
+            color=(0.90, 0.92, 0.96),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-dark97-"))
+        pdf_path = work / "dark_97pct.pdf"
+        pptx_path = work / "dark_97pct.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        options = ConversionOptions(
+            input_path=pdf_path,
+            output_path=pptx_path,
+            report_path=work / "dark_97pct.report.json",
+            ocr_model_root=None,
+            layout_engine="heuristic",
+        )
+        report = convert_pdf(options)
+        page_result = report.pages[0]
+        self.assertTrue(any(shape.is_page_background for shape in page_result.shape_elements))
+
+        presentation = Presentation(str(pptx_path))
+        children = list(presentation.slides[0].shapes._spTree)  # noqa: SLF001
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        bg_idxs: list[int] = []
+        for index, child in enumerate(children):
+            if child.tag != qn("p:sp"):
+                continue
+            sp_pr = child.find(qn("p:spPr"))
+            xfrm = None if sp_pr is None else sp_pr.find(qn("a:xfrm"))
+            ext = None if xfrm is None else xfrm.find(qn("a:ext"))
+            if ext is None:
+                continue
+            cx = int(ext.get("cx") or 0)
+            cy = int(ext.get("cy") or 0)
+            if cx >= int(960 * 12700 * 0.95) and cy >= int(540 * 12700 * 0.95):
+                bg_idxs.append(index)
+        self.assertTrue(pic_idxs and bg_idxs)
+        self.assertLess(min(bg_idxs), min(pic_idxs))
 
 
 class MultilineBodyWidthTests(unittest.TestCase):

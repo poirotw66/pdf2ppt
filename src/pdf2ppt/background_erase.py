@@ -215,6 +215,53 @@ def shape_should_erase_background(
     return True
 
 
+def shape_should_render_under_background(
+    shape: ShapeElement,
+    *,
+    image_boxes: list[BBox] | None = None,
+) -> bool:
+    """Whether a nativized fill must sit under the page raster in PPTX z-order.
+
+    Page-background fills always go under the raster. Opaque fills that were
+    *not* erased because they overlap embedded pictures must also go under:
+    the raster already holds their pixels (and the photo on top of them), so
+    drawing the same opaque fill *above* the raster hides the photo
+    (``card_93pct`` regression). Translucent / stroke-only shapes stay above
+    so they can composite on the raster.
+    """
+
+    if shape.is_page_background:
+        return True
+    if shape.fill_color is None:
+        return False
+    if shape.fill_opacity < OPAQUE_FILL_OPACITY:
+        return False
+    if image_boxes and _shape_overlaps_image(shape.bbox, image_boxes):
+        return True
+    return False
+
+
+def promote_shapes_under_background(
+    shapes: list[ShapeElement],
+    *,
+    image_boxes: list[BBox] | None = None,
+) -> int:
+    """Mark under-raster fills as ``is_page_background`` for PPTX paint order.
+
+    Call after background erase so ``resolve_erase_fill_color`` still samples
+    only true page fills. Returns how many shapes were newly promoted.
+    """
+
+    promoted = 0
+    for shape in shapes:
+        if shape.is_page_background:
+            continue
+        if shape_should_render_under_background(shape, image_boxes=image_boxes):
+            shape.is_page_background = True
+            promoted += 1
+    return promoted
+
+
 def regions_for_background_erase(
     shapes: list[ShapeElement],
     table_bboxes: list[BBox],
@@ -240,10 +287,12 @@ def regions_for_background_erase(
 __all__ = [
     "OPAQUE_FILL_OPACITY",
     "erase_regions_from_image",
+    "promote_shapes_under_background",
     "regions_for_background_erase",
     "resolve_erase_fill_color",
     "sample_corner_color",
     "shape_should_erase_background",
+    "shape_should_render_under_background",
     "shape_should_uncomposite_background",
     "uncomposite_translucent_shapes_from_image",
 ]
