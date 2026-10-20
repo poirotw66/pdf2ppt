@@ -490,6 +490,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max accepted fixes per slide when --refine is set (default 8).",
     )
     parser.add_argument(
+        "--refine-max-attempts",
+        type=positive_int,
+        default=24,
+        help=(
+            "Max fix attempts per slide including rejects/no-ops when --refine is set "
+            "(default 24)."
+        ),
+    )
+    parser.add_argument(
+        "--refine-time-budget",
+        type=float,
+        default=90.0,
+        help="Wall-clock seconds budget for the whole refine loop (default 90).",
+    )
+    parser.add_argument(
         "--refine-report",
         type=Path,
         help=(
@@ -599,6 +614,8 @@ def _build_conversion_options(
         refine=bool(args.refine),
         refine_iters=args.refine_iters,
         refine_max_fixes_per_slide=args.refine_max_fixes,
+        refine_max_attempts_per_slide=args.refine_max_attempts,
+        refine_time_budget_s=float(args.refine_time_budget),
         refine_report_path=args.refine_report,
     )
 

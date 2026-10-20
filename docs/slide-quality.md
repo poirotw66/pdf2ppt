@@ -171,12 +171,16 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
 `pdf2ppt --refine` runs a deterministic loop after the PPTX is written:
 
 1. Render each slide via LibreOffice → PDF → PNG (same stack as this evaluator).
-2. Diagnose page SSIM plus localized issues (text overflow, line drift vs
-   `line_bboxes`, low local SSIM, extra wrapping) — no LLM.
-3. Apply bounded rule-based fixes to SlideIR / `PageResult` (shrink font, widen
-   or reposition boxes, raster crop as last resort).
-4. Keep a fix only when page SSIM does not go down; otherwise revert.
+2. Diagnose page SSIM plus localized issues with **render evidence** ranked
+   first (ink spill / extra wrap lines, low local SSIM+MAE) — no LLM.
+3. Apply bounded rule-based fixes to SlideIR / `PageResult` (shrink font
+   including paragraph sizes, widen/reposition boxes; raster crop only for
+   **non-text** regions, with overlying text glyphs erased from the crop).
+4. Keep a fix only when page SSIM **strictly improves** and editability / text
+   F1 do not regress; XML no-ops and flat SSIM are rejected and do not consume
+   iterations. Caps: `--refine-max-attempts`, `--refine-time-budget`.
 
 Default is off so existing conversion output is unchanged. When `soffice` is
-unavailable the loop skips with a warning and conversion still succeeds. See
-`src/pdf2ppt/refine.py` and `tests/test_refine.py`.
+unavailable **or fails**, the loop restores the last accepted PPTX, reports
+`skipped_reason`, and conversion still succeeds. See `src/pdf2ppt/refine.py`
+and `tests/test_refine.py`.

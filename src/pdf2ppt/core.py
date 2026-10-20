@@ -126,6 +126,8 @@ class ConversionOptions:
     refine: bool = False
     refine_iters: int = 2
     refine_max_fixes_per_slide: int = 8
+    refine_max_attempts_per_slide: int = 24
+    refine_time_budget_s: float = 90.0
     refine_dpi: int = 144
     refine_report_path: Path | None = None
 

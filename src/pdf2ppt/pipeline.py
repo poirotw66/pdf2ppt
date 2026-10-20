@@ -185,6 +185,8 @@ def convert_pdf(
             slide_height_pt=slide_height_pt,
             iterations=refine_iters,
             max_fixes_per_slide=int(getattr(options, "refine_max_fixes_per_slide", 8)),
+            max_attempts_per_slide=int(getattr(options, "refine_max_attempts_per_slide", 24)),
+            time_budget_seconds=float(getattr(options, "refine_time_budget_s", 90.0)),
             dpi=float(getattr(options, "refine_dpi", 144) or 144),
         )
         refine_report_payload = refine_report.to_dict()

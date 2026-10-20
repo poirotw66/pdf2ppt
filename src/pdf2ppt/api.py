@@ -620,6 +620,8 @@ def _conversion_options_from_request(
         refine=bool(getattr(request, "refine", False)),
         refine_iters=int(getattr(request, "refine_iters", 2)),
         refine_max_fixes_per_slide=int(getattr(request, "refine_max_fixes_per_slide", 8)),
+        refine_max_attempts_per_slide=int(getattr(request, "refine_max_attempts_per_slide", 24)),
+        refine_time_budget_s=float(getattr(request, "refine_time_budget_s", 90.0)),
     )
 
 
