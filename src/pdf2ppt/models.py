@@ -284,6 +284,7 @@ class ConversionReport:
     output_path: str
     pages: list[PageResult]
     generative_inpaint: dict[str, object] | None = None
+    refine: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         editable_pages = sum(
@@ -298,4 +299,6 @@ class ConversionReport:
         }
         if self.generative_inpaint is not None:
             payload["generative_inpaint"] = self.generative_inpaint
+        if self.refine is not None:
+            payload["refine"] = self.refine
         return payload

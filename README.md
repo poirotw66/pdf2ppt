@@ -26,6 +26,7 @@ backgrounds only where text was removed.
 - Vector / table nativization for simple drawings and ruled tables on digital PDFs ([`docs/vector-nativization.md`](docs/vector-nativization.md))
 - SlideIR agent layer: emit a versioned JSON IR (`emit-ir`) and render PPTX from IR alone (`from-ir`) so agents can round-trip without re-running the PDF pipeline ([`docs/slideir.md`](docs/slideir.md))
 - Background engines: `opencv-fast` (recommended), `white-box`, optional `lama-onnx` / `lama-pytorch`, and cloud generative backends ([`docs/background-engines.md`](docs/background-engines.md))
+- Optional deterministic render-compare-refine loop (`--refine`) after PPTX build
 - JSON conversion report, debug artifacts, and an optional OCR review UI
 
 ## Install
@@ -62,6 +63,9 @@ pdf2ppt input.pdf output.pptx
 pdf2ppt input.pdf output.pptx --report output.report.json --debug-dir output_debug
 pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
 
+# Opt-in P4 render-compare-refine (LibreOffice required; skipped with a warning if missing)
+pdf2ppt input.pdf output.pptx --refine --refine-iters 2
+
 # Agent / SlideIR round-trip (no PPTX until from-ir)
 pdf2ppt emit-ir input.pdf deck.slideir.json
 pdf2ppt from-ir deck.slideir.json rebuilt.pptx
@@ -92,6 +96,7 @@ PDF → page classify (digital / scanned / hybrid)
     → optional vector/table nativization
     → conditional background (elements / overlay / full-page)
     → PPTX + JSON report
+    → optional --refine (render-compare-fix; LibreOffice)
     → optional SlideIR emit / from-ir render
 ```
 

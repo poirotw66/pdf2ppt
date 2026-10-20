@@ -120,6 +120,16 @@ class ConversionOptions:
     generative_max_attempts: int | None = None
     generative_budget: Any | None = field(default=None, repr=False)
     generative_residual_checker: Any | None = field(default=None, repr=False)
+    # P4 render-compare-refine (deterministic, opt-in). Default off so existing
+    # conversion output is unchanged. When LibreOffice is missing the loop skips
+    # with a warning instead of failing the conversion.
+    refine: bool = False
+    refine_iters: int = 2
+    refine_max_fixes_per_slide: int = 8
+    refine_max_attempts_per_slide: int = 24
+    refine_time_budget_s: float = 90.0
+    refine_dpi: int = 144
+    refine_report_path: Path | None = None
 
 
 @dataclass(slots=True)

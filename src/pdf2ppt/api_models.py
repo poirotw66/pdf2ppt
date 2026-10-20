@@ -161,6 +161,12 @@ class ConvertRequest(BaseModel):
     # P5 SlideIR — opt-in; defaults preserve convert behaviour.
     emit_ir: bool = False
     ir_only: bool = False
+    # P4 render-compare-refine — opt-in; default off.
+    refine: bool = False
+    refine_iters: int = Field(default=2, ge=1, le=8)
+    refine_max_fixes_per_slide: int = Field(default=8, ge=1, le=32)
+    refine_max_attempts_per_slide: int = Field(default=24, ge=1, le=128)
+    refine_time_budget_s: float = Field(default=90.0, ge=1.0, le=600.0)
 
 
 class ConvertResponse(BaseModel):
