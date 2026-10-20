@@ -75,18 +75,15 @@ def render_page_to_slide(
     foreground_shapes = [shape for shape in shape_elements if not shape.is_page_background]
     has_raster_background = page_result.background_image_bytes is not None
 
-    # PDF paint order: page-sized background fills are painted first. When a
-    # full-slide raster already carries that fill (and any embedded figures),
-    # emitting the fill as a native shape above the picture hides content
-    # (figure_caption regression). Skip those shapes in that case; otherwise
-    # place them at the absolute bottom of the slide z-order.
-    if not has_raster_background:
-        for shape in sorted(background_shapes, key=lambda item: item.z_order):
-            added = add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
-            if added is not None:
-                element = getattr(added, "_element", None)
-                if element is not None:
-                    background_elements.append(element)
+    # PDF paint order: page-sized background fills are painted first. They must
+    # stay under any full-slide raster (and its baked-in figures); placing them
+    # after the picture covers content (figure_caption regression).
+    for shape in sorted(background_shapes, key=lambda item: item.z_order):
+        added = add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
+        if added is not None:
+            element = getattr(added, "_element", None)
+            if element is not None:
+                background_elements.append(element)
 
     if has_raster_background:
         background_picture = slide.shapes.add_picture(
@@ -642,11 +639,20 @@ def add_text_block(slide: Any, block: TextBlock, *, scale_x: float, scale_y: flo
             max_mar_l_pt = max(max_mar_l_pt, max(0.0, (para_left - box_left_pt) + hanging_pt))
         extra = int(round(max_mar_l_pt * EMU_PER_PT * scale_x * 1.05))
         width = Emu(max(int(width) + extra, 1))
-    # Single-line list items from the PDF should not reflow under hanging indent.
+    # Single-line paragraphs from the PDF (lists or ordinary multi-line body)
+    # must not reflow — wrapping would invalidate baseline-derived a:spcBef.
     pdf_lines_were_single = all("\n" not in (item.text or "") for item in paragraphs)
     should_wrap = should_wrap_text_block(block)
-    if list_paras and pdf_lines_were_single:
+    if pdf_lines_were_single and len(paragraphs) > 1:
         should_wrap = False
+        width = _widen_for_unwrapped_paragraphs(
+            width,
+            paragraphs=paragraphs,
+            font_family=resolved_font_family,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            bold=block.bold,
+        )
 
     textbox = slide.shapes.add_textbox(left, top, max(width, Emu(1)), max(height, Emu(1)))
     text_frame = textbox.text_frame
@@ -939,6 +945,38 @@ def should_wrap_text_block(block: TextBlock) -> bool:
     if block.source == "ocr" and "\n" not in block.text:
         return False
     return True
+
+
+def _widen_for_unwrapped_paragraphs(
+    width: Any,
+    *,
+    paragraphs: list[TextParagraph],
+    font_family: str,
+    scale_x: float,
+    scale_y: float,
+    bold: bool,
+) -> Any:
+    """Grow the text box so PDF-derived single lines do not clip when wrap is off."""
+
+    _ = font_family  # reserved for future face-specific measurement
+    script = classify_text_script(" ".join(item.text for item in paragraphs if item.text))
+    font_path = choose_measurement_font(script, bold=bold)
+    if font_path is None:
+        # ~15% pad when we cannot measure (Helvetica→Arial mismatch).
+        return Emu(max(int(int(width) * 1.15), 1))
+
+    max_needed = int(width)
+    scale_min = min(scale_x, scale_y)
+    for item in paragraphs:
+        text = (item.text or "").strip()
+        if not text:
+            continue
+        font_size = item.font_size or 12.0
+        size_pt = max(6, int(round(font_size * scale_min)))
+        measured_width_pt, _height = measure_text_dimensions(text, size_pt, font_path)
+        needed = int(round(measured_width_pt * scale_x * EMU_PER_PT * 1.02))
+        max_needed = max(max_needed, needed)
+    return Emu(max(max_needed, 1))
 
 
 def resolve_vertical_anchor(block: TextBlock) -> MSO_VERTICAL_ANCHOR:

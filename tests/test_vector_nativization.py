@@ -626,37 +626,33 @@ class PageBackgroundFillTests(unittest.TestCase):
         slide = presentation.slides[0]
         children = list(slide.shapes._spTree)  # noqa: SLF001
         pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
-        # Full-page white fill must not be emitted as a shape above the picture.
+        # Full-page white fill may exist, but only under the overlay picture.
         rect_idxs = []
         for index, child in enumerate(children):
             if child.tag != qn("p:sp"):
                 continue
-            nv = child.find(".//{http://schemas.openxmlformats.org/presentationml/2006/main}cNvPr")
-            name = (nv.get("name") if nv is not None else "") or ""
-            if name.startswith("Rectangle"):
-                sp_pr = child.find(qn("p:spPr"))
-                xfrm = None if sp_pr is None else sp_pr.find(qn("a:xfrm"))
-                ext = None if xfrm is None else xfrm.find(qn("a:ext"))
-                if ext is None:
-                    continue
-                cx = int(ext.get("cx") or 0)
-                cy = int(ext.get("cy") or 0)
-                # Near full-slide rectangle (960x540 pt → EMU).
-                if cx >= int(960 * 12700 * 0.95) and cy >= int(540 * 12700 * 0.95):
-                    rect_idxs.append(index)
+            sp_pr = child.find(qn("p:spPr"))
+            xfrm = None if sp_pr is None else sp_pr.find(qn("a:xfrm"))
+            ext = None if xfrm is None else xfrm.find(qn("a:ext"))
+            if ext is None:
+                continue
+            cx = int(ext.get("cx") or 0)
+            cy = int(ext.get("cy") or 0)
+            if cx >= int(960 * 12700 * 0.95) and cy >= int(540 * 12700 * 0.95):
+                rect_idxs.append(index)
         self.assertTrue(pic_idxs)
-        self.assertEqual(rect_idxs, [])
+        self.assertTrue(rect_idxs)
+        self.assertLess(min(rect_idxs), min(pic_idxs))
 
     def test_render_interleaves_shapes_and_pictures_by_z_order(self) -> None:
+        import io
+
+        from PIL import Image
         from pptx.oxml.ns import qn
 
         from pdf2ppt.models import ImagePlacement, PageResult, QualityScore, ShapeElement
 
-        import io
-
         buffer = io.BytesIO()
-        from PIL import Image
-
         Image.new("RGB", (8, 8), color=(10, 120, 200)).save(buffer, format="PNG")
         page_result = PageResult(
             page_number=1,

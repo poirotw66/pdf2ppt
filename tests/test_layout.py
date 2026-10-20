@@ -603,8 +603,8 @@ class TitleZOrderTests(unittest.TestCase):
         self.assertTrue(pic_els)
         self.assertGreater(children.index(title_el), children.index(pic_els[0]))
 
-    def test_page_background_shape_dropped_when_raster_present(self) -> None:
-        """figure_caption: full-page white fill must not cover the overlay picture."""
+    def test_page_background_shape_below_raster_picture(self) -> None:
+        """figure_caption: full-page white fill must sit under the overlay picture."""
 
         from pptx.oxml.ns import qn
 
@@ -656,16 +656,16 @@ class TitleZOrderTests(unittest.TestCase):
         title_el = slide.shapes.title._element  # noqa: SLF001
         title_idx = children.index(title_el)
         pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
-        # Page-background fills are omitted when a full-slide raster already
-        # includes them; only the picture (+ title) should remain.
         sp_idxs = [
             i
             for i, child in enumerate(children)
             if child.tag == qn("p:sp") and child is not title_el
         ]
         self.assertTrue(pic_idxs)
-        self.assertEqual(sp_idxs, [])
-        self.assertGreater(title_idx, max(pic_idxs))
+        self.assertTrue(sp_idxs)
+        # Page fill under picture; title above both.
+        self.assertLess(min(sp_idxs), min(pic_idxs))
+        self.assertGreater(title_idx, max(pic_idxs + sp_idxs))
 
     def test_page_background_shape_below_foreground_without_raster(self) -> None:
         """Elements mode: page fill stays at the bottom of z-order."""

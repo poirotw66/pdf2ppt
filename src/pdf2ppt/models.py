@@ -102,6 +102,8 @@ class TextBlock:
     layout_label: str | None = None
     # When set, ppt_render emits these as separate paragraphs (bullets).
     paragraphs: list[TextParagraph] | None = None
+    # Per-line PDF bboxes when ``text`` is ``\\n``-joined (native multi-line).
+    line_bboxes: list[BBox] | None = None
     # Prefer mapping into the slide title placeholder when True.
     use_title_placeholder: bool = False
 

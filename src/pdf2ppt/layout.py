@@ -935,6 +935,14 @@ def _group_region_members(
     # Union OCR erase masks so every grouped line is inpainted (avoids ghost text).
     image_boxes = [block.image_bbox for block in ordered if block.image_bbox is not None]
     merged_image_bbox = union_bbox(image_boxes) if image_boxes else base.image_bbox
+    preserved_line_bboxes: list[BBox] | None = None
+    if len(ordered) == 1 and getattr(ordered[0], "line_bboxes", None):
+        preserved_line_bboxes = list(ordered[0].line_bboxes or [])
+    elif len(ordered) == len(paragraphs) and all(
+        "\n" not in (block.text or "") for block in ordered
+    ):
+        preserved_line_bboxes = [block.bbox for block in ordered]
+
     return [
         TextBlock(
             id=f"layout_text_{page_number}_{region.reading_order}",
@@ -955,6 +963,7 @@ def _group_region_members(
             layout_region_id=region.id,
             layout_label=region.label,
             paragraphs=paragraphs,
+            line_bboxes=preserved_line_bboxes,
             use_title_placeholder=use_title,
         )
     ]
@@ -1020,13 +1029,15 @@ def _role_for_label(label: LayoutLabel) -> str:
 def _line_bboxes_for_block(block: TextBlock, line_count: int) -> list[BBox]:
     """Per-line bboxes for a multi-line text box.
 
-    Native extraction often keeps a paragraph as one block with ``\\n``-joined
-    lines sharing a union bbox. Slice that bbox evenly so baseline gaps (and
-    thus a:spcBef) match PDF line positions the same way bullet lists do.
+    Prefer real PDF line boxes from native extraction. Otherwise slice the
+    union bbox evenly so baseline gaps (and a:spcBef) still track PDF lines.
     """
 
     if line_count <= 1:
         return [block.bbox]
+    stored = getattr(block, "line_bboxes", None) or None
+    if stored is not None and len(stored) == line_count:
+        return list(stored)
     box_height = max(1.0, block.bbox[3] - block.bbox[1])
     line_slot = box_height / float(line_count)
     return [

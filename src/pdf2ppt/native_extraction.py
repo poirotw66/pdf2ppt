@@ -122,6 +122,9 @@ def extract_native_text_blocks(page: fitz.Page) -> tuple[list[TextBlock], list[t
                     bold=bold,
                     italic=italic,
                     reading_order=order,
+                    # Preserve real PDF line boxes so layout can derive a:spcBef
+                    # from true baseline gaps (not equal slices of the union).
+                    line_bboxes=list(boxes) if len(boxes) > 1 else None,
                 )
             )
             order += 1
