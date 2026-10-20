@@ -43,7 +43,14 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
 - If every drawing was nativized and there are no embedded images → `elements`
   mode (no full-page raster).
 - Otherwise → `overlay` / `full-page` as today, but nativized shape/table regions
-  are solid-filled out of the background so they are not duplicated.
+  are solid-filled out of the background so they are not duplicated. Each erase
+  uses the median colour of a small ring around the region (falling back to an
+  underneath opaque fill) so white halos do not appear when a large card sits
+  under the page raster.
+- Opaque fills painted **before** an overlapping picture (and not smaller than
+  that picture) are marked `render_under_raster` so PPTX places them under the
+  background image; badges / cards painted after a photo stay editable above.
+  This is distinct from `is_page_background` (≥95% page fills).
 - Translucent solid fills are **un-composited** from the raster
   (`bg = (pix − α·fill) / (1 − α)`) before the native shape is drawn, so
   caption boxes over photos are not darkened twice.

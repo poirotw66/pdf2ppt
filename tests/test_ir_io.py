@@ -119,6 +119,22 @@ class SlideIrRoundTripUnitTests(unittest.TestCase):
             self.assertIsNotNone(restored.background_image_bytes)
             self.assertTrue(restored.background_image_bytes.startswith(b"\xff\xd8"))
 
+    def test_write_read_preserves_render_under_raster(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ir_path = Path(temp_dir) / "under.slideir.json"
+            page = _minimal_page()
+            page.shape_elements[0].render_under_raster = True
+            page.shape_elements[0].is_page_background = False
+            write_slide_ir([page], ir_path, slide_width_pt=612.0, slide_height_pt=792.0)
+            payload = json.loads(ir_path.read_text(encoding="utf-8"))
+            self.assertEqual(validate_slide_ir_payload(payload), [])
+            stored = payload["pages"][0]["shapes"][0]
+            self.assertTrue(stored.get("render_under_raster"))
+            self.assertFalse(stored.get("is_page_background"))
+            restored = read_slide_ir(ir_path).pages[0].shape_elements[0]
+            self.assertTrue(restored.render_under_raster)
+            self.assertFalse(restored.is_page_background)
+
     def test_write_read_preserves_line_bboxes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             ir_path = Path(temp_dir) / "lines.slideir.json"

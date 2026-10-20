@@ -159,6 +159,10 @@
         "locked": { "type": "boolean" },
         "drawing_index": { "type": ["integer", "null"] },
         "is_page_background": { "type": "boolean" },
+        "render_under_raster": {
+          "type": "boolean",
+          "description": "Opaque fill painted before an overlapping picture; PPTX places it under the page raster without treating it as the page background."
+        },
         "arrow_direction": {
           "anyOf": [
             { "type": "string", "enum": ["left", "right", "up", "down"] },
