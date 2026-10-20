@@ -872,10 +872,47 @@ class PageBackgroundFillTests(unittest.TestCase):
 class MultilineBodyWidthTests(unittest.TestCase):
     @unittest.skipUnless((FIXTURES_DIR / "large_mask.pdf").exists(), "fixture missing")
     def test_large_mask_text_box_stays_within_slide(self) -> None:
-        from pdf2ppt.ppt_render import EMU_PER_PT
+        """Assert box clamp using the PDF text layer only (no OCR / Paddle)."""
 
-        pptx_path, _report = _convert("large_mask")
-        presentation = Presentation(str(pptx_path))
+        from pdf2ppt.layout import LayoutPageResult, analyze_layout_heuristic, apply_layout_to_page
+        from pdf2ppt.models import PageResult, QualityScore
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.ppt_render import EMU_PER_PT, render_page_to_slide
+
+        with fitz.open(FIXTURES_DIR / "large_mask.pdf") as document:
+            page = document[0]
+            native_blocks, _image_boxes = extract_native_text_blocks(page)
+            page_width = float(page.rect.width)
+            page_height = float(page.rect.height)
+
+        self.assertTrue(native_blocks)
+        regions = analyze_layout_heuristic(native_blocks, page_width=page_width, page_height=page_height)
+        applied = apply_layout_to_page(
+            native_blocks,
+            LayoutPageResult(regions=regions, engine="heuristic"),
+            page_width=page_width,
+            page_height=page_height,
+        )
+        page_result = PageResult(
+            page_number=1,
+            page_kind="digital",
+            background_mode="elements",
+            width_pt=page_width,
+            height_pt=page_height,
+            text_blocks=applied.text_blocks,
+            quality_score=QualityScore(1.0, 1.0, 1.0, 1.0),
+            fallback_reason=None,
+        )
+        presentation = Presentation()
+        presentation.slide_width = int(round(page_width * EMU_PER_PT))
+        presentation.slide_height = int(round(page_height * EMU_PER_PT))
+        render_page_to_slide(
+            presentation,
+            presentation.slide_layouts[6],
+            page_result,
+            slide_width_pt=page_width,
+            slide_height_pt=page_height,
+        )
         slide = presentation.slides[0]
         slide_width_pt = float(presentation.slide_width) / EMU_PER_PT
         body = None
