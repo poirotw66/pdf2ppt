@@ -31,8 +31,9 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
 
 - Detected with `find_tables()` (prefers `refine=True` when available).
 - Emits a native `pptx` table with cell text, column widths / row heights,
-  header fills (sampled), borders, and merges (`colspan` / `rowspan`) when
-  PyMuPDF reports them.
+  cell fills (sampled for every cell), borders, and merges (`colspan` /
+  `rowspan`) when PyMuPDF reports them. Candidates with an empty cell covering
+  ≥40% of the page are rejected (side-by-side page fills misread as a 1×2 table).
 - Grid lines and fills that sit inside the table bbox are **not** also emitted
   as shapes.
 - Text blocks whose content belongs to the table are **not** also emitted as
@@ -47,10 +48,11 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
   uses the median colour of a small ring around the region (falling back to an
   underneath opaque fill) so white halos do not appear when a large card sits
   under the page raster.
-- Opaque fills painted **before** an overlapping picture (and not smaller than
-  that picture) are marked `render_under_raster` so PPTX places them under the
-  background image; badges / cards painted after a photo stay editable above.
-  This is distinct from `is_page_background` (≥95% page fills).
+- Opaque fills painted **before** an overlapping picture are marked
+  `render_under_raster` so PPTX places them under the background image (paint
+  order alone when `get_bboxlog()` is available; size/overlap fallback when it
+  is not). Badges / cards painted after a photo stay editable above. This is
+  distinct from `is_page_background` (≥95% page fills).
 - Translucent solid fills are **un-composited** from the raster
   (`bg = (pix − α·fill) / (1 − α)`) before the native shape is drawn, so
   caption boxes over photos are not darkened twice.

@@ -46,6 +46,9 @@ DEFAULT_MAX_SHAPES_AGGRESSIVE = 400
 TABLE_TEXT_OVERLAP_RATIO = 0.45
 # Drawing rect mostly inside a table → absorb into table (skip as shape).
 TABLE_DRAWING_CONTAINMENT_RATIO = 0.85
+# find_tables() false positive: empty cell covering this fraction of the page
+# (e.g. two side-by-side page fills misread as a 1×2 table).
+LARGE_EMPTY_CELL_PAGE_RATIO = 0.40
 
 
 @dataclass(slots=True)
@@ -825,6 +828,21 @@ def _table_to_element(
         return None
 
     column_widths, row_heights = _estimate_table_geometry(rows, bbox, row_count, col_count)
+    page_area = max(float(page.rect.width * page.rect.height), 1.0)
+    if _table_has_spurious_large_empty_cell(
+        cells,
+        column_widths=column_widths,
+        row_heights=row_heights,
+        page_area=page_area,
+    ):
+        logger.debug(
+            "Rejecting table %s on page %s: empty cell covers >= %.0f%% of page",
+            table_index,
+            page_number,
+            LARGE_EMPTY_CELL_PAGE_RATIO * 100.0,
+        )
+        return None
+
     border_color, border_width, outer_width, inner_width = _infer_table_border_style(page, bbox)
     return TableElement(
         id=f"table_{page_number}_{table_index}",
@@ -841,6 +859,28 @@ def _table_to_element(
         z_order=10_000 + table_index,
         confidence=0.9,
     )
+
+
+def _table_has_spurious_large_empty_cell(
+    cells: list[TableCell],
+    *,
+    column_widths: list[float],
+    row_heights: list[float],
+    page_area: float,
+    area_ratio: float = LARGE_EMPTY_CELL_PAGE_RATIO,
+) -> bool:
+    """True when an empty cell covers so much of the page it is likely a fill, not a table."""
+
+    if page_area <= 0 or area_ratio <= 0:
+        return False
+    for cell in cells:
+        if cell.text.strip():
+            continue
+        width = sum(column_widths[cell.col : cell.col + cell.colspan])
+        height = sum(row_heights[cell.row : cell.row + cell.rowspan])
+        if width * height / page_area >= area_ratio:
+            return True
+    return False
 
 
 def _span_bbox(
@@ -1134,13 +1174,13 @@ def _estimate_table_geometry(
     return column_widths, row_heights
 
 
-def apply_header_cell_fills(
+def apply_cell_fills(
     table: TableElement,
     page: fitz.Page,
     *,
     dpi: int = 72,
 ) -> None:
-    """Sample cell center colors for header-row fills when available."""
+    """Sample each cell's center colour so native tables keep header and body fills."""
 
     if not table.cells:
         return
@@ -1153,9 +1193,7 @@ def apply_header_cell_fills(
     width = pixmap.width
     n = pixmap.n
     for cell in table.cells:
-        if cell.row != 0:
-            continue
-        # Locate cell bbox via equal split if needed.
+        # Locate cell bbox via column/row geometry.
         x0 = table.bbox[0] + sum(table.column_widths[: cell.col])
         y0 = table.bbox[1] + sum(table.row_heights[: cell.row])
         x1 = x0 + sum(table.column_widths[cell.col : cell.col + cell.colspan])
@@ -1170,9 +1208,22 @@ def apply_header_cell_fills(
         cell.fill_color = f"#{samples[offset]:02X}{samples[offset + 1]:02X}{samples[offset + 2]:02X}"
 
 
+def apply_header_cell_fills(
+    table: TableElement,
+    page: fitz.Page,
+    *,
+    dpi: int = 72,
+) -> None:
+    """Backwards-compatible alias for :func:`apply_cell_fills`."""
+
+    apply_cell_fills(table, page, dpi=dpi)
+
+
 __all__ = [
+    "LARGE_EMPTY_CELL_PAGE_RATIO",
     "PAGE_BACKGROUND_AREA_RATIO",
     "VectorExtractionResult",
+    "apply_cell_fills",
     "apply_header_cell_fills",
     "bbox_area",
     "extract_tables",

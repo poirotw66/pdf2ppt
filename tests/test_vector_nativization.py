@@ -517,7 +517,7 @@ class TransparentEraseTests(unittest.TestCase):
             is_page_background=False,
         )
         picture = (400.0, 180.0, 700.0, 360.0)
-        # Card painted before picture (bboxlog order).
+        # Card painted before picture; badge after (bboxlog order).
         paint_events = parse_bboxlog_paint_events(
             [
                 ("fill-path", large_card.bbox),
@@ -550,6 +550,42 @@ class TransparentEraseTests(unittest.TestCase):
         self.assertFalse(large_card.is_page_background)
         self.assertFalse(small_badge.render_under_raster)
         self.assertFalse(translucent.render_under_raster)
+
+    def test_small_strip_painted_before_larger_photo_promotes_on_paint_order(self) -> None:
+        """When bboxlog is known, size must not block promotion (strip under photo)."""
+
+        from pdf2ppt.background_erase import (
+            parse_bboxlog_paint_events,
+            shape_should_render_under_raster,
+        )
+        from pdf2ppt.models import ShapeElement
+
+        strip = ShapeElement(
+            id="strip",
+            kind="rect",
+            bbox=(100, 380, 520, 440),
+            fill_color="#E53333",
+            fill_opacity=1.0,
+        )
+        picture = (300.0, 100.0, 760.0, 420.0)
+        self.assertLess(
+            (strip.bbox[2] - strip.bbox[0]) * (strip.bbox[3] - strip.bbox[1]),
+            (picture[2] - picture[0]) * (picture[3] - picture[1]),
+        )
+        paint_events = parse_bboxlog_paint_events(
+            [("fill-path", strip.bbox), ("fill-image", picture)]
+        )
+        self.assertTrue(
+            shape_should_render_under_raster(
+                strip, image_boxes=[picture], paint_events=paint_events
+            )
+        )
+        # Size fallback alone must still refuse the small strip.
+        self.assertFalse(
+            shape_should_render_under_raster(
+                strip, image_boxes=[picture], paint_events=None
+            )
+        )
 
     def test_badge_and_card_after_photo_not_promoted(self) -> None:
         from pdf2ppt.background_erase import (
@@ -1436,6 +1472,311 @@ class PageBackgroundFillTests(unittest.TestCase):
                 bg_idxs.append(index)
         self.assertTrue(pic_idxs and bg_idxs)
         self.assertLess(min(bg_idxs), min(pic_idxs))
+
+
+class FidelityProbeRegressionTests(unittest.TestCase):
+    """Probes from review of PR #12: paint-order, false tables, cell fills, bboxlog fallback."""
+
+    @staticmethod
+    def _solid_png(*, size: tuple[int, int] = (220, 150), rgb: tuple[int, int, int] = (230, 110, 40)) -> bytes:
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.fromarray(np.full((size[1], size[0], 3), rgb, dtype=np.uint8), mode="RGB").save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_strip_under_photo_promotes_small_shape_before_raster(self) -> None:
+        """Small opaque strip painted before a larger overlapping photo stays under the raster."""
+
+        from pptx.oxml.ns import qn
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.draw_rect(fitz.Rect(100, 380, 520, 440), color=None, fill=(0.9, 0.2, 0.2))
+        page.insert_image(fitz.Rect(300, 100, 760, 420), stream=self._solid_png())
+        page.insert_textbox(
+            fitz.Rect(60, 30, 700, 80),
+            "Strip painted before a larger photo",
+            fontsize=28,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(60, 470, 700, 520),
+            "Extra caption text so native char coverage keeps this page digital for CI.",
+            fontsize=12,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-strip-"))
+        pdf_path = work / "probe_strip_under_photo.pdf"
+        pptx_path = work / "probe_strip_under_photo.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=pdf_path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        page_result = report.pages[0]
+        strip_shapes = [
+            shape
+            for shape in page_result.shape_elements
+            if shape.fill_color and not shape.is_page_background
+        ]
+        self.assertTrue(strip_shapes)
+        self.assertTrue(any(shape.render_under_raster for shape in strip_shapes))
+
+        presentation = Presentation(str(pptx_path))
+        children = list(presentation.slides[0].shapes._spTree)  # noqa: SLF001
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        strip_idxs: list[int] = []
+        for index, child in enumerate(children):
+            if child.tag != qn("p:sp"):
+                continue
+            sp_pr = child.find(qn("p:spPr"))
+            solid = (
+                None
+                if sp_pr is None
+                else sp_pr.find(".//{http://schemas.openxmlformats.org/drawingml/2006/main}srgbClr")
+            )
+            val = (solid.get("val") if solid is not None else "") or ""
+            # Red strip fill ≈ (0.9, 0.2, 0.2).
+            if len(val) == 6 and int(val[0:2], 16) > 180 and int(val[2:4], 16) < 80:
+                strip_idxs.append(index)
+        self.assertTrue(pic_idxs)
+        self.assertTrue(strip_idxs)
+        self.assertLess(min(strip_idxs), min(pic_idxs))
+
+    def test_straddle_fills_are_shapes_not_page_table(self) -> None:
+        """Two large side-by-side fills must not become a page-covering 2-cell table."""
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.draw_rect(fitz.Rect(0, 0, 960, 540), color=None, fill=(0.97, 0.97, 0.97))
+        page.draw_rect(fitz.Rect(0, 0, 480, 540), color=None, fill=(0.85, 0.9, 0.98))
+        page.insert_image(fitz.Rect(600, 120, 880, 320), stream=self._solid_png(rgb=(40, 90, 150)))
+        for y, rgb in ((150, (0.9, 0.3, 0.3)), (250, (0.3, 0.8, 0.4)), (350, (0.3, 0.5, 0.95))):
+            page.draw_circle(fitz.Point(480, y), 26, color=None, fill=rgb)
+        page.draw_rect(fitz.Rect(420, 420, 540, 470), color=None, fill=(0.2, 0.2, 0.2), radius=0.3)
+        page.insert_textbox(
+            fitz.Rect(60, 30, 600, 80),
+            "Icons straddling two fills",
+            fontsize=26,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        # Enough native text to stay digital (no OCR / Paddle in CI).
+        page.insert_textbox(
+            fitz.Rect(60, 90, 400, 380),
+            "Left-panel body copy keeps native character coverage above the digital "
+            "threshold so conversion never initializes PaddleOCR. Icons sit on "
+            "the fill boundary and must remain visible as native shapes.",
+            fontsize=14,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-straddle-"))
+        pdf_path = work / "probe_straddle.pdf"
+        pptx_path = work / "probe_straddle.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=pdf_path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        page_result = report.pages[0]
+        self.assertFalse(page_result.table_elements)
+        fill_shapes = [shape for shape in page_result.shape_elements if shape.fill_color]
+        self.assertGreaterEqual(len(fill_shapes), 2)
+        # Icons / badge remain as native shapes, not hidden under a fake table.
+        circle_like = [shape for shape in page_result.shape_elements if shape.kind in {"ellipse", "oval"}]
+        self.assertGreaterEqual(len(circle_like), 1)
+        metrics = inspect_pptx_editability(pptx_path)[0]
+        self.assertEqual(metrics.table_count, 0)
+        self.assertGreaterEqual(metrics.auto_shape_count, 3)
+
+    def test_dark_page_table_preserves_white_cell_fills(self) -> None:
+        """On a dark page, body cell white fills must survive into the PPTX table."""
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.draw_rect(fitz.Rect(0, 0, 960, 540), color=None, fill=(0.12, 0.14, 0.2))
+        page.insert_image(fitz.Rect(640, 60, 920, 260), stream=self._solid_png(rgb=(30, 100, 180)))
+        for r in range(3):
+            for c in range(3):
+                fill = (1, 1, 1) if r else (0.2, 0.3, 0.6)
+                page.draw_rect(
+                    fitz.Rect(640 + c * 90, 400 + r * 35, 640 + (c + 1) * 90, 400 + (r + 1) * 35),
+                    color=(0.8, 0.8, 0.8),
+                    fill=fill,
+                    width=0.8,
+                )
+                page.insert_textbox(
+                    fitz.Rect(645 + c * 90, 408 + r * 35, 725 + c * 90, 430 + r * 35),
+                    f"R{r}C{c}",
+                    fontsize=11,
+                    fontname="helv",
+                    color=(0, 0, 0) if r else (1, 1, 1),
+                )
+        page.insert_textbox(
+            fitz.Rect(60, 30, 600, 80),
+            "Dark page: stacked bars, tiles, grid",
+            fontsize=26,
+            fontname="helv",
+            color=(0.95, 0.95, 1),
+        )
+        # Extra body text away from the grid so the page stays digital without OCR.
+        page.insert_textbox(
+            fitz.Rect(60, 120, 500, 280),
+            "Body copy beside the photo and grid keeps native text coverage high enough "
+            "for digital classification while the table below must keep its white fills.",
+            fontsize=14,
+            fontname="helv",
+            color=(0.9, 0.92, 0.96),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-darkgrid-"))
+        pdf_path = work / "probe_dark_bars_grid.pdf"
+        pptx_path = work / "probe_dark_bars_grid.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=pdf_path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        page_result = report.pages[0]
+        self.assertTrue(page_result.table_elements)
+        table = page_result.table_elements[0]
+        body_cells = [cell for cell in table.cells if cell.row > 0]
+        self.assertTrue(body_cells)
+        for cell in body_cells:
+            self.assertIsNotNone(cell.fill_color)
+            assert cell.fill_color is not None
+            self.assertGreaterEqual(int(cell.fill_color.lstrip("#")[0:2], 16), 200)
+
+        presentation = Presentation(str(pptx_path))
+        ppt_table = next(shape.table for shape in presentation.slides[0].shapes if shape.has_table)
+        from pptx.enum.dml import MSO_FILL
+
+        body_fill = ppt_table.cell(1, 0).fill
+        self.assertEqual(body_fill.type, MSO_FILL.SOLID)
+        rgb = str(body_fill.fore_color.rgb).upper()
+        self.assertGreaterEqual(int(rgb[0:2], 16), 200)
+
+    def test_paint_events_from_page_returns_none_when_bboxlog_raises(self) -> None:
+        from pdf2ppt.background_erase import paint_events_from_page
+
+        class _Boom:
+            def get_bboxlog(self) -> list[object]:
+                raise RuntimeError("bboxlog unavailable")
+
+        self.assertIsNone(paint_events_from_page(_Boom()))
+
+    def test_bboxlog_raise_falls_back_to_size_rule_for_card_93pct(self) -> None:
+        """If get_bboxlog raises (paint_events=None), size/overlap fallback still promotes the card."""
+
+        import io
+        from unittest.mock import patch
+
+        import numpy as np
+        from PIL import Image
+        from pptx.oxml.ns import qn
+
+        page_w, page_h = 960.0, 540.0
+        # Same ~93% card geometry as test_card_below_page_background_cutoff_keeps_photo_visible.
+        card = fitz.Rect(17, 10, 943, 530)
+        self.assertAlmostEqual(card.get_area() / (page_w * page_h), 0.93, delta=0.01)
+        self.assertLess(card.get_area() / (page_w * page_h), 0.95)
+        photo = fitz.Rect(560, 153, 860, 357)
+
+        texture = np.full((120, 180, 3), (230, 110, 40), dtype=np.uint8)
+        png_buf = io.BytesIO()
+        Image.fromarray(texture, mode="RGB").save(png_buf, format="PNG")
+
+        doc = fitz.open()
+        page = doc.new_page(width=page_w, height=page_h)
+        page.draw_rect(card, color=None, fill=(0.85, 0.92, 1.0), fill_opacity=1)
+        page.insert_image(photo, stream=png_buf.getvalue())
+        page.insert_textbox(
+            fitz.Rect(80, 60, 500, 110),
+            "Card at 93% of the page",
+            fontsize=28,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(80, 140, 520, 220),
+            "This body paragraph sits on a large colored card.",
+            fontsize=14,
+            fontname="helv",
+            color=(0.15, 0.15, 0.2),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-bboxlog-fallback-"))
+        pdf_path = work / "card_93pct.pdf"
+        pptx_path = work / "card_93pct.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+
+        with patch.object(fitz.Page, "get_bboxlog", side_effect=RuntimeError("bboxlog unavailable")):
+            report = convert_pdf(
+                ConversionOptions(
+                    input_path=pdf_path,
+                    output_path=pptx_path,
+                    report_path=work / "report.json",
+                    ocr_model_root=None,
+                    layout_engine="heuristic",
+                )
+            )
+
+        page_result = report.pages[0]
+        card_shapes = [shape for shape in page_result.shape_elements if shape.fill_color]
+        self.assertTrue(any(shape.render_under_raster for shape in card_shapes))
+        self.assertIsNotNone(page_result.background_image_bytes)
+
+        presentation = Presentation(str(pptx_path))
+        children = list(presentation.slides[0].shapes._spTree)  # noqa: SLF001
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        card_idxs: list[int] = []
+        for index, child in enumerate(children):
+            if child.tag != qn("p:sp"):
+                continue
+            sp_pr = child.find(qn("p:spPr"))
+            xfrm = None if sp_pr is None else sp_pr.find(qn("a:xfrm"))
+            ext = None if xfrm is None else xfrm.find(qn("a:ext"))
+            if ext is None:
+                continue
+            cx = int(ext.get("cx") or 0)
+            cy = int(ext.get("cy") or 0)
+            if cx >= int(960 * 12700 * 0.90) and cy >= int(540 * 12700 * 0.90):
+                card_idxs.append(index)
+        self.assertTrue(pic_idxs, "expected full-slide background picture (photo visible)")
+        self.assertTrue(card_idxs, "expected ~93% card auto-shape")
+        self.assertLess(min(card_idxs), min(pic_idxs))
 
 
 class MultilineBodyWidthTests(unittest.TestCase):

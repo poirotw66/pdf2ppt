@@ -111,7 +111,7 @@ from .text_style import (
     write_text_fit_debug_report,
 )
 from .vector_nativization import (
-    apply_header_cell_fills,
+    apply_cell_fills,
     extract_vector_content,
     filter_text_blocks_outside_tables,
     remaining_visuals_after_nativization,
@@ -430,7 +430,7 @@ def analyze_page(
         page_kind=page_kind,
     )
     for table in vector_result.tables:
-        apply_header_cell_fills(table, page)
+        apply_cell_fills(table, page)
     text_blocks = filter_text_blocks_outside_tables(text_blocks, vector_result.absorbed_text_block_ids)
 
     # P2 layout analysis: group lines, bullets, titles, figures; skip headers/footers.
@@ -593,8 +593,9 @@ def analyze_page(
                 background_inpaint_note = f"{note}; {erase_note}".strip("; ")
             # Opaque fills painted *before* an overlapping picture stay in the
             # raster with that photo; mark them render_under_raster so PPTX
-            # paint order matches the PDF (card_93pct). Later/smaller shapes
-            # (badge-on-photo, card-after-photo) stay editable above the raster.
+            # paint order matches the PDF (card_93pct, strip-under-photo).
+            # Shapes painted after a photo (badge-on-photo, card-after-photo)
+            # stay editable above the raster.
             promote_shapes_under_raster(
                 vector_result.shapes,
                 image_boxes=image_boxes,
