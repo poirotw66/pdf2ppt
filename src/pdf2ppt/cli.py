@@ -468,6 +468,36 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--refine",
+        action="store_true",
+        help=(
+            "Opt-in P4 render-compare-refine loop after PPTX is built: re-render each "
+            "slide (LibreOffice), compare to the source PDF page, apply rule-based "
+            "SlideIR fixes, and keep a change only when page SSIM does not regress. "
+            "Skipped with a warning when soffice is unavailable. Default off."
+        ),
+    )
+    parser.add_argument(
+        "--refine-iters",
+        type=positive_int,
+        default=2,
+        help="Max refine iterations per slide when --refine is set (default 2).",
+    )
+    parser.add_argument(
+        "--refine-max-fixes",
+        type=positive_int,
+        default=8,
+        help="Max accepted fixes per slide when --refine is set (default 8).",
+    )
+    parser.add_argument(
+        "--refine-report",
+        type=Path,
+        help=(
+            "Path for the per-slide refine JSON report. Defaults to "
+            "<output>.refine.json next to the PPTX."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -566,6 +596,10 @@ def _build_conversion_options(
         layout_engine=args.layout_engine,
         layout_model_root=args.layout_model_root,
         layout_skip_header_footer=not args.keep_header_footer,
+        refine=bool(args.refine),
+        refine_iters=args.refine_iters,
+        refine_max_fixes_per_slide=args.refine_max_fixes,
+        refine_report_path=args.refine_report,
     )
 
 

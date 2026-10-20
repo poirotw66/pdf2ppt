@@ -172,9 +172,37 @@ def convert_pdf(
             slide_height_pt=slide_height_pt,
         )
 
+    refine_report_payload: dict[str, object] | None = None
+    if write_pptx and bool(getattr(options, "refine", False)):
+        from .refine import refine_pages, write_refine_report
+
+        refine_iters = int(getattr(options, "refine_iters", 2) or 0)
+        page_results, refine_report = refine_pages(
+            page_results,
+            pdf_path=options.input_path,
+            output_pptx=options.output_path,
+            slide_width_pt=slide_width_pt,
+            slide_height_pt=slide_height_pt,
+            iterations=refine_iters,
+            max_fixes_per_slide=int(getattr(options, "refine_max_fixes_per_slide", 8)),
+            dpi=float(getattr(options, "refine_dpi", 144) or 144),
+        )
+        refine_report_payload = refine_report.to_dict()
+        refine_report_path = getattr(options, "refine_report_path", None)
+        if refine_report_path is None:
+            refine_report_path = options.output_path.with_suffix(".refine.json")
+        write_refine_report(refine_report, Path(refine_report_path))
+        logger.info(
+            "Refine finished: skipped=%s runtime=%.3fs report=%s",
+            refine_report.skipped_reason,
+            refine_report.runtime_seconds or 0.0,
+            refine_report_path,
+        )
+
     if emit_ir_path is not None:
         from .ir_io import write_slide_ir
 
+        # Emit after refine so SlideIR matches the final PPTX when both are requested.
         write_slide_ir(
             page_results,
             emit_ir_path,
@@ -199,6 +227,7 @@ def convert_pdf(
         output_path=str(options.output_path) if write_pptx else "",
         pages=page_results,
         generative_inpaint=generative_report,
+        refine=refine_report_payload,
     )
     options.report_path.write_text(
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2),

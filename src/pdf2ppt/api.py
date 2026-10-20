@@ -617,6 +617,9 @@ def _conversion_options_from_request(
         approved_ocr_blocks_by_page=approved_ocr_blocks_by_page,
         approved_ocr_image_size_by_page=approved_ocr_image_size_by_page,
         apply_notebooklm_watermark_fallback=apply_notebooklm_watermark_fallback,
+        refine=bool(getattr(request, "refine", False)),
+        refine_iters=int(getattr(request, "refine_iters", 2)),
+        refine_max_fixes_per_slide=int(getattr(request, "refine_max_fixes_per_slide", 8)),
     )
 
 

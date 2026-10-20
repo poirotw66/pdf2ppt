@@ -12,6 +12,10 @@
 - `--layout-model-root`: DocLayout / Structure model directory, default `./model`
 - `--emit-ir PATH` / `--ir-only` / `--from-ir PATH` / `-o`: SlideIR export and render ([`slideir.md`](slideir.md)). Subcommands: `pdf2ppt emit-ir …`, `pdf2ppt from-ir …`. Assets live in `{ir_filename}.assets/` next to the IR JSON.
 - `--keep-header-footer`: keep header/footer/page-number regions (skipped by default)
+- `--refine`: opt-in P4 render-compare-refine after PPTX build (LibreOffice → PNG, page SSIM, rule-based SlideIR fixes; never regresses). Skipped with a warning if `soffice` is missing. Default off.
+- `--refine-iters`: max refine iterations per slide (default `2`)
+- `--refine-max-fixes`: max accepted fixes per slide (default `8`)
+- `--refine-report`: path for the per-slide refine JSON report (default `<output>.refine.json`)
 - `--lang`: PaddleOCR language code, default `ch`
 - `--ocr-model-root`: local PaddleOCR model directory, default `./model`
 - `--enable-doc-orientation`: enable PaddleOCR document orientation classification; disabled by default for faster startup and OCR

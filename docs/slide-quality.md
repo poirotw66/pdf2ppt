@@ -165,3 +165,18 @@ output PPTX and source PDF. `scripts/bench_slide.py --inpaint-engine …` forwar
 conversion knobs into `ConversionOptions`. Measure the generative backends with
 `--inpaint-engine generative-openai` or `generative-gemini` (plus budget extras);
 see [`generative-inpaint.md`](./generative-inpaint.md).
+
+## P4 render-compare-refine (opt-in)
+
+`pdf2ppt --refine` runs a deterministic loop after the PPTX is written:
+
+1. Render each slide via LibreOffice → PDF → PNG (same stack as this evaluator).
+2. Diagnose page SSIM plus localized issues (text overflow, line drift vs
+   `line_bboxes`, low local SSIM, extra wrapping) — no LLM.
+3. Apply bounded rule-based fixes to SlideIR / `PageResult` (shrink font, widen
+   or reposition boxes, raster crop as last resort).
+4. Keep a fix only when page SSIM does not go down; otherwise revert.
+
+Default is off so existing conversion output is unchanged. When `soffice` is
+unavailable the loop skips with a warning and conversion still succeeds. See
+`src/pdf2ppt/refine.py` and `tests/test_refine.py`.
