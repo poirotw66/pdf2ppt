@@ -300,7 +300,7 @@ def _serialize_page(page: PageResult, *, assets_root: Path) -> dict[str, Any]:
                 "id": f"img_{page.page_number}_{index}",
                 "bbox": list(placement.bbox),
                 "asset": {"path": f"{rel_page}/{filename}", "media_type": "image/png"},
-                "z_order": index,
+                "z_order": int(getattr(placement, "z_order", index) or index),
                 "provenance": "pipeline_crop",
                 "confidence": 1.0,
             }
@@ -352,6 +352,11 @@ def _serialize_text_block(block: TextBlock) -> dict[str, Any]:
     bbox = payload.get("bbox")
     if isinstance(bbox, (list, tuple)):
         payload["bbox"] = list(bbox)
+    line_bboxes = payload.get("line_bboxes")
+    if isinstance(line_bboxes, list):
+        payload["line_bboxes"] = [
+            list(box) if isinstance(box, (list, tuple)) else box for box in line_bboxes
+        ]
     return payload
 
 
@@ -418,7 +423,13 @@ def _deserialize_page(
         if not isinstance(asset, dict) or not asset.get("path"):
             raise SlideIrError(f"pages[{page_index}].images[{image_index}] needs asset.path")
         png_bytes = _load_asset_bytes(asset["path"], assets_root=assets_root)
-        image_elements.append(ImagePlacement(bbox=bbox, png_bytes=png_bytes))
+        image_elements.append(
+            ImagePlacement(
+                bbox=bbox,
+                png_bytes=png_bytes,
+                z_order=int(item.get("z_order", image_index) or image_index),
+            )
+        )
 
     background_bytes: bytes | None = None
     background = payload.get("background")
@@ -481,6 +492,15 @@ def _deserialize_text_block(payload: Any, *, page_index: int, block_index: int) 
         image_bbox = None
         if payload.get("image_bbox") is not None:
             image_bbox = _require_bbox(payload["image_bbox"], label="image_bbox")
+        line_bboxes = None
+        if payload.get("line_bboxes") is not None:
+            raw_lines = payload["line_bboxes"]
+            if not isinstance(raw_lines, list):
+                raise SlideIrError("line_bboxes must be an array")
+            line_bboxes = [
+                _require_bbox(item, label=f"line_bboxes[{index}]")
+                for index, item in enumerate(raw_lines)
+            ]
         return TextBlock(
             id=str(payload["id"]),
             source=source,  # type: ignore[arg-type]
@@ -499,6 +519,7 @@ def _deserialize_text_block(payload: Any, *, page_index: int, block_index: int) 
             layout_region_id=payload.get("layout_region_id"),
             layout_label=payload.get("layout_label"),
             paragraphs=paragraphs,
+            line_bboxes=line_bboxes,
             use_title_placeholder=bool(payload.get("use_title_placeholder", False)),
         )
     except (KeyError, TypeError, ValueError, SlideIrError) as error:

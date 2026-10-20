@@ -174,11 +174,23 @@ def _intersection_area(a: BBox, b: BBox) -> float:
 
 
 def _shape_overlaps_image(shape_bbox: BBox, image_boxes: list[BBox]) -> bool:
-    area = _bbox_area(shape_bbox)
-    if area <= 0:
-        return False
+    """True when the shape covers a meaningful fraction of a picture (or vice versa).
+
+    Large page fills must be judged against *picture* area: intersection /
+    shape_area is tiny for a full-page rect over a small photo, which used to
+    let erase paint over the photo. Small shapes on photos still match via
+    intersection / shape_area.
+    """
+
+    shape_area = _bbox_area(shape_bbox)
     for image_bbox in image_boxes:
-        if _intersection_area(shape_bbox, image_bbox) / area >= IMAGE_OVERLAP_RATIO:
+        overlap = _intersection_area(shape_bbox, image_bbox)
+        if overlap <= 0:
+            continue
+        image_area = _bbox_area(image_bbox)
+        if image_area > 0 and overlap / image_area >= IMAGE_OVERLAP_RATIO:
+            return True
+        if shape_area > 0 and overlap / shape_area >= IMAGE_OVERLAP_RATIO:
             return True
     return False
 
@@ -190,6 +202,12 @@ def shape_should_erase_background(
 ) -> bool:
     """Whether a nativized shape's raster underlay may be solid-filled away."""
 
+    # Page fills are drawn beneath the raster; erasing them destroys pictures.
+    if shape.is_page_background:
+        return False
+    # Stroke-only / no-fill shapes have nothing to un-composite as a solid fill.
+    if shape.fill_color is None:
+        return False
     if shape.fill_opacity < OPAQUE_FILL_OPACITY:
         return False
     if image_boxes and _shape_overlaps_image(shape.bbox, image_boxes):
@@ -205,8 +223,9 @@ def regions_for_background_erase(
 ) -> list[BBox]:
     """Regions that must disappear from a raster background.
 
-    Only opaque shapes that do not sit on embedded images are erased. Tables are
-    always erased (their grid is fully replaced by a native table).
+    Only opaque filled shapes that do not sit on / cover embedded images are
+    erased. Page-background fills are skipped. Tables are always erased (their
+    grid is fully replaced by a native table).
     """
 
     regions = [

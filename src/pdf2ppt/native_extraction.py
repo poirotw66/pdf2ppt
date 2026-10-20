@@ -122,6 +122,9 @@ def extract_native_text_blocks(page: fitz.Page) -> tuple[list[TextBlock], list[t
                     bold=bold,
                     italic=italic,
                     reading_order=order,
+                    # Preserve real PDF line boxes so layout can derive a:spcBef
+                    # from true baseline gaps (not equal slices of the union).
+                    line_bboxes=list(boxes) if len(boxes) > 1 else None,
                 )
             )
             order += 1
@@ -178,13 +181,28 @@ def extract_image_elements(
     dpi: int,
 ) -> list[ImagePlacement]:
     image_elements: list[ImagePlacement] = []
-    for bbox in image_boxes:
+    # Place crops after typical early page-fill drawings (seqno 0) so z-order
+    # interleaving with ShapeElement follows PDF paint order by default.
+    base_z = 1
+    try:
+        drawings = page.get_drawings()
+        if drawings:
+            base_z = max(int(path.get("seqno") or 0) for path in drawings) + 1
+    except Exception:  # noqa: BLE001 - PyMuPDF may raise on odd pages
+        base_z = 1
+    for index, bbox in enumerate(image_boxes):
         rect = fitz.Rect(*bbox)
         if rect.width <= 1 or rect.height <= 1:
             continue
         pixmap = page.get_pixmap(clip=rect, dpi=dpi, alpha=False)
         image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-        image_elements.append(ImagePlacement(bbox=bbox, png_bytes=pil_to_png_bytes(image)))
+        image_elements.append(
+            ImagePlacement(
+                bbox=bbox,
+                png_bytes=pil_to_png_bytes(image),
+                z_order=base_z + index,
+            )
+        )
     return image_elements
 
 
