@@ -71,10 +71,14 @@ def render_page_to_slide(
     # Track every page-background picture/shape so the title can sit above all of them.
     background_elements: list[Any] = []
     shape_elements = list(getattr(page_result, "shape_elements", None) or [])
-    # ``is_page_background`` includes true page fills (≥95% area) and opaque fills
-    # promoted because they overlap pictures kept in the raster (card_93pct).
-    background_shapes = [shape for shape in shape_elements if shape.is_page_background]
-    foreground_shapes = [shape for shape in shape_elements if not shape.is_page_background]
+
+    def _sits_under_raster(shape: Any) -> bool:
+        return bool(getattr(shape, "is_page_background", False) or getattr(shape, "render_under_raster", False))
+
+    # True page fills (≥95%) and opaque fills painted before an overlapping
+    # picture (``render_under_raster`` / card_93pct) sit under the page raster.
+    background_shapes = [shape for shape in shape_elements if _sits_under_raster(shape)]
+    foreground_shapes = [shape for shape in shape_elements if not _sits_under_raster(shape)]
     has_raster_background = page_result.background_image_bytes is not None
 
     # PDF paint order: under-raster fills are painted first. They must stay under

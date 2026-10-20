@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -483,10 +484,11 @@ class TransparentEraseTests(unittest.TestCase):
         # Same large card with no pictures may still be erased.
         self.assertTrue(shape_should_erase_background(large_card, image_boxes=[]))
 
-    def test_large_fill_overlapping_picture_renders_under_background(self) -> None:
+    def test_large_fill_painted_before_picture_sets_render_under_raster(self) -> None:
         from pdf2ppt.background_erase import (
-            promote_shapes_under_background,
-            shape_should_render_under_background,
+            parse_bboxlog_paint_events,
+            promote_shapes_under_raster,
+            shape_should_render_under_raster,
         )
         from pdf2ppt.models import ShapeElement
 
@@ -498,7 +500,7 @@ class TransparentEraseTests(unittest.TestCase):
             fill_opacity=1.0,
             is_page_background=False,
         )
-        small_card = ShapeElement(
+        small_badge = ShapeElement(
             id="badge",
             kind="rect",
             bbox=(40, 40, 120, 80),
@@ -515,18 +517,116 @@ class TransparentEraseTests(unittest.TestCase):
             is_page_background=False,
         )
         picture = (400.0, 180.0, 700.0, 360.0)
-        self.assertTrue(shape_should_render_under_background(large_card, image_boxes=[picture]))
-        self.assertFalse(shape_should_render_under_background(small_card, image_boxes=[picture]))
-        self.assertFalse(shape_should_render_under_background(translucent, image_boxes=[picture]))
-        self.assertFalse(shape_should_render_under_background(large_card, image_boxes=[]))
-        promoted = promote_shapes_under_background(
-            [large_card, small_card, translucent],
+        # Card painted before picture (bboxlog order).
+        paint_events = parse_bboxlog_paint_events(
+            [
+                ("fill-path", large_card.bbox),
+                ("fill-image", picture),
+                ("fill-path", small_badge.bbox),
+            ]
+        )
+        self.assertTrue(
+            shape_should_render_under_raster(
+                large_card, image_boxes=[picture], paint_events=paint_events
+            )
+        )
+        self.assertFalse(
+            shape_should_render_under_raster(
+                small_badge, image_boxes=[picture], paint_events=paint_events
+            )
+        )
+        self.assertFalse(
+            shape_should_render_under_raster(
+                translucent, image_boxes=[picture], paint_events=paint_events
+            )
+        )
+        promoted = promote_shapes_under_raster(
+            [large_card, small_badge, translucent],
             image_boxes=[picture],
+            paint_events=paint_events,
         )
         self.assertEqual(promoted, 1)
-        self.assertTrue(large_card.is_page_background)
-        self.assertFalse(small_card.is_page_background)
-        self.assertFalse(translucent.is_page_background)
+        self.assertTrue(large_card.render_under_raster)
+        self.assertFalse(large_card.is_page_background)
+        self.assertFalse(small_badge.render_under_raster)
+        self.assertFalse(translucent.render_under_raster)
+
+    def test_badge_and_card_after_photo_not_promoted(self) -> None:
+        from pdf2ppt.background_erase import (
+            parse_bboxlog_paint_events,
+            shape_should_render_under_raster,
+        )
+        from pdf2ppt.models import ShapeElement
+
+        picture = (200.0, 100.0, 760.0, 460.0)
+        badge = ShapeElement(
+            id="badge",
+            kind="rect",
+            bbox=(560, 120, 740, 180),
+            fill_color="#D91A26",
+            fill_opacity=1.0,
+        )
+        late_card = ShapeElement(
+            id="late",
+            kind="rect",
+            bbox=(380, 160, 900, 500),
+            fill_color="#338055",
+            fill_opacity=1.0,
+        )
+        badge_events = parse_bboxlog_paint_events(
+            [("fill-image", picture), ("fill-path", badge.bbox)]
+        )
+        card_events = parse_bboxlog_paint_events(
+            [("fill-image", picture), ("fill-path", late_card.bbox)]
+        )
+        self.assertFalse(
+            shape_should_render_under_raster(
+                badge, image_boxes=[picture], paint_events=badge_events
+            )
+        )
+        self.assertFalse(
+            shape_should_render_under_raster(
+                late_card, image_boxes=[picture], paint_events=card_events
+            )
+        )
+
+    def test_erase_uses_ring_median_not_white_halo(self) -> None:
+        import numpy as np
+        from PIL import Image
+
+        from pdf2ppt.background_erase import erase_regions_from_image
+        from pdf2ppt.models import ShapeElement
+
+        # Blue card with an orange circle baked in; erase the circle bbox.
+        raster = Image.new("RGB", (200, 120), color=(217, 235, 255))
+        pix = raster.load()
+        for y in range(40, 80):
+            for x in range(40, 80):
+                if (x - 60) ** 2 + (y - 60) ** 2 <= 18**2:
+                    pix[x, y] = (240, 110, 30)
+        card = ShapeElement(
+            id="card",
+            kind="rect",
+            bbox=(0, 0, 200, 120),
+            fill_color="#D9EBFF",
+            fill_opacity=1.0,
+        )
+        erased = erase_regions_from_image(
+            raster,
+            [(40.0, 40.0, 80.0, 80.0)],
+            page_width=200.0,
+            page_height=120.0,
+            fill_color=(255, 255, 255),
+            shapes=[card],
+            padding_px=0,
+            ring_px=3,
+        )
+        patch = np.asarray(erased)[45:75, 45:75]
+        # Ring-median / underneath fill ≈ card blue, not white.
+        self.assertGreater(float(patch[:, :, 2].mean()), 200.0)
+        self.assertLess(float(patch[:, :, 0].mean()), 240.0)
+        white_frac = float(np.all(patch >= 250, axis=2).mean())
+        self.assertLess(white_frac, 0.05)
 
     def test_uncomposite_restores_pre_tint_luma(self) -> None:
         import numpy as np
@@ -978,12 +1078,9 @@ class PageBackgroundFillTests(unittest.TestCase):
         self.assertEqual(page_result.background_mode, "overlay")
         self.assertIsNotNone(page_result.background_image_bytes)
         self.assertTrue(page_result.shape_elements)
-        card_shapes = [
-            shape
-            for shape in page_result.shape_elements
-            if shape.fill_color and not (shape.stroke_color and shape.fill_color is None)
-        ]
-        self.assertTrue(any(shape.is_page_background for shape in card_shapes))
+        card_shapes = [shape for shape in page_result.shape_elements if shape.fill_color]
+        self.assertTrue(any(shape.render_under_raster for shape in card_shapes))
+        self.assertFalse(any(shape.is_page_background for shape in card_shapes))
 
         presentation = Presentation(str(pptx_path))
         slide = presentation.slides[0]
@@ -1019,6 +1116,252 @@ class PageBackgroundFillTests(unittest.TestCase):
                 text_idxs.append(index)
         self.assertTrue(text_idxs)
         self.assertGreater(min(text_idxs), min(pic_idxs))
+
+    def test_card_with_round_icons_has_no_white_halos(self) -> None:
+        """Card + round icons + photo: ring-median erase, no white around icons."""
+
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        page_w, page_h = 960.0, 540.0
+        texture = np.full((150, 220, 3), (230, 110, 40), dtype=np.uint8)
+        png_buf = io.BytesIO()
+        Image.fromarray(texture, mode="RGB").save(png_buf, format="PNG")
+
+        doc = fitz.open()
+        page = doc.new_page(width=page_w, height=page_h)
+        page.draw_rect(fitz.Rect(40, 30, 920, 510), color=None, fill=(0.85, 0.92, 1.0), fill_opacity=1)
+        page.insert_image(fitz.Rect(640, 300, 880, 470), stream=png_buf.getvalue())
+        page.draw_circle(fitz.Point(110, 200), 22, color=None, fill=(0.95, 0.45, 0.1))
+        page.draw_circle(fitz.Point(110, 280), 22, color=None, fill=(0.1, 0.6, 0.3))
+        page.draw_rect(fitz.Rect(640, 160, 880, 260), color=None, fill=(0.15, 0.25, 0.55), radius=0.15)
+        page.insert_textbox(
+            fitz.Rect(80, 60, 700, 110),
+            "Card with icons and a photo",
+            fontsize=28,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(150, 186, 600, 230),
+            "Orange icon item",
+            fontsize=14,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(150, 266, 600, 310),
+            "Green icon item with more body text so native coverage stays digital.",
+            fontsize=14,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(180, 350, 540, 450),
+            "Inner white box drawn on top of the card keeps the page classified digital.",
+            fontsize=14,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-icons-"))
+        pdf_path = work / "probe_card_icons.pdf"
+        pptx_path = work / "probe_card_icons.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=pdf_path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        page_result = report.pages[0]
+        self.assertTrue(any(shape.render_under_raster for shape in page_result.shape_elements))
+        self.assertFalse(any(shape.is_page_background for shape in page_result.shape_elements))
+        self.assertIsNotNone(page_result.background_image_bytes)
+
+        # Inspect the erased page raster around the orange icon bbox.
+        bg = Image.open(io.BytesIO(page_result.background_image_bytes)).convert("RGB")
+        scale_x = bg.width / page_w
+        scale_y = bg.height / page_h
+        # Icon circle bbox ≈ (88, 178, 132, 222); sample a ring just outside.
+        samples = []
+        for angle in range(0, 360, 15):
+            rad = math.radians(angle)
+            x = int(round((110 + 26 * math.cos(rad)) * scale_x))
+            y = int(round((200 + 26 * math.sin(rad)) * scale_y))
+            if 0 <= x < bg.width and 0 <= y < bg.height:
+                samples.append(bg.getpixel((x, y)))
+        self.assertGreaterEqual(len(samples), 8)
+        arr = np.asarray(samples, dtype=np.float64)
+        # Backdrop should stay light-blue card, not white erase fill.
+        self.assertLess(float(np.mean(np.all(arr >= 250, axis=1))), 0.1)
+        self.assertGreater(float(arr[:, 2].mean()), 200.0)
+
+    def test_badge_on_photo_stays_above_raster(self) -> None:
+        """Small badge painted after a photo must remain an editable foreground shape."""
+
+        import io
+
+        import numpy as np
+        from PIL import Image
+        from pptx.oxml.ns import qn
+
+        texture = np.full((150, 220, 3), (40, 90, 150), dtype=np.uint8)
+        png_buf = io.BytesIO()
+        Image.fromarray(texture, mode="RGB").save(png_buf, format="PNG")
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.insert_image(fitz.Rect(200, 100, 760, 460), stream=png_buf.getvalue())
+        page.draw_rect(fitz.Rect(560, 120, 740, 180), color=None, fill=(0.85, 0.1, 0.15))
+        page.insert_textbox(
+            fitz.Rect(60, 30, 700, 80),
+            "Badge on a photo",
+            fontsize=28,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(575, 135, 735, 175),
+            "NEW BADGE",
+            fontsize=18,
+            fontname="helv",
+            color=(1, 1, 1),
+        )
+        page.insert_textbox(
+            fitz.Rect(60, 480, 700, 530),
+            "Extra caption text so native char coverage keeps this page digital for CI.",
+            fontsize=12,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-badge-"))
+        pdf_path = work / "probe_badge_on_photo.pdf"
+        pptx_path = work / "probe_badge_on_photo.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=pdf_path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        page_result = report.pages[0]
+        photo_area = (760.0 - 200.0) * (460.0 - 100.0)
+        badge_shapes = []
+        for shape in page_result.shape_elements:
+            if not shape.fill_color or shape.is_page_background:
+                continue
+            area = (shape.bbox[2] - shape.bbox[0]) * (shape.bbox[3] - shape.bbox[1])
+            if area < photo_area:
+                self.assertFalse(shape.render_under_raster)
+                badge_shapes.append(shape)
+        self.assertTrue(badge_shapes)
+
+        presentation = Presentation(str(pptx_path))
+        children = list(presentation.slides[0].shapes._spTree)  # noqa: SLF001
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        # Badge auto-shape should appear after the full-slide background picture.
+        badge_idxs = []
+        for index, child in enumerate(children):
+            if child.tag != qn("p:sp"):
+                continue
+            sp_pr = child.find(qn("p:spPr"))
+            solid = (
+                None
+                if sp_pr is None
+                else sp_pr.find(".//{http://schemas.openxmlformats.org/drawingml/2006/main}srgbClr")
+            )
+            val = (solid.get("val") if solid is not None else "") or ""
+            # Red-ish badge fill from the PDF (0.85, 0.1, 0.15).
+            if len(val) == 6 and int(val[0:2], 16) > 180 and int(val[2:4], 16) < 80:
+                badge_idxs.append(index)
+        self.assertTrue(pic_idxs)
+        self.assertTrue(badge_idxs)
+        self.assertGreater(min(badge_idxs), min(pic_idxs))
+
+    def test_card_painted_after_photo_not_promoted(self) -> None:
+        """Card drawn after a photo must stay above the raster (editable cover)."""
+
+        import io
+
+        import numpy as np
+        from PIL import Image
+        from pptx.oxml.ns import qn
+
+        texture = np.full((150, 220, 3), (230, 110, 40), dtype=np.uint8)
+        png_buf = io.BytesIO()
+        Image.fromarray(texture, mode="RGB").save(png_buf, format="PNG")
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.insert_image(fitz.Rect(300, 100, 760, 440), stream=png_buf.getvalue())
+        page.draw_rect(fitz.Rect(380, 160, 900, 500), color=None, fill=(0.2, 0.5, 0.35), fill_opacity=1)
+        page.insert_textbox(
+            fitz.Rect(60, 40, 600, 90),
+            "Card painted after photo",
+            fontsize=28,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.insert_textbox(
+            fitz.Rect(420, 200, 860, 300),
+            "This green card is painted after the photo and must cover it.",
+            fontsize=14,
+            fontname="helv",
+            color=(1, 1, 1),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-paint-"))
+        pdf_path = work / "probe_paint_order.pdf"
+        pptx_path = work / "probe_paint_order.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=pdf_path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        page_result = report.pages[0]
+        green_cards = [
+            shape
+            for shape in page_result.shape_elements
+            if shape.fill_color and not shape.is_page_background
+        ]
+        self.assertTrue(green_cards)
+        self.assertFalse(any(shape.render_under_raster for shape in green_cards))
+
+        presentation = Presentation(str(pptx_path))
+        children = list(presentation.slides[0].shapes._spTree)  # noqa: SLF001
+        pic_idxs = [i for i, child in enumerate(children) if child.tag == qn("p:pic")]
+        card_idxs = []
+        for index, child in enumerate(children):
+            if child.tag != qn("p:sp"):
+                continue
+            sp_pr = child.find(qn("p:spPr"))
+            solid = None if sp_pr is None else sp_pr.find(".//{http://schemas.openxmlformats.org/drawingml/2006/main}srgbClr")
+            if solid is not None and (solid.get("val") or "").upper().startswith("33"):
+                card_idxs.append(index)
+        self.assertTrue(pic_idxs)
+        self.assertTrue(card_idxs)
+        self.assertGreater(min(card_idxs), min(pic_idxs))
 
     def test_dark_97pct_page_fill_stays_under_raster(self) -> None:
         """≥95% dark fill + photo: already page-background; keep under raster."""

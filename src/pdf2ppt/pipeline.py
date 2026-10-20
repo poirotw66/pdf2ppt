@@ -29,7 +29,8 @@ from .background import (
 )
 from .background_erase import (
     erase_regions_from_image,
-    promote_shapes_under_background,
+    paint_events_from_page,
+    promote_shapes_under_raster,
     regions_for_background_erase,
     resolve_erase_fill_color,
     uncomposite_translucent_shapes_from_image,
@@ -585,13 +586,20 @@ def analyze_page(
                     page_width=float(page.rect.width),
                     page_height=float(page.rect.height),
                     fill_color=fill_color,
+                    shapes=vector_result.shapes,
                 )
                 note = background_inpaint_note or ""
                 erase_note = f"erased {len(erase_regions)} nativized vector/table region(s)"
                 background_inpaint_note = f"{note}; {erase_note}".strip("; ")
-            # Opaque fills kept in the raster (overlap pictures) must render
-            # under that raster so the baked-in photo stays visible.
-            promote_shapes_under_background(vector_result.shapes, image_boxes=image_boxes)
+            # Opaque fills painted *before* an overlapping picture stay in the
+            # raster with that photo; mark them render_under_raster so PPTX
+            # paint order matches the PDF (card_93pct). Later/smaller shapes
+            # (badge-on-photo, card-after-photo) stay editable above the raster.
+            promote_shapes_under_raster(
+                vector_result.shapes,
+                image_boxes=image_boxes,
+                paint_events=paint_events_from_page(page),
+            )
         if layout_figure_images or layout_applied.regions:
             # Re-crop figures from the text-erased raster so OCR labels aren't
             # doubled under editable text boxes (scanned_vector_shapes).
@@ -614,6 +622,7 @@ def analyze_page(
                         page_width=float(page.rect.width),
                         page_height=float(page.rect.height),
                         fill_color=resolve_erase_fill_color(vector_result.shapes, background_image),
+                        shapes=vector_result.shapes,
                     )
         background_encode_started_at = perf_counter()
         background_image_format = options.background_image_format

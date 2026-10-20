@@ -569,6 +569,7 @@ def _deserialize_shape(payload: Any, *, page_index: int, shape_index: int) -> Sh
             locked=bool(payload.get("locked", True)),
             drawing_index=_optional_int(payload.get("drawing_index")),
             is_page_background=bool(payload.get("is_page_background", False)),
+            render_under_raster=bool(payload.get("render_under_raster", False)),
             arrow_direction=payload.get("arrow_direction"),
         )
     except (KeyError, TypeError, ValueError, SlideIrError) as error:

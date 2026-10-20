@@ -131,6 +131,9 @@ class ShapeElement:
     locked: bool = True
     drawing_index: int | None = None
     is_page_background: bool = False
+    # Opaque fill kept in the page raster (photo painted after it) must sit under
+    # that raster in PPTX. Distinct from is_page_background (≥95% page fills).
+    render_under_raster: bool = False
     arrow_direction: ArrowDirection | None = None
 
     def to_dict(self) -> dict[str, object]:
