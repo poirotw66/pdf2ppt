@@ -2133,6 +2133,272 @@ class TableFillAndGuardRegressionTests(unittest.TestCase):
             self.assertEqual(tables, [])
 
 
+class TableHairlineOpacityGradientTests(unittest.TestCase):
+    """Hairline filled-rect rules, translucent cells, gradient header median fallback."""
+
+    @staticmethod
+    def _table_rows() -> list[list[str]]:
+        return [["ID", "Name", "Status", "Score"]] + [
+            [str(i), f"Item {i}", "OK" if i % 2 else "WAIT", str(80 + i)] for i in range(1, 8)
+        ]
+
+    @staticmethod
+    def _write_centered_row_text(
+        page: fitz.Page,
+        *,
+        x0: float,
+        y0: float,
+        col_widths: list[float],
+        row_height: float,
+        rows: list[list[str]],
+        header_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        body_color: tuple[float, float, float] = (0.05, 0.05, 0.05),
+    ) -> None:
+        for row_index, row in enumerate(rows):
+            x = x0
+            for col_index, value in enumerate(row):
+                cell = fitz.Rect(x, y0 + row_index * row_height, x + col_widths[col_index], y0 + (row_index + 1) * row_height)
+                width = fitz.get_text_length(value, fontname="helv", fontsize=14)
+                tx = cell.x0 + max(0.0, (cell.width - width) / 2.0)
+                page.insert_text(
+                    fitz.Point(tx, cell.y0 + (cell.height + 14 * 0.7) / 2.0),
+                    value,
+                    fontsize=14,
+                    fontname="helv",
+                    color=header_color if row_index == 0 else body_color,
+                )
+                x += col_widths[col_index]
+
+    def test_hairline_filled_rect_grid_stays_native_table(self) -> None:
+        """Word/Excel hairline fills count as rules; page fills still do not."""
+
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.render_compare import inspect_pptx_editability
+        from pdf2ppt.vector_nativization import extract_tables
+
+        col_widths = [90.0, 250.0, 180.0, 160.0]
+        x0, y0, row_h = 100.0, 100.0, 32.0
+        rows = self._table_rows()
+        total_w = sum(col_widths)
+        xs = [x0]
+        for width in col_widths:
+            xs.append(xs[-1] + width)
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.insert_textbox(
+            fitz.Rect(60, 30, 800, 70),
+            "Grid from filled hairline rects",
+            fontsize=24,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        page.draw_rect(fitz.Rect(x0, y0, x0 + total_w, y0 + row_h), color=None, fill=(0.85, 0.88, 0.95))
+        table_h = len(rows) * row_h
+        for row_index in range(len(rows) + 1):
+            y = y0 + row_index * row_h
+            page.draw_rect(fitz.Rect(x0, y - 0.4, x0 + total_w, y + 0.4), color=None, fill=(0, 0, 0))
+        for x in xs:
+            page.draw_rect(fitz.Rect(x - 0.4, y0, x + 0.4, y0 + table_h), color=None, fill=(0, 0, 0))
+        self._write_centered_row_text(
+            page,
+            x0=x0,
+            y0=y0,
+            col_widths=col_widths,
+            row_height=row_h,
+            rows=rows,
+            header_color=(0.05, 0.05, 0.2),
+        )
+        page.insert_textbox(
+            fitz.Rect(60, 400, 700, 520),
+            "Extra caption text so native character coverage keeps this page digital for CI "
+            "without PaddleOCR while hairline filled-rect rules keep the grid a native table.",
+            fontsize=12,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-hairline-"))
+        pdf_path = work / "b_grid_fillrects.pdf"
+        pptx_path = work / "b_grid_fillrects.pptx"
+        pdf_path.write_bytes(pdf_bytes)
+        with fitz.open(pdf_path) as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+            self.assertEqual(len(tables), 1)
+            self.assertEqual(tables[0].row_count, 8)
+            self.assertEqual(tables[0].col_count, 4)
+
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=pdf_path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        self.assertTrue(report.pages[0].table_elements)
+        metrics = inspect_pptx_editability(pptx_path)[0]
+        self.assertEqual(metrics.table_count, 1)
+
+    def test_semitransparent_cells_use_rendered_colour(self) -> None:
+        """Translucent vector fills must sample composited pixels, not opaque source RGB."""
+
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.vector_nativization import apply_cell_fills, extract_tables
+
+        col_widths = [90.0, 250.0, 180.0, 160.0]
+        x0, y0, row_h = 100.0, 100.0, 32.0
+        rows = self._table_rows()
+        xs = [x0]
+        for width in col_widths:
+            xs.append(xs[-1] + width)
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.draw_rect(fitz.Rect(0, 0, 960, 540), color=None, fill=(0.98, 0.9, 0.75))
+        page.insert_textbox(
+            fitz.Rect(60, 30, 800, 70),
+            "Semi-transparent cells",
+            fontsize=24,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        for row_index in range(len(rows)):
+            for col_index in range(4):
+                fill = (0.1, 0.3, 0.7) if row_index == 0 else ((0.2, 0.5, 0.9) if row_index % 2 else (1.0, 1.0, 1.0))
+                page.draw_rect(
+                    fitz.Rect(xs[col_index], y0 + row_index * row_h, xs[col_index + 1], y0 + (row_index + 1) * row_h),
+                    color=(0.4, 0.4, 0.4),
+                    fill=fill,
+                    width=0.8,
+                    fill_opacity=0.9 if row_index == 0 else 0.35,
+                )
+        self._write_centered_row_text(
+            page,
+            x0=x0,
+            y0=y0,
+            col_widths=col_widths,
+            row_height=row_h,
+            rows=rows,
+        )
+        page.insert_textbox(
+            fitz.Rect(60, 400, 700, 520),
+            "Extra caption text so native character coverage keeps this page digital for CI "
+            "without PaddleOCR while translucent cell fills sample the rendered page.",
+            fontsize=12,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+            self.assertEqual(len(tables), 1)
+            apply_cell_fills(tables[0], page)
+            header = {cell.fill_color for cell in tables[0].cells if cell.row == 0}
+            odd = {cell.fill_color for cell in tables[0].cells if cell.row > 0 and cell.row % 2 == 1}
+            even = {cell.fill_color for cell in tables[0].cells if cell.row > 0 and cell.row % 2 == 0}
+            self.assertEqual(header, {"#2F5BB3"})
+            self.assertEqual(odd, {"#B4C1CC"})
+            self.assertEqual(even, {"#FBEED5"})
+            # Must not keep the opaque source blue.
+            self.assertNotIn("#3380E5", {cell.fill_color for cell in tables[0].cells})
+
+    def test_gradient_header_gets_median_fill(self) -> None:
+        """Shading header with no solid vector fill must still get a readable solid colour."""
+
+        from pdf2ppt.native_extraction import extract_native_text_blocks
+        from pdf2ppt.vector_nativization import apply_cell_fills, extract_tables
+
+        col_widths = [90.0, 250.0, 180.0, 160.0]
+        x0, y0, row_h = 100.0, 100.0, 32.0
+        rows = self._table_rows()
+        total_w = sum(col_widths)
+        xs = [x0]
+        for width in col_widths:
+            xs.append(xs[-1] + width)
+
+        doc = fitz.open()
+        page = doc.new_page(width=960, height=540)
+        page.insert_textbox(
+            fitz.Rect(60, 30, 800, 70),
+            "Gradient header row",
+            fontsize=24,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        for row_index in range(len(rows)):
+            for col_index in range(4):
+                page.draw_rect(
+                    fitz.Rect(xs[col_index], y0 + row_index * row_h, xs[col_index + 1], y0 + (row_index + 1) * row_h),
+                    color=(0.3, 0.3, 0.3),
+                    width=0.8,
+                )
+        # Axial shading clipped to the header row (same approach as make_probes4).
+        fx = doc.get_new_xref()
+        doc.update_object(
+            fx,
+            "<</FunctionType 2/Domain[0 1]/C0[0.9 0.3 0.2]/C1[0.2 0.2 0.7]/N 1>>",
+        )
+        sx = doc.get_new_xref()
+        doc.update_object(
+            sx,
+            f"<</ShadingType 2/ColorSpace/DeviceRGB/Coords[{x0} 0 {x0 + total_w} 0]"
+            f"/Function {fx} 0 R/Extend[true true]>>",
+        )
+        res = doc.xref_get_key(page.xref, "Resources")
+        rx = int(res[1].split()[0]) if res[0] == "xref" else page.xref
+        key = "Shading" if res[0] == "xref" else "Resources/Shading"
+        doc.xref_set_key(rx, key, f"<</Sh1 {sx} 0 R>>")
+        yb = 540 - y0 - row_h
+        content = f"q {x0} {yb} {total_w} {row_h} re W n /Sh1 sh Q\n".encode()
+        content_xref = page.get_contents()[0]
+        doc.update_stream(content_xref, content + doc.xref_stream(content_xref))
+        self._write_centered_row_text(
+            page,
+            x0=x0,
+            y0=y0,
+            col_widths=col_widths,
+            row_height=row_h,
+            rows=rows,
+        )
+        page.insert_textbox(
+            fitz.Rect(60, 400, 700, 520),
+            "Extra caption text so native character coverage keeps this page digital for CI "
+            "without PaddleOCR while gradient header cells fall back to a median fill.",
+            fontsize=12,
+            fontname="helv",
+            color=(0.1, 0.1, 0.15),
+        )
+        pdf_bytes = doc.tobytes(garbage=4, deflate=True)
+        doc.close()
+
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+            self.assertEqual(len(tables), 1)
+            apply_cell_fills(tables[0], page)
+            header_fills = [cell.fill_color for cell in tables[0].cells if cell.row == 0]
+            self.assertTrue(all(color is not None for color in header_fills))
+            # White header text must sit on a darkish fill, not white / unset.
+            for color in header_fills:
+                assert color is not None
+                channels = [int(color[i : i + 2], 16) for i in (1, 3, 5)]
+                self.assertLess(sum(channels) / 3.0, 200.0)
+            body = {cell.fill_color for cell in tables[0].cells if cell.row > 0}
+            self.assertTrue(body)
+            self.assertTrue(all(color is not None and color.upper() in {"#FFFFFF", "#F0F0F0"} for color in body))
+
+
 class MultilineBodyWidthTests(unittest.TestCase):
     @unittest.skipUnless((FIXTURES_DIR / "large_mask.pdf").exists(), "fixture missing")
     def test_large_mask_text_box_stays_within_slide(self) -> None:

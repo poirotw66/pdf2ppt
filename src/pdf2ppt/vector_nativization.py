@@ -55,6 +55,13 @@ SPURIOUS_TABLE_PAGE_RATIO = 0.80
 CELL_FILL_VECTOR_INSET_PT = 2.0
 # Modal non-text pixel share required to accept a raster-sampled cell fill.
 CELL_FILL_MODAL_MIN_SHARE = 0.60
+# Opaque enough to trust the vector fill colour (else use rendered pixels).
+CELL_FILL_OPAQUE_OPACITY = 0.99
+# Word/Excel hairline gridlines drawn as thin filled rects, not strokes.
+HAIRLINE_RULE_MAX_SHORT_PT = 1.5
+HAIRLINE_RULE_MIN_LONG_PT = 8.0
+# Quantise RGB to this many bits/channel before the modal share test.
+CELL_FILL_QUANTIZE_BITS = 4
 # Backwards-compatible alias (pre-tighten empty-cell guard threshold).
 LARGE_EMPTY_CELL_PAGE_RATIO = SPURIOUS_TABLE_PAGE_RATIO
 
@@ -897,7 +904,11 @@ def _is_spurious_table_candidate(
 
 
 def _table_has_stroked_rules(page: fitz.Page, table_bbox: BBox, *, pad: float = 2.0) -> bool:
-    """True when at least one stroked path hugs the table (ruled grid, not fill edges)."""
+    """True when the table has stroked rules or Word/Excel hairline filled-rect rules.
+
+    Large page fills (``probe_straddle``) are not rules: only thin filled rects with
+    short side ≤1.5pt and long side ≥8pt count as hairline gridlines.
+    """
 
     try:
         drawings = page.get_drawings()
@@ -910,20 +921,29 @@ def _table_has_stroked_rules(page: fitz.Page, table_bbox: BBox, *, pad: float = 
         table_bbox[3] + pad,
     )
     for path in drawings:
-        if path.get("type") not in {"s", "fs"}:
-            continue
-        color = path.get("color")
-        width = path.get("width")
-        if color is None or width is None:
-            continue
-        if float(width) <= 0 or float(width) > 4.0:
-            continue
         rect = path.get("rect")
         if rect is None:
             continue
         line_bbox = _rect_to_bbox(rect)
-        if _bbox_center_inside(line_bbox, outer, padding=pad):
+        if not _bbox_center_inside(line_bbox, outer, padding=pad):
+            continue
+        path_type = path.get("type")
+        if path_type in {"s", "fs"}:
+            color = path.get("color")
+            width = path.get("width")
+            if color is None or width is None:
+                continue
+            if float(width) <= 0 or float(width) > 4.0:
+                continue
             return True
+        # Hairline filled rects (Word/Excel gridlines exported as fills, not strokes).
+        if path_type == "f" and path.get("fill") is not None:
+            width = abs(line_bbox[2] - line_bbox[0])
+            height = abs(line_bbox[3] - line_bbox[1])
+            short_side = min(width, height)
+            long_side = max(width, height)
+            if short_side <= HAIRLINE_RULE_MAX_SHORT_PT and long_side >= HAIRLINE_RULE_MIN_LONG_PT:
+                return True
     return False
 
 
@@ -1228,10 +1248,12 @@ def apply_cell_fills(
 
     Preference order per cell:
 
-    1. Fill of the smallest filled vector rect that contains the cell (inset 2pt).
-    2. Modal colour of the cell's raster pixels after masking ``get_text('words')``
-       boxes, only when that mode covers ≥60% of the remaining pixels.
-    3. Otherwise leave ``fill_color`` unset (transparent / theme default).
+    1. Opaque fill of the smallest filled vector rect containing the cell
+       (inset 2pt). If that smallest rect is translucent, skip the vector step
+       entirely (do not fall through to a larger opaque page fill).
+    2. Modal colour of non-text raster pixels (4-bit quantised), when the mode
+       covers ≥60% of remaining pixels.
+    3. Median of non-text raster pixels (covers gradients / soft fills).
     """
 
     if not table.cells:
@@ -1242,7 +1264,7 @@ def apply_cell_fills(
     scale = dpi / 72.0
     for cell in table.cells:
         cell_bbox = _cell_bbox_from_geometry(table, cell)
-        vector_fill = _vector_fill_for_cell(cell_bbox, filled_rects)
+        vector_fill = _opaque_vector_fill_for_cell(cell_bbox, filled_rects)
         if vector_fill is not None:
             cell.fill_color = vector_fill
             continue
@@ -1251,14 +1273,14 @@ def apply_cell_fills(
                 pixmap = page.get_pixmap(dpi=dpi, alpha=False)
             except Exception:  # noqa: BLE001
                 return
-        modal = _modal_fill_for_cell(
+        raster_fill = _raster_fill_for_cell(
             cell_bbox,
             pixmap=pixmap,
             scale=scale,
             word_boxes=word_boxes,
         )
-        if modal is not None:
-            cell.fill_color = modal
+        if raster_fill is not None:
+            cell.fill_color = raster_fill
 
 
 def apply_header_cell_fills(
@@ -1280,10 +1302,10 @@ def _cell_bbox_from_geometry(table: TableElement, cell: TableCell) -> BBox:
     return (x0, y0, x1, y1)
 
 
-def _collect_filled_vector_rects(page: fitz.Page) -> list[tuple[BBox, str]]:
-    """Filled drawing rects as ``(bbox, #RRGGBB)``, smallest-first consumers sort later."""
+def _collect_filled_vector_rects(page: fitz.Page) -> list[tuple[BBox, str, float]]:
+    """Filled drawing rects as ``(bbox, #RRGGBB, opacity)``."""
 
-    results: list[tuple[BBox, str]] = []
+    results: list[tuple[BBox, str, float]] = []
     try:
         drawings = page.get_drawings()
     except Exception:  # noqa: BLE001
@@ -1298,17 +1320,24 @@ def _collect_filled_vector_rects(page: fitz.Page) -> list[tuple[BBox, str]]:
         rect = path.get("rect")
         if rect is None:
             continue
-        results.append((_rect_to_bbox(rect), fill_hex))
+        raw_opacity = path.get("fill_opacity")
+        opacity = float(raw_opacity) if isinstance(raw_opacity, (int, float)) else 1.0
+        results.append((_rect_to_bbox(rect), fill_hex, max(0.0, min(1.0, opacity))))
     return results
 
 
-def _vector_fill_for_cell(
+def _opaque_vector_fill_for_cell(
     cell_bbox: BBox,
-    filled_rects: list[tuple[BBox, str]],
+    filled_rects: list[tuple[BBox, str, float]],
     *,
     inset_pt: float = CELL_FILL_VECTOR_INSET_PT,
+    opaque_opacity: float = CELL_FILL_OPAQUE_OPACITY,
 ) -> str | None:
-    """Fill of the smallest vector rect containing the cell inset by ``inset_pt``."""
+    """Opaque fill of the smallest containing vector rect, or ``None``.
+
+    When the smallest containing rect is translucent, returns ``None`` so the
+    caller samples rendered pixels instead of picking a larger opaque backdrop.
+    """
 
     inner = (
         cell_bbox[0] + inset_pt,
@@ -1320,7 +1349,8 @@ def _vector_fill_for_cell(
         inner = cell_bbox
     best_area: float | None = None
     best_fill: str | None = None
-    for rect_bbox, fill_hex in filled_rects:
+    best_opacity = 1.0
+    for rect_bbox, fill_hex, opacity in filled_rects:
         if not (
             rect_bbox[0] <= inner[0]
             and rect_bbox[1] <= inner[1]
@@ -1328,10 +1358,20 @@ def _vector_fill_for_cell(
             and rect_bbox[3] >= inner[3]
         ):
             continue
+        # Skip hairline gridline rects — they are rules, not cell fills.
+        width = abs(rect_bbox[2] - rect_bbox[0])
+        height = abs(rect_bbox[3] - rect_bbox[1])
+        if min(width, height) <= HAIRLINE_RULE_MAX_SHORT_PT:
+            continue
         area = bbox_area(rect_bbox)
         if best_area is None or area < best_area:
             best_area = area
             best_fill = fill_hex
+            best_opacity = opacity
+    if best_fill is None:
+        return None
+    if best_opacity < opaque_opacity:
+        return None
     return best_fill
 
 
@@ -1351,15 +1391,14 @@ def _collect_word_boxes(page: fitz.Page) -> list[BBox]:
     return boxes
 
 
-def _modal_fill_for_cell(
+def _non_text_pixels_for_cell(
     cell_bbox: BBox,
     *,
     pixmap: Any,
     scale: float,
     word_boxes: list[BBox],
-    min_share: float = CELL_FILL_MODAL_MIN_SHARE,
-) -> str | None:
-    """Dominant non-text pixel colour inside ``cell_bbox``, or ``None`` if unclear."""
+) -> np.ndarray | None:
+    """RGB pixels inside ``cell_bbox`` with word boxes masked out."""
 
     left = max(0, int(cell_bbox[0] * scale))
     top = max(0, int(cell_bbox[1] * scale))
@@ -1378,7 +1417,6 @@ def _modal_fill_for_cell(
 
     mask = np.ones(pixels.shape[:2], dtype=bool)
     for word_bbox in word_boxes:
-        # Skip words that miss this cell entirely.
         if (
             word_bbox[2] <= cell_bbox[0]
             or word_bbox[0] >= cell_bbox[2]
@@ -1396,24 +1434,88 @@ def _modal_fill_for_cell(
     remaining = pixels[mask]
     if remaining.size == 0:
         return None
-    # Pack RGB into a single int for a fast mode count.
+    return remaining
+
+
+def _quantize_rgb(pixels: np.ndarray, *, bits: int = CELL_FILL_QUANTIZE_BITS) -> np.ndarray:
+    """Round each channel to ``bits`` bits (reduces JPEG / AA noise for modal tests)."""
+
+    shift = max(0, 8 - bits)
+    if shift == 0:
+        return pixels
+    # Floor to the bin (avoid ``255 + round`` overflowing past 255 → 0).
+    return (pixels.astype(np.uint16) >> shift << shift).astype(np.uint8)
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int] | np.ndarray) -> str:
+    channels = [int(max(0, min(255, round(float(channel))))) for channel in rgb[:3]]
+    return f"#{channels[0]:02X}{channels[1]:02X}{channels[2]:02X}"
+
+
+def _raster_fill_for_cell(
+    cell_bbox: BBox,
+    *,
+    pixmap: Any,
+    scale: float,
+    word_boxes: list[BBox],
+    min_share: float = CELL_FILL_MODAL_MIN_SHARE,
+) -> str | None:
+    """Modal (quantised) non-text colour, else median — covers soft / gradient fills."""
+
+    remaining = _non_text_pixels_for_cell(
+        cell_bbox,
+        pixmap=pixmap,
+        scale=scale,
+        word_boxes=word_boxes,
+    )
+    if remaining is None:
+        return None
+
+    quantised = _quantize_rgb(remaining)
     packed = (
-        remaining[:, 0].astype(np.int32) << 16
-        | remaining[:, 1].astype(np.int32) << 8
-        | remaining[:, 2].astype(np.int32)
+        quantised[:, 0].astype(np.int32) << 16
+        | quantised[:, 1].astype(np.int32) << 8
+        | quantised[:, 2].astype(np.int32)
     )
     values, counts = np.unique(packed, return_counts=True)
     best_index = int(np.argmax(counts))
     share = float(counts[best_index]) / float(packed.size)
-    if share < min_share:
-        return None
-    best = int(values[best_index])
-    return f"#{(best >> 16) & 0xFF:02X}{(best >> 8) & 0xFF:02X}{best & 0xFF:02X}"
+    if share >= min_share:
+        # Quantisation only groups noise; emit the median of the original pixels
+        # in the winning bucket so translucent composites stay accurate.
+        bucket = remaining[packed == values[best_index]]
+        return _rgb_to_hex(np.median(bucket.astype(np.float64), axis=0))
+
+    # Gradient / soft fills: no single bucket dominates — use median RGB.
+    median_rgb = np.median(remaining.astype(np.float64), axis=0)
+    return _rgb_to_hex(median_rgb)
+
+
+# Backwards-compatible name used by earlier unit tests / call sites.
+def _modal_fill_for_cell(
+    cell_bbox: BBox,
+    *,
+    pixmap: Any,
+    scale: float,
+    word_boxes: list[BBox],
+    min_share: float = CELL_FILL_MODAL_MIN_SHARE,
+) -> str | None:
+    return _raster_fill_for_cell(
+        cell_bbox,
+        pixmap=pixmap,
+        scale=scale,
+        word_boxes=word_boxes,
+        min_share=min_share,
+    )
 
 
 __all__ = [
     "CELL_FILL_MODAL_MIN_SHARE",
+    "CELL_FILL_OPAQUE_OPACITY",
+    "CELL_FILL_QUANTIZE_BITS",
     "CELL_FILL_VECTOR_INSET_PT",
+    "HAIRLINE_RULE_MAX_SHORT_PT",
+    "HAIRLINE_RULE_MIN_LONG_PT",
     "LARGE_EMPTY_CELL_PAGE_RATIO",
     "PAGE_BACKGROUND_AREA_RATIO",
     "SPURIOUS_TABLE_MAX_CELLS",
