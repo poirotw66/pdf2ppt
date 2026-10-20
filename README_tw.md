@@ -22,7 +22,7 @@
 - 可選版面分析：區域類型、閱讀順序、真實項目符號、標題 placeholder（[`docs/layout-analysis.md`](docs/layout-analysis.md)）
 - 數位 PDF 上的簡單向量圖與有格線表格可轉成原生 PPT 形狀／表格（[`docs/vector-nativization.md`](docs/vector-nativization.md)）
 - 背景引擎：`opencv-fast`（建議預設）、`white-box`、可選 `lama-onnx`／`lama-pytorch`，以及雲端生成式後端（[`docs/background-engines.md`](docs/background-engines.md)）
-- 可選的確定性 render-compare-refine 迴圈（`--refine`）：轉檔後對投影片重繪、比對、規則修正
+- 可選的確定性 render-compare-refine 迴圈（`--refine`，實驗性）：轉檔後對投影片重繪、比對、規則修正
 - JSON 轉換報告、debug 產物，以及可選的 OCR 審框 UI
 
 ## 安裝
@@ -55,7 +55,7 @@ pdf2ppt input.pdf output.pptx
 pdf2ppt input.pdf output.pptx --report output.report.json --debug-dir output_debug
 pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
 
-# 可選 P4 refine（需要 LibreOffice；若無 soffice 會警告並略過，不中斷轉檔）
+# 實驗性可選 P4 refine（需要 LibreOffice；若無 soffice 會警告並略過，不中斷轉檔）
 pdf2ppt input.pdf output.pptx --refine --refine-iters 2
 ```
 
@@ -84,7 +84,7 @@ PDF → 頁面分類（digital / scanned / hybrid）
     → 可選向量／表格原生化
     → 條件式背景（elements / overlay / full-page）
     → PPTX + JSON 報告
-    → 可選 --refine（render-compare-fix；需 LibreOffice）
+    → 可選 --refine（實驗性 render-compare-fix；需 LibreOffice）
 ```
 
 | 元件 | 角色 |

@@ -28,7 +28,9 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -727,6 +729,92 @@ def render_pdf_page_image(pdf_path: Path, page_index: int, *, dpi: float = DEFAU
         return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
 
 
+def _kill_process_tree(process: subprocess.Popen[str]) -> None:
+    """Kill ``process`` and any children started in its process group/session."""
+
+    if process.poll() is not None:
+        return
+    pid = process.pid
+    try:
+        if sys.platform == "win32":
+            # /T terminates the whole tree rooted at pid.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                check=False,
+                capture_output=True,
+                timeout=30,
+            )
+        else:
+            # start_new_session=True makes the child the leader of its own group.
+            os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError) as error:
+        logger.debug("Process-tree kill for pid=%s failed: %s", pid, error)
+        try:
+            process.kill()
+        except (ProcessLookupError, OSError):
+            pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+            process.wait(timeout=5)
+        except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _popen_kwargs_for_process_group() -> dict[str, Any]:
+    """Start LibreOffice in its own process group so timeouts can reap orphans."""
+
+    if sys.platform == "win32":
+        # CREATE_NEW_PROCESS_GROUP is required for tree kill via taskkill /T.
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def run_subprocess_with_process_group(
+    command: list[str],
+    *,
+    timeout_seconds: float,
+    env: dict[str, str] | None = None,
+    cwd: str | Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``command`` in a new process group; kill the whole tree on timeout/error."""
+
+    kwargs: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": env,
+        "cwd": str(cwd) if cwd is not None else None,
+        **_popen_kwargs_for_process_group(),
+    }
+    process = subprocess.Popen(command, **kwargs)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as error:
+        _kill_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(
+            cmd=command,
+            timeout=timeout_seconds,
+            output=stdout,
+            stderr=stderr,
+        ) from error
+    except Exception:
+        _kill_process_tree(process)
+        raise
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=int(process.returncode or 0),
+        stdout=stdout or "",
+        stderr=stderr or "",
+    )
+
+
 def convert_pptx_to_pdf(
     pptx_path: Path,
     output_dir: Path,
@@ -762,12 +850,9 @@ def convert_pptx_to_pdf(
         ]
         logger.info("LibreOffice convert: %s", " ".join(command))
         try:
-            completed = subprocess.run(
+            completed = run_subprocess_with_process_group(
                 command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
+                timeout_seconds=float(timeout_seconds),
                 env=env,
             )
         except subprocess.TimeoutExpired as error:

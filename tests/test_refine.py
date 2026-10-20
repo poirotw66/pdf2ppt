@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
+from pdf2ppt.cli import build_parser
 from pdf2ppt.models import (
     ImagePlacement,
     PageResult,
@@ -23,7 +24,10 @@ from pdf2ppt.models import (
     TextParagraph,
 )
 from pdf2ppt.refine import (
+    DEFAULT_MAX_ATTEMPTS_PER_SLIDE,
+    DEFAULT_MIN_FONT_RATIO,
     DEFAULT_REFINE_ITERS,
+    DEFAULT_SHRINK_MIN_FONT_SIZE_PT,
     METRIC_IMPROVE_EPSILON,
     DeckRefineReport,
     apply_match_line_bboxes,
@@ -39,6 +43,7 @@ from pdf2ppt.refine import (
     propose_fixes_for_issue,
     refine_pages,
     region_ssim,
+    shrink_font_floor,
     write_refine_report,
 )
 from pdf2ppt.render_compare import RenderCompareError, find_libreoffice_executable
@@ -296,6 +301,66 @@ class FixTests(unittest.TestCase):
         paras = page.text_blocks[0].paragraphs or []
         self.assertEqual(paras[0].font_size, 17.0)
         self.assertEqual(paras[1].font_size, 15.0)
+
+    def test_shrink_font_respects_ratio_and_absolute_floor(self) -> None:
+        # 14pt with 85% ratio → floor 11.9; absolute 8 → floor 11.9.
+        self.assertAlmostEqual(shrink_font_floor(14.0), max(8.0, 14.0 * 0.85), places=5)
+        page = _page(
+            text_blocks=[
+                TextBlock(
+                    id="t",
+                    source="native",
+                    bbox=(10, 10, 100, 30),
+                    text="Title",
+                    confidence=1.0,
+                    font_size=14.0,
+                    paragraphs=[TextParagraph(text="Title", font_size=14.0)],
+                )
+            ]
+        )
+        # Repeated shrinks must not dig under source * ratio.
+        for _ in range(20):
+            details = apply_shrink_font(
+                page,
+                "t",
+                step_pt=1.0,
+                min_font_size_pt=DEFAULT_SHRINK_MIN_FONT_SIZE_PT,
+                min_font_ratio=DEFAULT_MIN_FONT_RATIO,
+                source_font_size=14.0,
+                source_paragraph_sizes=[14.0],
+            )
+            if details is None:
+                break
+        floor = shrink_font_floor(14.0)
+        self.assertGreaterEqual(page.text_blocks[0].font_size or 0.0, floor - 1e-9)
+        paras = page.text_blocks[0].paragraphs or []
+        self.assertGreaterEqual(float(paras[0].font_size or 0.0), floor - 1e-9)
+
+    def test_shrink_font_absolute_floor_for_small_source(self) -> None:
+        # 8pt * 0.85 = 6.8, but absolute floor is 8 → cannot shrink.
+        page = _page(
+            text_blocks=[
+                TextBlock(
+                    id="t",
+                    source="native",
+                    bbox=(10, 10, 100, 30),
+                    text="Tiny",
+                    confidence=1.0,
+                    font_size=8.0,
+                )
+            ]
+        )
+        self.assertIsNone(
+            apply_shrink_font(
+                page,
+                "t",
+                step_pt=0.5,
+                min_font_size_pt=8.0,
+                min_font_ratio=0.85,
+                source_font_size=8.0,
+            )
+        )
+        self.assertEqual(page.text_blocks[0].font_size, 8.0)
 
     def test_match_line_bboxes(self) -> None:
         page = _page(
@@ -634,6 +699,142 @@ class AcceptRejectLoopTests(unittest.TestCase):
             self.assertTrue(any(path.resolve() == out.resolve() for path in written_paths))
             self.assertTrue(out.exists())
 
+    def test_mid_loop_render_failure_sets_deck_skipped_reason(self) -> None:
+        """Baseline succeeds; a trial soffice failure must set deck skipped_reason."""
+
+        reference = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(reference).text((8, 8), "Title", fill=(0, 0, 0))
+        baseline = reference.copy()
+
+        page = _page(
+            text_blocks=[
+                TextBlock(
+                    id="title",
+                    source="native",
+                    bbox=(5, 5, 55, 22),
+                    text="Title",
+                    confidence=1.0,
+                    font_size=40.0,
+                    line_bboxes=[(5, 5, 55, 22)],
+                )
+            ],
+            width=64.0,
+            height=36.0,
+        )
+        call_state = {"n": 0}
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def flaky_render(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            call_state["n"] += 1
+            if call_state["n"] == 1:
+                return [baseline.copy()]
+            raise RenderCompareError("soffice exited mid-loop")
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return reference.copy()
+
+        digests = iter(["base", "trial1", "trial2", "done"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch(
+                    "pdf2ppt.refine.pptx_content_digest",
+                    side_effect=lambda _p: next(digests, "done"),
+                ):
+                    with patch("pdf2ppt.refine.slide_editability_score", return_value=0.5):
+                        with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                            _pages, report = refine_pages(
+                                [page],
+                                pdf_path=Path(tmp) / "src.pdf",
+                                output_pptx=out,
+                                slide_width_pt=64.0,
+                                slide_height_pt=36.0,
+                                iterations=2,
+                                max_fixes_per_slide=4,
+                                dpi=72,
+                                write_pptx=fake_write,
+                                render_pptx=flaky_render,
+                                render_pdf_page=fake_render_pdf,
+                                work_dir=Path(tmp) / "work",
+                            )
+
+        self.assertEqual(report.skipped_reason, "render_failed")
+        self.assertEqual(report.pages[0].skipped_reason, "render_failed")
+
+    def test_time_budget_spreads_across_pages(self) -> None:
+        """With a shared budget, later pages still get a chance (fair share)."""
+
+        pages = [
+            _page(
+                text_blocks=[
+                    TextBlock(
+                        id=f"t{index}",
+                        source="native",
+                        bbox=(5, 5, 40, 20),
+                        text=f"P{index}",
+                        confidence=1.0,
+                        font_size=12.0,
+                    )
+                ],
+                width=64.0,
+                height=36.0,
+            )
+            for index in range(4)
+        ]
+        for index, page in enumerate(pages):
+            page.page_number = index + 1
+
+        render_timeouts: list[int] = []
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def fake_render_pptx(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            render_timeouts.append(int(timeout_seconds))
+            return [_solid((64, 36), (255, 255, 255))]
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return _solid((64, 36), (255, 255, 255))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch("pdf2ppt.refine.pptx_content_digest", return_value="digest"):
+                    with patch("pdf2ppt.refine.slide_editability_score", return_value=0.5):
+                        with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                            _pages, report = refine_pages(
+                                pages,
+                                pdf_path=Path(tmp) / "src.pdf",
+                                output_pptx=out,
+                                slide_width_pt=64.0,
+                                slide_height_pt=36.0,
+                                iterations=1,
+                                max_fixes_per_slide=1,
+                                max_attempts_per_slide=1,
+                                time_budget_seconds=8.0,
+                                dpi=72,
+                                write_pptx=fake_write,
+                                render_pptx=fake_render_pptx,
+                                render_pdf_page=fake_render_pdf,
+                                work_dir=Path(tmp) / "work",
+                            )
+
+        self.assertEqual(len(report.pages), 4)
+        self.assertTrue(all(page.skipped_reason != "time_budget" for page in report.pages))
+        # Each soffice call should see a timeout capped by remaining budget (≤ 180).
+        self.assertTrue(render_timeouts)
+        self.assertTrue(all(1 <= value <= 180 for value in render_timeouts))
+
+    def test_default_max_attempts_is_eight(self) -> None:
+        self.assertEqual(DEFAULT_MAX_ATTEMPTS_PER_SLIDE, 8)
+
     def test_write_refine_report_json(self) -> None:
         report = DeckRefineReport(
             enabled=True,
@@ -651,6 +852,26 @@ class AcceptRejectLoopTests(unittest.TestCase):
         self.assertTrue(payload["enabled"])
         self.assertEqual(payload["soffice_call_count"], 3)
         self.assertEqual(payload["attempt_count"], 5)
+
+
+class RefineCliValidationTests(unittest.TestCase):
+    def test_refine_time_budget_rejects_negative(self) -> None:
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["in.pdf", "out.pptx", "--refine-time-budget", "-5"])
+
+    def test_refine_time_budget_rejects_zero(self) -> None:
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["in.pdf", "out.pptx", "--refine-time-budget", "0"])
+
+    def test_refine_defaults(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["in.pdf", "out.pptx", "--refine"])
+        self.assertEqual(args.refine_max_attempts, 8)
+        self.assertEqual(args.refine_min_font_size, 8.0)
+        self.assertEqual(args.refine_min_font_ratio, 0.85)
+        self.assertEqual(args.refine_time_budget, 90.0)
 
 
 @unittest.skipUnless(find_libreoffice_executable() is not None, "LibreOffice not installed")

@@ -9,7 +9,12 @@ full render path.
 from __future__ import annotations
 
 import io
+import os
+import stat
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -22,6 +27,7 @@ from pdf2ppt.render_compare import (
     CJK_FONT_FAMILY,
     EditabilityMetrics,
     FidelityMetrics,
+    RenderCompareError,
     SlideQualityScore,
     build_pdf_text_mask,
     compare_page_images,
@@ -30,6 +36,7 @@ from pdf2ppt.render_compare import (
     compute_masked_pixel_mae,
     compute_pixel_error,
     compute_ssim,
+    convert_pptx_to_pdf,
     evaluate_pptx_against_pdf,
     extract_pptx_background_image,
     find_libreoffice_executable,
@@ -37,6 +44,7 @@ from pdf2ppt.render_compare import (
     inspect_slide_editability,
     render_pdf_page_image,
     render_text_free_background,
+    run_subprocess_with_process_group,
     summarize_slide_scores,
     text_token_f1,
     tokenize_text,
@@ -297,6 +305,92 @@ class FixtureRenderSmokeTests(unittest.TestCase):
         self.assertGreater(image.width, 10)
         self.assertGreater(image.height, 10)
         self.assertEqual(image.mode, "RGB")
+
+
+class ProcessGroupKillTests(unittest.TestCase):
+    """Fake soffice that spawns a child and hangs — child must die on timeout."""
+
+    def _write_hanging_fake_soffice(self, root: Path) -> tuple[Path, Path]:
+        child_pid_file = root / "child.pid"
+        ready_file = root / "ready"
+        fake_soffice = root / "fake-soffice"
+        fake_soffice.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"CHILD_PID_FILE={child_pid_file!s}\n"
+            f"READY_FILE={ready_file!s}\n"
+            "(\n"
+            "  echo $$ > \"$CHILD_PID_FILE\"\n"
+            "  # Ignore TERM so only a group kill (or KILL) reaps us.\n"
+            "  trap '' TERM\n"
+            "  while true; do sleep 30; done\n"
+            ") &\n"
+            "while [ ! -s \"$CHILD_PID_FILE\" ]; do sleep 0.01; done\n"
+            "touch \"$READY_FILE\"\n"
+            "while true; do sleep 30; done\n",
+            encoding="utf-8",
+        )
+        fake_soffice.chmod(fake_soffice.stat().st_mode | stat.S_IXUSR)
+        return fake_soffice, child_pid_file
+
+    @staticmethod
+    def _wait_for_pid_file(path: Path, *, timeout_s: float = 2.0) -> int:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if path.exists():
+                raw = path.read_text(encoding="utf-8").strip()
+                if raw.isdigit():
+                    return int(raw)
+            time.sleep(0.02)
+        raise AssertionError(f"pid file not written: {path}")
+
+    @staticmethod
+    def _assert_pid_gone(pid: int, *, timeout_s: float = 2.0) -> None:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"orphan child pid={pid} still alive after timeout")
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX process-group kill tested here")
+    def test_timeout_kills_child_process_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_soffice, child_pid_file = self._write_hanging_fake_soffice(root)
+
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_subprocess_with_process_group(
+                    [str(fake_soffice)],
+                    timeout_seconds=1.0,
+                )
+
+            child_pid = self._wait_for_pid_file(child_pid_file)
+            self._assert_pid_gone(child_pid)
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX process-group kill tested here")
+    def test_convert_pptx_to_pdf_timeout_kills_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_soffice, child_pid_file = self._write_hanging_fake_soffice(root)
+            pptx_path = root / "deck.pptx"
+            pptx_path.write_bytes(b"PK fake pptx")
+            out_dir = root / "out"
+            out_dir.mkdir()
+
+            with self.assertRaises(RenderCompareError) as ctx:
+                convert_pptx_to_pdf(
+                    pptx_path,
+                    out_dir,
+                    timeout_seconds=1,
+                    libreoffice=fake_soffice,
+                )
+            self.assertIn("timed out", str(ctx.exception).lower())
+
+            child_pid = self._wait_for_pid_file(child_pid_file)
+            self._assert_pid_gone(child_pid)
 
 
 @unittest.skipUnless(find_libreoffice_executable() is not None, "LibreOffice not installed")

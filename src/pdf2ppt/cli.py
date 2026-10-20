@@ -57,6 +57,27 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 1.0:
+        raise argparse.ArgumentTypeError("value must be >= 1")
+    return parsed
+
+
+def unit_interval(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0.1 or parsed > 1.0:
+        raise argparse.ArgumentTypeError("value must be between 0.1 and 1.0")
+    return parsed
+
+
+def positive_font_pt(value: str) -> float:
+    parsed = float(value)
+    if parsed < 1.0:
+        raise argparse.ArgumentTypeError("value must be >= 1")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -471,10 +492,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--refine",
         action="store_true",
         help=(
-            "Opt-in P4 render-compare-refine loop after PPTX is built: re-render each "
-            "slide (LibreOffice), compare to the source PDF page, apply rule-based "
-            "SlideIR fixes, and keep a change only when page SSIM does not regress. "
-            "Skipped with a warning when soffice is unavailable. Default off."
+            "Experimental opt-in P4 render-compare-refine loop after PPTX is built: "
+            "re-render each slide (LibreOffice), compare to the source PDF page, apply "
+            "rule-based SlideIR fixes, and keep a change only when page SSIM strictly "
+            "improves. Skipped with a warning when soffice is unavailable. Default off."
         ),
     )
     parser.add_argument(
@@ -492,17 +513,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--refine-max-attempts",
         type=positive_int,
-        default=24,
+        default=8,
         help=(
             "Max fix attempts per slide including rejects/no-ops when --refine is set "
-            "(default 24)."
+            "(default 8; ~97%% of attempts are rejected on fixture benches)."
         ),
     )
     parser.add_argument(
         "--refine-time-budget",
-        type=float,
+        type=positive_float,
         default=90.0,
-        help="Wall-clock seconds budget for the whole refine loop (default 90).",
+        help="Wall-clock seconds budget for the whole refine loop (default 90, min 1).",
+    )
+    parser.add_argument(
+        "--refine-min-font-size",
+        type=positive_font_pt,
+        default=8.0,
+        help=(
+            "Absolute minimum font size (pt) for refine shrink_font "
+            "(default 8). Combined with --refine-min-font-ratio."
+        ),
+    )
+    parser.add_argument(
+        "--refine-min-font-ratio",
+        type=unit_interval,
+        default=0.85,
+        help=(
+            "Never shrink a text block below this fraction of its pre-refine font size "
+            "(default 0.85). Floor is max(min-font-size, source * ratio)."
+        ),
     )
     parser.add_argument(
         "--refine-report",
@@ -616,6 +655,8 @@ def _build_conversion_options(
         refine_max_fixes_per_slide=args.refine_max_fixes,
         refine_max_attempts_per_slide=args.refine_max_attempts,
         refine_time_budget_s=float(args.refine_time_budget),
+        refine_min_font_size_pt=float(args.refine_min_font_size),
+        refine_min_font_ratio=float(args.refine_min_font_ratio),
         refine_report_path=args.refine_report,
     )
 
