@@ -537,10 +537,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--refine-min-font-ratio",
         type=unit_interval,
-        default=0.85,
+        default=0.95,
         help=(
             "Never shrink a text block below this fraction of its pre-refine font size "
-            "(default 0.85). Floor is max(min-font-size, source * ratio)."
+            "(default 0.95 ≈ at most one 0.5pt step). Floor is max(min-font-size, source * ratio)."
         ),
     )
     parser.add_argument(

@@ -129,7 +129,7 @@ class ConversionOptions:
     refine_max_attempts_per_slide: int = 8
     refine_time_budget_s: float = 90.0
     refine_min_font_size_pt: float = 8.0
-    refine_min_font_ratio: float = 0.85
+    refine_min_font_ratio: float = 0.95
     refine_dpi: int = 144
     refine_report_path: Path | None = None
 

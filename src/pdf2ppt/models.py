@@ -106,6 +106,9 @@ class TextBlock:
     line_bboxes: list[BBox] | None = None
     # Prefer mapping into the slide title placeholder when True.
     use_title_placeholder: bool = False
+    # When True, ppt_render must emit the declared font_size and skip fit_text
+    # growth (used by refine widen_bbox so a larger box cannot upsize glyphs).
+    pin_font_size: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

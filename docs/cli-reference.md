@@ -16,9 +16,9 @@
 - `--refine-iters`: max **accepted improving** iterations per slide (default `2`)
 - `--refine-max-fixes`: max accepted fixes per slide (default `8`)
 - `--refine-max-attempts`: max attempts per slide including rejects/no-ops (default `8`; ~97% of attempts are rejected on fixture benches)
-- `--refine-time-budget`: wall-clock seconds for the whole refine loop (default `90`, must be `>= 1`). Budget is split fairly across remaining pages; unused time rolls forward. Each LibreOffice call is timed out at `min(remaining, 180s)`.
+- `--refine-time-budget`: wall-clock seconds for the whole refine loop (default `90`, must be `>= 1`). Refine work is split fairly across remaining pages (unused time rolls forward). Baseline renders use `min(remaining, 180s)` each. Trials are only issued when remaining time is at least `max(5s, 1.5× last render)`; otherwise the page is marked `time_budget` (not a false `render_failed`).
 - `--refine-min-font-size`: absolute floor (pt) for refine `shrink_font` (default `8`)
-- `--refine-min-font-ratio`: never shrink below this fraction of the pre-refine font size (default `0.85`). Effective floor is `max(min-font-size, source * ratio)`.
+- `--refine-min-font-ratio`: never shrink below this fraction of the pre-refine font size (default `0.95`). Effective floor is `max(min-font-size, source * ratio)`. `widen_bbox` pins the declared font size so fit_text cannot grow glyphs.
 - `--refine-report`: path for the per-slide refine JSON report (default `<output>.refine.json`)
 - `--lang`: PaddleOCR language code, default `ch`
 - `--ocr-model-root`: local PaddleOCR model directory, default `./model`

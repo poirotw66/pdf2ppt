@@ -177,12 +177,15 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
 3. Apply bounded rule-based fixes to SlideIR / `PageResult` (shrink font
    including paragraph sizes, widen/reposition boxes; raster crop only for
    **non-text** regions, with overlying text glyphs erased from the crop).
-   `shrink_font` never goes below `max(--refine-min-font-size, source * --refine-min-font-ratio)`.
+   `shrink_font` never goes below `max(--refine-min-font-size, source * --refine-min-font-ratio)`
+   (default ratio 0.95). `widen_bbox` pins the declared font size so fit_text
+   cannot grow glyphs in the larger box.
 4. Keep a fix only when page SSIM **strictly improves** and editability / text
-   F1 do not regress; XML no-ops and flat SSIM are rejected and do not consume
-   iterations. Caps: `--refine-max-attempts` (default 8), `--refine-time-budget`
-   (fair per-page share with unused time rolled forward; soffice timeout =
-   `min(remaining, 180s)`).
+   F1 do not regress; XML no-ops are rejected and do **not** consume the attempt
+   cap; real attempts are also capped per element (default 2). Caps:
+   `--refine-max-attempts` (default 8), `--refine-time-budget` (fair per-page
+   refine share; baseline uses `min(remaining, 180s)`; trials require at least
+   `max(5s, 1.5× last render)` or the page is marked `time_budget`).
 
 When `soffice` is unavailable **or fails** (including mid-loop), the loop
 restores the last accepted PPTX, sets deck-level `skipped_reason`, and

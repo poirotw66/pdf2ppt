@@ -623,7 +623,7 @@ def _conversion_options_from_request(
         refine_max_attempts_per_slide=int(getattr(request, "refine_max_attempts_per_slide", 8)),
         refine_time_budget_s=float(getattr(request, "refine_time_budget_s", 90.0)),
         refine_min_font_size_pt=float(getattr(request, "refine_min_font_size_pt", 8.0)),
-        refine_min_font_ratio=float(getattr(request, "refine_min_font_ratio", 0.85)),
+        refine_min_font_ratio=float(getattr(request, "refine_min_font_ratio", 0.95)),
     )
 
 

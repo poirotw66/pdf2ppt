@@ -737,8 +737,9 @@ def add_text_block(
         bold = block.bold if item.bold is None else item.bold
         italic = block.italic if item.italic is None else item.italic
         is_list_para = item.list_level is not None
-        if font_size and (is_list_para or len(paragraphs) > 1):
-            # List / multi-paragraph boxes never go through fit_text — set size now.
+        pin_font = bool(getattr(block, "pin_font_size", False))
+        if font_size and (is_list_para or len(paragraphs) > 1 or pin_font):
+            # List / multi-paragraph / pinned boxes never go through fit_text.
             font.size = Pt(max(6.0, font_size * min(scale_x, scale_y)))
         elif font_size and len(paragraphs) == 1:
             # Single plain paragraph still goes through OCR fit below.
@@ -770,7 +771,13 @@ def add_text_block(
             )
         _set_paragraph_end_typefaces(paragraph, resolved_typefaces)
 
-    if len(paragraphs) == 1 and paragraphs[0].list_level is None and primary_run is not None:
+    pin_font = bool(getattr(block, "pin_font_size", False))
+    if (
+        not pin_font
+        and len(paragraphs) == 1
+        and paragraphs[0].list_level is None
+        and primary_run is not None
+    ):
         used_fit_text = fit_text_frame(text_frame, block, scale_x=scale_x, scale_y=scale_y)
         _set_text_frame_wrap(text_frame, should_wrap=should_wrap_text_block(block))
         font = primary_run.font
@@ -783,6 +790,14 @@ def add_text_block(
                 font.size = Pt(safe_font_size_pt)
         if block.font_size and not used_fit_text:
             font.size = Pt(resolve_fallback_font_size_pt(block, scale_x=scale_x, scale_y=scale_y))
+        if block.font_color:
+            font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
+        font.bold = block.bold
+        font.italic = block.italic
+    elif pin_font and primary_run is not None and block.font_size:
+        # Widen-pinned: keep the declared size even if the box grew.
+        font = primary_run.font
+        font.size = Pt(max(6.0, float(block.font_size) * min(scale_x, scale_y)))
         if block.font_color:
             font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
         font.bold = block.bold

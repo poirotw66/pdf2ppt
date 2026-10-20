@@ -168,7 +168,7 @@ class ConvertRequest(BaseModel):
     refine_max_attempts_per_slide: int = Field(default=8, ge=1, le=64)
     refine_time_budget_s: float = Field(default=90.0, ge=1.0, le=600.0)
     refine_min_font_size_pt: float = Field(default=8.0, ge=1.0, le=72.0)
-    refine_min_font_ratio: float = Field(default=0.85, ge=0.1, le=1.0)
+    refine_min_font_ratio: float = Field(default=0.95, ge=0.1, le=1.0)
 
 
 class ConvertResponse(BaseModel):
