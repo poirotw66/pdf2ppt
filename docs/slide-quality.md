@@ -171,13 +171,21 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
 `pdf2ppt --refine` runs a deterministic loop after the PPTX is written
 (**experimental** — default off; refine-off output stays byte-identical):
 
-1. Render the **whole deck once** via LibreOffice → PDF → PNG for baseline
-   diagnosis (same stack as this evaluator). Trial renders use a single-slide
+1. **Baseline render** via LibreOffice → PDF → PNG (same stack as this
+   evaluator). Prefer one full-deck convert. Cost estimates include
+   per-page diagnosis (~0.45s/page) as well as soffice render. On short
+   `--refine-time-budget` / large decks, if that phase would leave too
+   little room for trials, only the highest conversion-time risk pages are
+   baselined (`baseline_mode=partial`); the diagnosis loop also stops when
+   the trial floor would be breached. Others appear in deck
+   `pages_skipped` with reason `time_budget`. Subset slides stay
+   pixel-identical to a per-page render. Trial renders use a single-slide
    PPTX for the page under test only.
 2. Diagnose page SSIM plus localized issues with **render evidence** ranked
    first (ink spill / extra wrap lines, low local SSIM+MAE) — no LLM.
-3. Visit pages with issues by **descending severity**, then **ascending page
-   index** (early slides win ties). Clean pages skip trials.
+3. Visit pages with issues by **descending continuous severity**
+   (`40×(1−SSIM)` plus normalised issue terms, so fidelity dominates), then
+   **ascending page index**. Clean pages skip trials.
 4. Apply bounded rule-based fixes to SlideIR / `PageResult` (shrink font
    including paragraph sizes, widen/reposition boxes; raster crop only for
    **non-text** regions, with overlying text glyphs erased from the crop).
@@ -190,9 +198,23 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
    counter **resets after an accepted fix** (so a widen can be followed by a
    shrink), still bounded by slide/global caps. Caps:
    `--refine-max-attempts` (default 8), `--refine-time-budget` (default 90s;
-   plan ~**3s per page**; fair share among remaining issue pages, never below
-   `max(5s, 1.5× last render)` when the total budget can still afford a call,
-   else `time_budget`).
+   plan ~**3s per page**). First-pass slots are capped at the equal fair
+   share. A trial may *start* when remaining ≥ `max(~2.5s, 1.5× per-page
+   render)`, but the issued soffice timeout is decoupled:
+   `max(5s, 3× last successful single-page render)`. Baseline/diagnose
+   planning reserves that same issued amount so short budgets (e.g. 10s)
+   still leave a real trial slot. Within each issue, prefer `widen_bbox`
+   before `shrink_font` / `raster_fallback`; issues themselves stay in
+   severity order (not a global widen-first pass). Duplicate
+   `(element, action, params)` edits and editability/text-F1 precheck
+   failures skip without counting an attempt. Unused time returns to the
+   pool; a **round-robin second pass** (up to two attempts per page when
+   the budget can afford it) continues while candidates remain. A single
+   trial timeout rejects that candidate and continues; two consecutive
+   timeouts abort refine. Per-page report fields include `severity`,
+   `slot_seconds` / `borrowed_seconds` / `time_used_seconds` (actual used),
+   `granted_seconds`, `attempt_count`, and `accepted_fix_count`.
+   Wall-clock counts in benches are **machine-dependent**.
 
 When `soffice` is unavailable **or fails** (including mid-loop), the loop
 restores the last accepted PPTX, sets deck-level `skipped_reason`, and
