@@ -28,6 +28,7 @@ from pdf2ppt.refine import (
     DEFAULT_MAX_ATTEMPTS_PER_SLIDE,
     DEFAULT_MIN_FONT_RATIO,
     DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS,
+    DEFAULT_MIN_TRIAL_TIMEOUT_SECONDS,
     DEFAULT_REFINE_ITERS,
     DEFAULT_SHRINK_MIN_FONT_SIZE_PT,
     METRIC_IMPROVE_EPSILON,
@@ -522,7 +523,7 @@ class FixTests(unittest.TestCase):
         self.assertLess(mean_luma, 250.0)
 
     def test_propose_fixes_never_rasters_text(self) -> None:
-        from pdf2ppt.refine import RefineIssue
+        from pdf2ppt.refine import RefineIssue, iter_fix_candidates
 
         overflow = RefineIssue(
             kind="text_overflow",
@@ -531,6 +532,7 @@ class FixTests(unittest.TestCase):
             details={"element_kind": "text", "render_evidence": True},
         )
         self.assertNotIn("raster_fallback", propose_fixes_for_issue(overflow))
+        self.assertEqual(propose_fixes_for_issue(overflow)[0], "widen_bbox")
         shape_issue = RefineIssue(
             kind="low_local_ssim",
             element_id="s",
@@ -538,6 +540,10 @@ class FixTests(unittest.TestCase):
             details={"element_kind": "shape", "render_evidence": True},
         )
         self.assertEqual(propose_fixes_for_issue(shape_issue), ["raster_fallback"])
+        # Across mixed issues, widen_bbox sorts before raster_fallback.
+        ordered = iter_fix_candidates([shape_issue, overflow])
+        self.assertEqual(ordered[0][1], "widen_bbox")
+        self.assertEqual(ordered[-1][1], "raster_fallback")
 
 
 class RegionSsimTests(unittest.TestCase):
@@ -817,6 +823,233 @@ class AcceptRejectLoopTests(unittest.TestCase):
 
         self.assertEqual(report.skipped_reason, "render_failed")
         self.assertEqual(report.pages[0].skipped_reason, "render_failed")
+
+    def test_editability_precheck_skips_without_counting_attempt(self) -> None:
+        """XML-only editability regression must not burn a soffice attempt."""
+
+        reference = _solid((160, 90), (255, 255, 255))
+        ImageDraw.Draw(reference).rectangle((12, 12, 36, 36), fill=(0, 100, 200))
+        bad = reference.copy()
+        ImageDraw.Draw(bad).rectangle((12, 12, 36, 36), fill=(200, 0, 0))
+
+        page = _page(
+            shape_elements=[
+                ShapeElement(id="card", kind="rect", bbox=(12, 12, 36, 36), fill_color="#FF0000")
+            ],
+            width=160.0,
+            height=90.0,
+        )
+        call_state = {"n": 0}
+        digests = iter([f"d{i}" for i in range(20)])
+        edit_scores = iter([0.5, 0.1, 0.5])  # before, precheck drop, ...
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def fake_render(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            call_state["n"] += 1
+            if call_state["n"] == 1:
+                return [bad.copy()]
+            return [reference.copy()]
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return reference.copy()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch(
+                    "pdf2ppt.refine.pptx_content_digest",
+                    side_effect=lambda _p: next(digests, "done"),
+                ):
+                    with patch(
+                        "pdf2ppt.refine.slide_editability_score",
+                        side_effect=lambda *_a, **_k: next(edit_scores, 0.5),
+                    ):
+                        with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                            _pages, report = refine_pages(
+                                [page],
+                                pdf_path=Path(tmp) / "src.pdf",
+                                output_pptx=out,
+                                slide_width_pt=160.0,
+                                slide_height_pt=90.0,
+                                iterations=1,
+                                max_fixes_per_slide=2,
+                                max_attempts_per_slide=4,
+                                dpi=72,
+                                write_pptx=fake_write,
+                                render_pptx=fake_render,
+                                render_pdf_page=fake_render_pdf,
+                                work_dir=Path(tmp) / "work",
+                            )
+
+        slide = report.pages[0]
+        prechecks = [
+            fix
+            for fix in slide.fixes
+            if fix.details.get("precheck") and fix.details.get("reject_reason") == "editability_regressed_precheck"
+        ]
+        self.assertTrue(prechecks)
+        # Baseline only — doomed raster never reached soffice.
+        self.assertEqual(slide.attempt_count, 0)
+        self.assertEqual(call_state["n"], 1)
+
+    def test_single_trial_timeout_continues_second_aborts(self) -> None:
+        """One soffice timeout rejects the candidate; two consecutive abort the deck."""
+
+        reference = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(reference).text((8, 8), "Title", fill=(0, 0, 0))
+        baseline = reference.copy()
+
+        page = _page(
+            text_blocks=[
+                TextBlock(
+                    id="title",
+                    source="native",
+                    bbox=(5, 5, 55, 22),
+                    text="Title",
+                    confidence=1.0,
+                    font_size=40.0,
+                    line_bboxes=[(5, 5, 55, 22)],
+                )
+            ],
+            width=64.0,
+            height=36.0,
+        )
+        call_state = {"n": 0}
+        digests = iter([f"d{i}" for i in range(30)])
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def timeout_render(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            call_state["n"] += 1
+            if call_state["n"] == 1:
+                return [baseline.copy()]
+            raise RenderCompareError(f"LibreOffice timed out after {timeout_seconds}s converting {pptx_path}")
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return reference.copy()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch(
+                    "pdf2ppt.refine.pptx_content_digest",
+                    side_effect=lambda _p: next(digests, "done"),
+                ):
+                    with patch("pdf2ppt.refine.slide_editability_score", return_value=0.5):
+                        with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                            _pages, report = refine_pages(
+                                [page],
+                                pdf_path=Path(tmp) / "src.pdf",
+                                output_pptx=out,
+                                slide_width_pt=64.0,
+                                slide_height_pt=36.0,
+                                iterations=2,
+                                max_fixes_per_slide=4,
+                                max_attempts_per_slide=8,
+                                dpi=72,
+                                write_pptx=fake_write,
+                                render_pptx=timeout_render,
+                                render_pdf_page=fake_render_pdf,
+                                work_dir=Path(tmp) / "work",
+                            )
+
+        self.assertEqual(report.skipped_reason, "render_failed")
+        timeout_fixes = [
+            fix for fix in report.pages[0].fixes if fix.details.get("reject_reason") == "render_timeout"
+        ]
+        self.assertGreaterEqual(len(timeout_fixes), 2)
+        # Issued trial timeouts must stay at the decoupled floor (≥5s).
+        floor = int(DEFAULT_MIN_TRIAL_TIMEOUT_SECONDS)
+        self.assertTrue(
+            all(int(fix.details.get("soffice_timeout_seconds") or 0) >= floor for fix in timeout_fixes)
+        )
+
+    def test_single_trial_timeout_continues_refine(self) -> None:
+        """A single trial timeout rejects that candidate but does not abort the deck."""
+
+        reference = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(reference).text((8, 8), "Title", fill=(0, 0, 0))
+        baseline = reference.copy()
+        ImageDraw.Draw(baseline).rectangle((0, 0, 4, 4), fill=(200, 0, 0))
+
+        page = _page(
+            text_blocks=[
+                TextBlock(
+                    id="title",
+                    source="native",
+                    bbox=(5, 5, 55, 22),
+                    text="Title",
+                    confidence=1.0,
+                    font_size=40.0,
+                    line_bboxes=[(5, 5, 55, 22)],
+                )
+            ],
+            width=64.0,
+            height=36.0,
+        )
+        call_state = {"n": 0}
+        digests = iter([f"d{i}" for i in range(40)])
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def flaky_timeout_then_ok(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            call_state["n"] += 1
+            if call_state["n"] == 1:
+                return [baseline.copy()]
+            if call_state["n"] == 2:
+                raise RenderCompareError(
+                    f"LibreOffice timed out after {timeout_seconds}s converting {pptx_path}"
+                )
+            return [reference.copy()]
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return reference.copy()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch(
+                    "pdf2ppt.refine.pptx_content_digest",
+                    side_effect=lambda _p: next(digests, "done"),
+                ):
+                    with patch("pdf2ppt.refine.slide_editability_score", return_value=0.5):
+                        with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                            _pages, report = refine_pages(
+                                [page],
+                                pdf_path=Path(tmp) / "src.pdf",
+                                output_pptx=out,
+                                slide_width_pt=64.0,
+                                slide_height_pt=36.0,
+                                iterations=2,
+                                max_fixes_per_slide=4,
+                                max_attempts_per_slide=8,
+                                dpi=72,
+                                write_pptx=fake_write,
+                                render_pptx=flaky_timeout_then_ok,
+                                render_pdf_page=fake_render_pdf,
+                                work_dir=Path(tmp) / "work",
+                            )
+
+        self.assertNotEqual(report.skipped_reason, "render_failed")
+        timeout_fixes = [
+            fix for fix in report.pages[0].fixes if fix.details.get("reject_reason") == "render_timeout"
+        ]
+        self.assertEqual(len(timeout_fixes), 1)
+        self.assertGreaterEqual(call_state["n"], 3)
+        self.assertTrue(
+            int(timeout_fixes[0].details.get("soffice_timeout_seconds") or 0)
+            >= int(DEFAULT_MIN_TRIAL_TIMEOUT_SECONDS)
+        )
 
     def test_time_budget_spreads_across_pages(self) -> None:
         """With a shared budget, later pages still get a chance (fair share)."""
@@ -1773,9 +2006,14 @@ class AcceptRejectLoopTests(unittest.TestCase):
         reasons = [page.skipped_reason for page in report.pages]
         self.assertNotIn("render_failed", reasons)
         self.assertTrue(any(reason == "time_budget" for reason in reasons))
-        # Never issue a trial timeout below the minimum floor.
+        # Baseline may use the start floor; every issued timeout stays ≥ that floor.
+        # Trial timeouts (after the first baseline call) stay at the decoupled ≥5s floor.
         self.assertTrue(timeouts)
         self.assertTrue(all(value >= int(min_soffice_timeout_seconds(None)) for value in timeouts))
+        if len(timeouts) > 1:
+            self.assertTrue(
+                all(value >= int(DEFAULT_MIN_TRIAL_TIMEOUT_SECONDS) for value in timeouts[1:])
+            )
 
     def test_write_refine_report_json(self) -> None:
         report = DeckRefineReport(

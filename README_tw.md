@@ -22,7 +22,7 @@
 - 可選版面分析：區域類型、閱讀順序、真實項目符號、標題 placeholder（[`docs/layout-analysis.md`](docs/layout-analysis.md)）
 - 數位 PDF 上的簡單向量圖與有格線表格可轉成原生 PPT 形狀／表格（[`docs/vector-nativization.md`](docs/vector-nativization.md)）
 - 背景引擎：`opencv-fast`（建議預設）、`white-box`、可選 `lama-onnx`／`lama-pytorch`，以及雲端生成式後端（[`docs/background-engines.md`](docs/background-engines.md)）
-- 可選的確定性 render-compare-refine 迴圈（`--refine`，實驗性）：依預算選擇完整或部分 baseline、連續嚴重度排序、剩餘時間二次分配、接受修正後重設該元素嘗試次數
+- 可選的確定性 render-compare-refine 迴圈（`--refine`，實驗性）：依預算選擇完整或部分 baseline、連續嚴重度排序、剩餘時間二次分配、接受修正後重設該元素嘗試次數。真實 soffice 的頁數／接受數會因機器而異。
 - JSON 轉換報告、debug 產物，以及可選的 OCR 審框 UI
 
 ## 安裝

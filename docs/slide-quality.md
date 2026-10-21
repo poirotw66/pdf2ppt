@@ -199,12 +199,20 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
    shrink), still bounded by slide/global caps. Caps:
    `--refine-max-attempts` (default 8), `--refine-time-budget` (default 90s;
    plan ~**3s per page**). First-pass slots are capped at the equal fair
-   share; the trial floor is `max(~2.5s, 1.5× measured per-page render)`.
-   Unused time returns to the pool; a **round-robin second pass** (one
-   attempt per page, severity order) continues while budget and candidates
-   remain. Per-page report fields include `severity`, `slot_seconds` /
-   `borrowed_seconds` / `time_used_seconds` (actual used), `granted_seconds`,
-   `attempt_count`, and `accepted_fix_count`.
+   share. A trial may *start* when remaining ≥ `max(~2.5s, 1.5× per-page
+   render)`, but the issued soffice timeout is decoupled:
+   `max(5s, 3× measured single-page render)`. Candidates are ordered by
+   expected acceptance (`widen_bbox` before `raster_fallback`); editability /
+   text-F1 gates run on the written PPTX **before** soffice so doomed
+   candidates skip without counting an attempt. Unused time returns to the
+   pool; a **round-robin second pass** (up to two attempts per page when the
+   budget can afford it, severity order) continues while candidates remain.
+   A single trial timeout rejects that candidate and continues; two
+   consecutive timeouts abort refine. Per-page report fields include
+   `severity`, `slot_seconds` / `borrowed_seconds` / `time_used_seconds`
+   (actual used), `granted_seconds`, `attempt_count`, and
+   `accepted_fix_count`. Wall-clock counts in benches are
+   **machine-dependent**.
 
 When `soffice` is unavailable **or fails** (including mid-loop), the loop
 restores the last accepted PPTX, sets deck-level `skipped_reason`, and
