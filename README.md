@@ -26,7 +26,7 @@ backgrounds only where text was removed.
 - Vector / table nativization for simple drawings and ruled tables on digital PDFs ([`docs/vector-nativization.md`](docs/vector-nativization.md))
 - SlideIR agent layer: emit a versioned JSON IR (`emit-ir`) and render PPTX from IR alone (`from-ir`) so agents can round-trip without re-running the PDF pipeline ([`docs/slideir.md`](docs/slideir.md))
 - Background engines: `opencv-fast` (recommended), `white-box`, optional `lama-onnx` / `lama-pytorch`, and cloud generative backends ([`docs/background-engines.md`](docs/background-engines.md))
-- Optional deterministic render-compare-refine loop (`--refine`, experimental) after PPTX build: one full-deck baseline render, severity-ordered page trials (~3s/page budget guideline), per-element attempt reset after accepts
+- Optional deterministic render-compare-refine loop (`--refine`, experimental) after PPTX build: budget-aware baseline (full or partial), continuous severity ordering, leftover-time reallocation, per-element attempt reset after accepts
 - JSON conversion report, debug artifacts, and an optional OCR review UI
 
 ## Install

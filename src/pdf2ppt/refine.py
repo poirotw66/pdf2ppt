@@ -74,6 +74,18 @@ DEFAULT_LIBREOFFICE_TIMEOUT_CAP_SECONDS = 180
 # a 1s timeout falsely classifies budget exhaustion as render_failed.
 DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS = 5.0
 DEFAULT_SOFFICE_TIMEOUT_SLACK = 1.5
+# Baseline cost model (LibreOffice has a large fixed startup + light per-page cost).
+# Tuned so a 30-page deck estimates ~6s — matching PR #16 benches (~5.3s).
+DEFAULT_BASELINE_FIXED_SECONDS = 2.5
+DEFAULT_BASELINE_PER_PAGE_SECONDS = 0.12
+# When a full-deck baseline would leave too little room for trials, cap baseline
+# spend to this fraction of the remaining wall budget (and leave ≥ one trial).
+DEFAULT_BASELINE_BUDGET_FRACTION = 0.45
+# Weights for continuous page severity (not clamped to 1.0).
+SEVERITY_FIDELITY_WEIGHT = 1.0
+SEVERITY_ISSUE_SUM_WEIGHT = 1.0
+SEVERITY_ISSUE_COUNT_WEIGHT = 0.15
+SEVERITY_ISSUE_AREA_WEIGHT = 0.5
 # SSIM is insensitive to flat recolors; a modest gap still catches structural
 # misses. Local MAE catches mis-coloured / missing patches that SSIM misses.
 DEFAULT_LOCAL_SSIM_GAP = 0.02
@@ -140,6 +152,12 @@ class SlideRefineReport:
     editability_after: float | None = None
     text_f1_before: float | None = None
     text_f1_after: float | None = None
+    # Budget / ordering telemetry (deterministic for a given wall budget).
+    severity: float | None = None
+    slot_seconds: float | None = None
+    time_used_seconds: float | None = None
+    borrowed_seconds: float | None = None
+    accepted_fix_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -156,6 +174,11 @@ class SlideRefineReport:
             "editability_after": self.editability_after,
             "text_f1_before": self.text_f1_before,
             "text_f1_after": self.text_f1_after,
+            "severity": self.severity,
+            "slot_seconds": self.slot_seconds,
+            "time_used_seconds": self.time_used_seconds,
+            "borrowed_seconds": self.borrowed_seconds,
+            "accepted_fix_count": self.accepted_fix_count,
         }
 
 
@@ -171,6 +194,11 @@ class DeckRefineReport:
     runtime_seconds: float | None = None
     soffice_call_count: int = 0
     attempt_count: int = 0
+    # Baseline / budget telemetry.
+    baseline_mode: str | None = None  # "full" | "partial" | "skipped"
+    baseline_page_count: int | None = None
+    pages_skipped: list[dict[str, Any]] = field(default_factory=list)
+    reallocation_passes: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -181,6 +209,10 @@ class DeckRefineReport:
             "runtime_seconds": self.runtime_seconds,
             "soffice_call_count": self.soffice_call_count,
             "attempt_count": self.attempt_count,
+            "baseline_mode": self.baseline_mode,
+            "baseline_page_count": self.baseline_page_count,
+            "pages_skipped": list(self.pages_skipped),
+            "reallocation_passes": self.reallocation_passes,
             "pages": [page.to_dict() for page in self.pages],
         }
 
@@ -1081,12 +1113,179 @@ def _soffice_timeout_seconds(remaining_seconds: float, *, minimum: float) -> int
     return max(1, int(math.ceil(capped)))
 
 
-def page_issue_severity(issues: list[RefineIssue]) -> float:
-    """Aggregate diagnosed severity for a page (max issue severity; 0 if clean)."""
+def _issue_area_fraction(issue: RefineIssue, page_area_pt: float) -> float:
+    """Fraction of page area covered by an issue bbox (0 when unknown)."""
 
-    if not issues:
+    bbox = issue.details.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4 or page_area_pt <= 0:
         return 0.0
-    return max(float(issue.severity) for issue in issues)
+    width = max(0.0, float(bbox[2]) - float(bbox[0]))
+    height = max(0.0, float(bbox[3]) - float(bbox[1]))
+    return min(1.0, (width * height) / page_area_pt)
+
+
+def page_refine_severity(
+    *,
+    page_ssim: float | None,
+    issues: list[RefineIssue],
+    page_width_pt: float = 1.0,
+    page_height_pt: float = 1.0,
+) -> float:
+    """Continuous discriminating page severity (not clamped to 1.0).
+
+    Combines baseline fidelity gap ``(1 - SSIM)`` with weighted issue counts and
+    areas so pages with worse fidelity sort ahead of near-ties that all sat at
+    the old per-issue 1.0 ceiling.
+    """
+
+    fidelity_gap = 0.0 if page_ssim is None else max(0.0, 1.0 - float(page_ssim))
+    if not issues:
+        return round(SEVERITY_FIDELITY_WEIGHT * fidelity_gap, 6)
+
+    page_area = max(1.0, float(page_width_pt) * float(page_height_pt))
+    issue_sev_sum = sum(float(issue.severity) for issue in issues)
+    area_sum = sum(_issue_area_fraction(issue, page_area) for issue in issues)
+    score = (
+        SEVERITY_FIDELITY_WEIGHT * fidelity_gap
+        + SEVERITY_ISSUE_SUM_WEIGHT * issue_sev_sum
+        + SEVERITY_ISSUE_COUNT_WEIGHT * float(len(issues))
+        + SEVERITY_ISSUE_AREA_WEIGHT * area_sum
+    )
+    return round(score, 6)
+
+
+def page_issue_severity(issues: list[RefineIssue]) -> float:
+    """Aggregate diagnosed severity for a page (continuous; 0 if clean).
+
+    Prefer :func:`page_refine_severity` when baseline SSIM is available so
+    fidelity gap discriminates pages whose per-issue severities all saturate.
+    """
+
+    return page_refine_severity(page_ssim=None, issues=issues)
+
+
+def page_prerank_score(page: PageResult) -> float:
+    """Cheap conversion-time risk score used before baseline render.
+
+    Favours pages with more shapes/tables/images, lower pipeline quality, or
+    non-element backgrounds so short budgets still baseline the riskiest slides
+    first (deterministic: higher score wins, page index breaks ties).
+    """
+
+    quality = page.quality_score
+    quality_risk = (
+        (1.0 - float(quality.text_confidence))
+        + (1.0 - float(quality.layout_overlap_score))
+        + (1.0 - float(quality.style_recovery_score))
+        + (1.0 - float(quality.editable_ratio))
+    )
+    bg_risk = 0.0 if page.background_mode == "elements" else 0.5
+    fallback_risk = 1.0 if page.fallback_reason else 0.0
+    large_text = sum(1 for block in page.text_blocks if float(block.font_size or 0.0) >= 24.0)
+    return (
+        0.3 * len(page.text_blocks)
+        + 0.5 * len(page.shape_elements)
+        + 0.8 * len(page.table_elements)
+        + 0.4 * len(page.image_elements)
+        + 1.5 * quality_risk
+        + bg_risk
+        + fallback_risk
+        + 0.4 * large_text
+    )
+
+
+def estimate_baseline_render_seconds(
+    page_count: int,
+    *,
+    last_render_seconds: float | None = None,
+    last_page_count: int | None = None,
+) -> float:
+    """Estimate soffice wall time for a baseline render of ``page_count`` slides."""
+
+    count = max(0, int(page_count))
+    if (
+        last_render_seconds is not None
+        and last_render_seconds > 0
+        and last_page_count is not None
+        and last_page_count > 0
+    ):
+        scaled = float(last_render_seconds) * (float(count) / float(last_page_count))
+        return max(float(DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS), scaled)
+    return float(DEFAULT_BASELINE_FIXED_SECONDS) + float(DEFAULT_BASELINE_PER_PAGE_SECONDS) * float(count)
+
+
+def select_baseline_page_indices(
+    pages: list[PageResult],
+    *,
+    remaining_budget: float,
+    minimum_trial_seconds: float,
+    baseline_fraction: float = DEFAULT_BASELINE_BUDGET_FRACTION,
+    last_render_seconds: float | None = None,
+    last_page_count: int | None = None,
+) -> tuple[list[int], str]:
+    """Choose which pages to include in the baseline render under a wall budget.
+
+    Returns ``(indices_sorted_by_page, baseline_mode)`` where mode is
+    ``\"full\"``, ``\"partial\"``, or ``\"skipped\"``.
+
+    When a full-deck baseline would consume so much of the budget that no trial
+    can run, only the highest :func:`page_prerank_score` pages are baselined
+    (still written/rendered as one contiguous PPTX so pixels match a per-page
+    render of those slides). Unselected pages are reported as
+    ``time_budget`` skips.
+    """
+
+    count = len(pages)
+    if count == 0:
+        return [], "skipped"
+
+    remaining = max(0.0, float(remaining_budget))
+    minimum = max(0.0, float(minimum_trial_seconds))
+    if remaining + 1e-9 < minimum:
+        return [], "skipped"
+
+    def _estimate(n: int) -> float:
+        return estimate_baseline_render_seconds(
+            n,
+            last_render_seconds=last_render_seconds,
+            last_page_count=last_page_count,
+        )
+
+    full_est = _estimate(count)
+    # Prefer a full deck whenever it leaves room for at least one trial call.
+    if full_est + minimum <= remaining + 1e-9:
+        return list(range(count)), "full"
+
+    # Otherwise only spend up to a fraction of the budget on baseline, and still
+    # try to leave one trial slot when possible.
+    fraction_cap = remaining * max(0.0, min(1.0, float(baseline_fraction)))
+    baseline_cap = max(minimum, min(remaining, max(fraction_cap, remaining - minimum)))
+
+    preranked = sorted(
+        range(count),
+        key=lambda index: (-page_prerank_score(pages[index]), index),
+    )
+    best_k = 0
+    for k in range(1, count + 1):
+        est = _estimate(k)
+        # Allow starting a baseline that may finish slightly over the cap, but
+        # never schedule one whose estimate already exceeds remaining + one
+        # render duration (caller enforces the one-render overrun rule).
+        if est <= baseline_cap + 1e-9 and est <= remaining + 1e-9:
+            best_k = k
+        elif est <= remaining + 1e-9 and best_k == 0:
+            # At least cover one page if anything fits at all.
+            best_k = k
+            break
+        else:
+            break
+
+    if best_k <= 0:
+        return [], "skipped"
+
+    selected = sorted(preranked[:best_k])
+    mode = "full" if best_k >= count else "partial"
+    return selected, mode
 
 
 def order_pages_for_refine(page_severities: list[tuple[int, float]]) -> list[int]:
@@ -1099,10 +1298,7 @@ def order_pages_for_refine(page_severities: list[tuple[int, float]]) -> list[int
     no issues.
     """
 
-    return [
-        index
-        for index, _severity in sorted(page_severities, key=lambda item: (-item[1], item[0]))
-    ]
+    return [index for index, _severity in sorted(page_severities, key=lambda item: (-item[1], item[0]))]
 
 
 def page_time_allowance_seconds(
@@ -1117,7 +1313,8 @@ def page_time_allowance_seconds(
     shrinks a slot below ``minimum_seconds`` when the total remaining budget can
     still afford one soffice call. That stops equal-share crumbs (e.g. 90s / 30
     pages ≈ 3s < 5s floor) from skipping early pages and rolling their time to
-    the end of the deck.
+    the end of the deck. Unused allowance is returned to a shared pool for a
+    severity-ordered second pass (see :func:`refine_pages`).
     """
 
     if pages_left <= 0:
@@ -1139,11 +1336,35 @@ def _source_font_snapshot(page: PageResult) -> dict[str, tuple[float, list[float
     for block in page.text_blocks:
         block_size = float(block.font_size or 12.0)
         para_sizes = [
-            float(para.font_size) if para.font_size is not None else block_size
-            for para in (block.paragraphs or [])
+            float(para.font_size) if para.font_size is not None else block_size for para in (block.paragraphs or [])
         ]
         snapshot[block.id] = (block_size, para_sizes)
     return snapshot
+
+
+@dataclass(slots=True)
+class _PageTrialState:
+    """Mutable per-page trial state shared across first pass and reallocation."""
+
+    page_index: int
+    slide_report: SlideRefineReport
+    current_metric: float
+    current_edit: float
+    current_text_f1: float
+    fixes_applied: int
+    attempts: int
+    improving_iters: int
+    element_attempts: dict[str, int]
+    last_good_digest: str
+    source_fonts: dict[str, tuple[float, list[float]]]
+    single_path: Path
+    has_untried_candidates: bool
+    tried_keys: set[tuple[str, str, str]]
+    slot_seconds: float
+    time_used_seconds: float
+    borrowed_seconds: float
+    page_soffice_before: int
+    last_slot_unused: float = 0.0
 
 
 def refine_pages(
@@ -1174,20 +1395,22 @@ def refine_pages(
 
     Budget and ordering (deterministic):
 
-    * **Baseline**: one full-deck soffice render (not per-page) for diagnosis.
-      Trials render only the page under test. Plan roughly **~3s per page** of
-      wall budget for a useful refine pass (one amortised baseline convert plus
-      at least one single-slide trial at the ~1.5–3s soffice floor).
-    * **Page order**: pages with diagnosed issues are visited by descending
-      issue severity, then ascending page index (early slides win ties).
-      Clean pages are diagnosed but do not consume trial budget.
-    * **Per-page share**: remaining time is split across pages still waiting,
-      but a slot is never capped below ``max(5s, 1.5× last render)`` when the
-      total remaining budget can still afford a call (avoids rolling crumbs to
-      the end of the deck). Otherwise the page is marked ``time_budget``.
+    * **Baseline**: one soffice render for diagnosis. When a full-deck baseline
+      would leave too little room for trials (short ``--refine-time-budget`` on
+      large decks), only the highest conversion-time risk pages are baselined
+      (``baseline_mode=partial``); others are ``pages_skipped`` with reason
+      ``time_budget``. Subset slides stay pixel-identical to a per-page render.
+      Never schedule a render whose remaining budget is below the soffice floor;
+      a started render may overrun by at most one call's duration.
+    * **Page order**: continuous severity ``(1-SSIM) + weighted issues``, then
+      ascending page index. Clean pages skip trials.
+    * **Per-page share**: fair share of remaining time among pages still waiting,
+      never below ``max(5s, 1.5× last render)`` when the budget can still afford
+      a call. Unused slot time returns to the shared pool.
+    * **Reallocation**: after the first pass, a second severity-ordered pass
+      revisits pages that still have untried candidate fixes while budget remains.
     * **Attempts**: XML no-ops do not count; real attempts are capped per
-      element, and the per-element counter **resets after an accepted fix** so
-      a widen can be followed by a shrink (still bounded by slide/global caps).
+      element, and the per-element counter **resets after an accepted fix**.
     """
 
     from .pipeline import render_pages_to_pptx
@@ -1198,6 +1421,10 @@ def refine_pages(
     total_attempts = 0
     deck_skipped: str | None = None
     last_render_seconds: float | None = None
+    baseline_mode: str | None = None
+    baseline_page_count: int | None = None
+    pages_skipped: list[dict[str, Any]] = []
+    reallocation_passes = 0
 
     def _elapsed() -> float:
         return perf_counter() - started
@@ -1220,6 +1447,10 @@ def refine_pages(
             runtime_seconds=round(_elapsed(), 3),
             soffice_call_count=soffice_calls,
             attempt_count=total_attempts,
+            baseline_mode=baseline_mode,
+            baseline_page_count=baseline_page_count,
+            pages_skipped=list(pages_skipped),
+            reallocation_passes=reallocation_passes,
         )
 
     if iters <= 0:
@@ -1270,6 +1501,14 @@ def refine_pages(
             slide_height_pt=slide_height_pt,
         )
 
+    def _write_subset(page_indices: list[int], path: Path) -> None:
+        write_fn(
+            [working[index] for index in page_indices],
+            path,
+            slide_width_pt=slide_width_pt,
+            slide_height_pt=slide_height_pt,
+        )
+
     def _trial_timeout_for(available: float) -> int | None:
         """Return a soffice timeout, or ``None`` when the remaining share is too small."""
 
@@ -1279,8 +1518,57 @@ def refine_pages(
         return _soffice_timeout_seconds(available, minimum=minimum)
 
     try:
-        # Baseline: write full deck once, then one soffice convert for all slides.
+        # Always materialise the full deck first (final artifact / restore point).
         _write_full()
+        remaining = _remaining_budget()
+        minimum = min_soffice_timeout_seconds(last_render_seconds)
+        baseline_indices, baseline_mode = select_baseline_page_indices(
+            working,
+            remaining_budget=remaining,
+            minimum_trial_seconds=minimum,
+        )
+        baseline_page_count = len(baseline_indices)
+        baseline_set = set(baseline_indices)
+
+        if not baseline_indices:
+            for page in working:
+                pages_skipped.append(
+                    {
+                        "page_number": page.page_number,
+                        "reason": "time_budget",
+                        "detail": "baseline_not_scheduled",
+                    }
+                )
+            empty_reports = [
+                SlideRefineReport(
+                    page_number=page.page_number,
+                    iterations=0,
+                    metric_before=None,
+                    metric_after=None,
+                    skipped_reason="time_budget",
+                    severity=round(page_prerank_score(page), 6),
+                )
+                for page in working
+            ]
+            return _report(working_pages=working, skipped=None, page_reports=empty_reports)
+
+        for page_index, page in enumerate(working):
+            if page_index in baseline_set:
+                continue
+            pages_skipped.append(
+                {
+                    "page_number": page.page_number,
+                    "reason": "time_budget",
+                    "detail": "baseline_not_scheduled",
+                }
+            )
+
+        if baseline_mode == "full":
+            baseline_path = output_pptx
+        else:
+            baseline_path = root / "baseline-partial.pptx"
+            _write_subset(baseline_indices, baseline_path)
+
         remaining = _remaining_budget()
         minimum = min_soffice_timeout_seconds(last_render_seconds)
         if remaining + 1e-9 < minimum:
@@ -1291,16 +1579,27 @@ def refine_pages(
                     metric_before=None,
                     metric_after=None,
                     skipped_reason="time_budget",
+                    severity=round(page_prerank_score(page), 6),
                 )
                 for page in working
             ]
+            for page_index, page in enumerate(working):
+                if page_index in baseline_set:
+                    pages_skipped.append(
+                        {
+                            "page_number": page.page_number,
+                            "reason": "time_budget",
+                            "detail": "baseline_not_started",
+                        }
+                    )
+            baseline_mode = "skipped"
             return _report(working_pages=working, skipped=None, page_reports=empty_reports)
 
         baseline_timeout = _soffice_timeout_seconds(remaining, minimum=minimum)
         try:
             baseline_images = _safe_render(
-                output_pptx,
-                "baseline-deck",
+                baseline_path,
+                "baseline-deck" if baseline_mode == "full" else "baseline-partial",
                 timeout_seconds=baseline_timeout,
             )
         except RenderCompareError as error:
@@ -1308,24 +1607,38 @@ def refine_pages(
             _write_full()
             return _report(working_pages=pages, skipped="render_failed")
 
-        if len(baseline_images) < len(working):
+        if len(baseline_images) < len(baseline_indices):
             logger.warning(
                 "Refine skipped: baseline render returned %s slides, expected %s",
                 len(baseline_images),
-                len(working),
+                len(baseline_indices),
             )
             _write_full()
             return _report(working_pages=pages, skipped="render_failed")
 
-        # Diagnose every page from the shared baseline (no extra soffice calls).
         references: list[Image.Image | None] = [None] * len(working)
-        candidates: list[Image.Image] = list(baseline_images[: len(working)])
+        candidates: list[Image.Image | None] = [None] * len(working)
         metrics_before: list[float | None] = [None] * len(working)
         issues_by_page: list[list[RefineIssue]] = [[] for _ in working]
         severities: list[tuple[int, float]] = []
         diagnose_failures: dict[int, str] = {}
+        reports_by_index: dict[int, SlideRefineReport] = {}
+
+        for offset, page_index in enumerate(baseline_indices):
+            candidates[page_index] = baseline_images[offset]
 
         for page_index, page in enumerate(working):
+            if page_index not in baseline_set:
+                reports_by_index[page_index] = SlideRefineReport(
+                    page_number=page.page_number,
+                    iterations=0,
+                    metric_before=None,
+                    metric_after=None,
+                    skipped_reason="time_budget",
+                    severity=round(page_prerank_score(page), 6),
+                )
+                severities.append((page_index, 0.0))
+                continue
             try:
                 reference = render_pdf_fn(pdf_path, page_index, dpi=dpi)
             except Exception as error:  # noqa: BLE001
@@ -1334,14 +1647,21 @@ def refine_pages(
                 severities.append((page_index, 0.0))
                 continue
             references[page_index] = reference
-            metric_before, issues = diagnose_slide(reference, candidates[page_index], page)
+            candidate = candidates[page_index]
+            assert candidate is not None
+            metric_before, issues = diagnose_slide(reference, candidate, page)
             metrics_before[page_index] = metric_before
             issues_by_page[page_index] = list(issues)
-            severities.append((page_index, page_issue_severity(issues)))
+            severity = page_refine_severity(
+                page_ssim=metric_before,
+                issues=issues,
+                page_width_pt=page.width_pt,
+                page_height_pt=page.height_pt,
+            )
+            severities.append((page_index, severity))
 
         visit_order = order_pages_for_refine(severities)
         work_order = [index for index in visit_order if issues_by_page[index] and index not in diagnose_failures]
-        reports_by_index: dict[int, SlideRefineReport] = {}
 
         for fail_index, reason in diagnose_failures.items():
             reports_by_index[fail_index] = SlideRefineReport(
@@ -1350,27 +1670,44 @@ def refine_pages(
                 metric_before=None,
                 metric_after=None,
                 skipped_reason=reason,
+                severity=0.0,
             )
 
-        # Clean pages: record diagnosis, skip trials (no soffice).
+        # Clean baselined pages: record diagnosis, skip trials (no soffice).
         for page_index, page in enumerate(working):
             if page_index in reports_by_index:
                 continue
             if issues_by_page[page_index]:
                 continue
             metric = metrics_before[page_index]
+            severity = next((value for index, value in severities if index == page_index), 0.0)
             reports_by_index[page_index] = SlideRefineReport(
                 page_number=page.page_number,
                 iterations=0,
                 metric_before=metric,
                 metric_after=metric,
                 issues=[],
+                severity=severity,
+                slot_seconds=0.0,
+                time_used_seconds=0.0,
+                borrowed_seconds=0.0,
+                accepted_fix_count=0,
             )
 
-        pages_left = len(work_order)
+        # Mutable trial state retained across first pass + reallocation pass.
+        trial_states: dict[int, _PageTrialState] = {}
+        severity_by_index = {index: value for index, value in severities}
 
-        def _mark_remaining_time_budget(from_pos: int) -> None:
-            for later_index in work_order[from_pos:]:
+        def _mark_remaining_time_budget(indices: list[int]) -> None:
+            for later_index in indices:
+                if later_index in reports_by_index and later_index not in trial_states:
+                    continue
+                if later_index in trial_states:
+                    state = trial_states[later_index]
+                    if state.slide_report.skipped_reason is None and state.attempts == 0:
+                        state.slide_report.skipped_reason = "time_budget"
+                    reports_by_index[later_index] = state.slide_report
+                    continue
                 if later_index in reports_by_index:
                     continue
                 reports_by_index[later_index] = SlideRefineReport(
@@ -1380,30 +1717,22 @@ def refine_pages(
                     metric_after=metrics_before[later_index],
                     issues=list(issues_by_page[later_index]),
                     skipped_reason="time_budget",
+                    severity=severity_by_index.get(later_index),
+                )
+                pages_skipped.append(
+                    {
+                        "page_number": working[later_index].page_number,
+                        "reason": "time_budget",
+                        "detail": "trial_not_reached",
+                    }
                 )
 
-        for order_pos, page_index in enumerate(work_order):
+        def _init_trial_state(page_index: int) -> _PageTrialState | None:
             page = working[page_index]
-            remaining = _remaining_budget()
-            minimum_now = min_soffice_timeout_seconds(last_render_seconds)
-            # Global budget exhausted: stop the severity-ordered queue.
-            if remaining + 1e-9 < minimum_now:
-                _mark_remaining_time_budget(order_pos)
-                break
-
-            allowance = page_time_allowance_seconds(
-                remaining,
-                pages_left=pages_left,
-                minimum_seconds=minimum_now,
-            )
-            pages_left = max(0, pages_left - 1)
-            if allowance + 1e-9 < minimum_now:
-                _mark_remaining_time_budget(order_pos)
-                break
-
             reference_opt = references[page_index]
             metric_opt = metrics_before[page_index]
-            if reference_opt is None or metric_opt is None:
+            candidate = candidates[page_index]
+            if reference_opt is None or metric_opt is None or candidate is None:
                 reports_by_index[page_index] = SlideRefineReport(
                     page_number=page.page_number,
                     iterations=0,
@@ -1411,16 +1740,10 @@ def refine_pages(
                     metric_after=None,
                     issues=list(issues_by_page[page_index]),
                     skipped_reason="render_failed",
+                    severity=severity_by_index.get(page_index),
                 )
-                continue
-            reference = reference_opt
-            candidate = candidates[page_index]
-            metric_before = metric_opt
-            issues = list(issues_by_page[page_index])
+                return None
 
-            # Setup (write / editability) must not consume the fair-share deadline;
-            # otherwise allowance==minimum is burned before the first trial and
-            # high-severity pages exit with attempts=0 while later pages run.
             single_path = root / f"page-{page_index}.pptx"
             _write_single(page_index, single_path)
             try:
@@ -1430,113 +1753,127 @@ def refine_pages(
                 edit_before = 0.0
                 text_f1_before = 0.0
 
-            remaining_after_setup = _remaining_budget()
-            minimum_after_setup = min_soffice_timeout_seconds(last_render_seconds)
-            if remaining_after_setup + 1e-9 < minimum_after_setup:
-                reports_by_index[page_index] = SlideRefineReport(
-                    page_number=page.page_number,
-                    iterations=0,
-                    metric_before=metric_before,
-                    metric_after=metric_before,
-                    issues=list(issues),
-                    editability_before=edit_before,
-                    editability_after=edit_before,
-                    text_f1_before=text_f1_before,
-                    text_f1_after=text_f1_before,
-                    skipped_reason="time_budget",
-                )
-                _mark_remaining_time_budget(order_pos + 1)
-                break
-
-            # Re-clamp allowance to post-setup remaining so the first trial fits.
-            allowance = min(
-                allowance,
-                page_time_allowance_seconds(
-                    remaining_after_setup,
-                    pages_left=max(1, pages_left + 1),
-                    minimum_seconds=minimum_after_setup,
-                ),
-            )
-            allowance = max(allowance, minimum_after_setup)
-            allowance = min(allowance, remaining_after_setup)
-            page_deadline = perf_counter() + allowance
-
             slide_report = SlideRefineReport(
                 page_number=page.page_number,
                 iterations=0,
-                metric_before=metric_before,
-                metric_after=metric_before,
-                issues=list(issues),
+                metric_before=metric_opt,
+                metric_after=metric_opt,
+                issues=list(issues_by_page[page_index]),
                 editability_before=edit_before,
                 editability_after=edit_before,
                 text_f1_before=text_f1_before,
                 text_f1_after=text_f1_before,
+                severity=severity_by_index.get(page_index),
+                slot_seconds=0.0,
+                time_used_seconds=0.0,
+                borrowed_seconds=0.0,
+                accepted_fix_count=0,
             )
-            current_metric = metric_before
-            current_edit = edit_before
-            current_text_f1 = text_f1_before
-            fixes_applied = 0
-            attempts = 0
-            element_attempts: dict[str, int] = {}
-            page_soffice_before = soffice_calls
-            last_good_digest = pptx_content_digest(single_path)
-            source_fonts = _source_font_snapshot(page)
+            return _PageTrialState(
+                page_index=page_index,
+                slide_report=slide_report,
+                current_metric=metric_opt,
+                current_edit=edit_before,
+                current_text_f1=text_f1_before,
+                fixes_applied=0,
+                attempts=0,
+                improving_iters=0,
+                element_attempts={},
+                last_good_digest=pptx_content_digest(single_path),
+                source_fonts=_source_font_snapshot(page),
+                single_path=single_path,
+                has_untried_candidates=True,
+                tried_keys=set(),
+                slot_seconds=0.0,
+                time_used_seconds=0.0,
+                borrowed_seconds=0.0,
+                page_soffice_before=soffice_calls,
+                last_slot_unused=0.0,
+            )
+
+        def _run_page_trials(state: _PageTrialState, *, allowance: float, borrowed: float) -> None:
+            """Run fix trials for one page under a wall-clock allowance."""
+
+            nonlocal total_attempts, deck_skipped
+
+            page_index = state.page_index
+            page = working[page_index]
+            reference = references[page_index]
+            candidate = candidates[page_index]
+            assert reference is not None and candidate is not None
+
+            state.slot_seconds += float(allowance)
+            state.borrowed_seconds += float(borrowed)
+            state.slide_report.slot_seconds = round(state.slot_seconds, 3)
+            state.slide_report.borrowed_seconds = round(state.borrowed_seconds, 3)
+
+            page_started = perf_counter()
+            page_deadline = page_started + max(0.0, float(allowance))
+            attempts_at_slot_start = state.attempts
+            slide_report = state.slide_report
+            # Clear a prior first-pass time_budget skip if we got reallocated time.
+            if borrowed > 0 and slide_report.skipped_reason == "time_budget":
+                slide_report.skipped_reason = None
 
             def _trial_available_seconds() -> float:
-                """Seconds available for the next soffice trial.
-
-                Fair-share deadline caps long runs, but if the global remaining
-                budget can still afford a call and this page has not tried yet,
-                allow one trial so severity-ordered early pages are not starved
-                by setup overhead on an allowance equal to the soffice floor.
-                """
+                """Seconds available for the next soffice trial in this slot."""
 
                 remaining_now = _remaining_budget()
-                minimum = min_soffice_timeout_seconds(last_render_seconds)
+                minimum_now = min_soffice_timeout_seconds(last_render_seconds)
                 until_deadline = page_deadline - perf_counter()
-                if remaining_now + 1e-9 < minimum:
+                if remaining_now + 1e-9 < minimum_now:
                     return 0.0
-                if until_deadline + 1e-9 >= minimum:
+                if until_deadline + 1e-9 >= minimum_now:
                     return min(until_deadline, remaining_now)
-                if attempts == 0:
-                    return min(remaining_now, max(minimum, until_deadline))
+                # First trial in this slot may borrow from the global remainder so
+                # setup overhead on an allowance equal to the soffice floor does
+                # not starve severity-ordered pages.
+                if state.attempts == attempts_at_slot_start:
+                    return min(remaining_now, max(minimum_now, until_deadline))
                 return 0.0
 
-            # Accepted improving iterations only (no-ops do not consume the attempt cap).
-            improving_iters = 0
-            while improving_iters < iters and fixes_applied < max_fixes_per_slide:
-                if attempts >= max_attempts_per_slide:
+            made_any_progress = False
+            while state.improving_iters < iters and state.fixes_applied < max_fixes_per_slide:
+                if state.attempts >= max_attempts_per_slide:
+                    state.has_untried_candidates = False
                     break
                 available_now = _trial_available_seconds()
                 if available_now + 1e-9 < min_soffice_timeout_seconds(last_render_seconds):
                     slide_report.skipped_reason = slide_report.skipped_reason or "time_budget"
                     break
 
-                _, issues = diagnose_slide(reference, candidate, page, page_ssim=current_metric)
+                _, issues = diagnose_slide(reference, candidate, page, page_ssim=state.current_metric)
                 if not issues:
+                    state.has_untried_candidates = False
                     break
 
                 made_progress = False
+                found_candidate = False
                 for issue in issues:
-                    if attempts >= max_attempts_per_slide or fixes_applied >= max_fixes_per_slide:
+                    if state.attempts >= max_attempts_per_slide or state.fixes_applied >= max_fixes_per_slide:
                         break
-                    if element_attempts.get(issue.element_id, 0) >= max_attempts_per_element:
+                    if state.element_attempts.get(issue.element_id, 0) >= max_attempts_per_element:
                         continue
                     for action in propose_fixes_for_issue(issue):
-                        if attempts >= max_attempts_per_slide or fixes_applied >= max_fixes_per_slide:
+                        key = (issue.kind, issue.element_id, action)
+                        if key in state.tried_keys:
+                            continue
+                        if state.attempts >= max_attempts_per_slide or state.fixes_applied >= max_fixes_per_slide:
                             break
-                        if element_attempts.get(issue.element_id, 0) >= max_attempts_per_element:
+                        if state.element_attempts.get(issue.element_id, 0) >= max_attempts_per_element:
                             break
+                        found_candidate = True
                         available = _trial_available_seconds()
                         trial_timeout = _trial_timeout_for(available)
                         if trial_timeout is None:
                             slide_report.skipped_reason = slide_report.skipped_reason or "time_budget"
+                            state.has_untried_candidates = True
                             break
 
                         source_size: float | None = None
                         source_paras: list[float] | None = None
-                        if issue.element_id in source_fonts:
-                            source_size, source_paras = source_fonts[issue.element_id]
+                        if issue.element_id in state.source_fonts:
+                            source_size, source_paras = state.source_fonts[issue.element_id]
 
                         snapshot = _deepcopy_pages(working)
                         details = apply_fix_action(
@@ -1550,24 +1887,25 @@ def refine_pages(
                             source_paragraph_sizes=source_paras,
                         )
                         if details is None:
+                            state.tried_keys.add(key)
                             continue
 
-                        _write_single(page_index, single_path)
-                        trial_digest = pptx_content_digest(single_path)
-                        xml_changed = trial_digest != last_good_digest
+                        _write_single(page_index, state.single_path)
+                        trial_digest = pptx_content_digest(state.single_path)
+                        xml_changed = trial_digest != state.last_good_digest
                         if not xml_changed:
-                            # No-op: revert IR; do not count toward attempt caps.
                             working[:] = snapshot
                             page = working[page_index]
-                            _write_single(page_index, single_path)
+                            _write_single(page_index, state.single_path)
+                            state.tried_keys.add(key)
                             slide_report.fixes.append(
                                 RefineFixAttempt(
                                     issue_kind=issue.kind,
                                     element_id=issue.element_id,
                                     action=action,
                                     accepted=False,
-                                    metric_before=current_metric,
-                                    metric_after=current_metric,
+                                    metric_before=state.current_metric,
+                                    metric_after=state.current_metric,
                                     details={**details, "reject_reason": "xml_unchanged"},
                                     xml_changed=False,
                                     noop=True,
@@ -1575,14 +1913,15 @@ def refine_pages(
                             )
                             continue
 
-                        attempts += 1
+                        state.attempts += 1
                         total_attempts += 1
-                        element_attempts[issue.element_id] = element_attempts.get(issue.element_id, 0) + 1
+                        state.element_attempts[issue.element_id] = state.element_attempts.get(issue.element_id, 0) + 1
+                        state.tried_keys.add(key)
 
                         try:
                             trial_rendered = _safe_render(
-                                single_path,
-                                f"trial-p{page_index}-a{attempts}-{action}",
+                                state.single_path,
+                                f"trial-p{page_index}-a{state.attempts}-{action}",
                                 timeout_seconds=trial_timeout,
                             )
                         except RenderCompareError as error:
@@ -1601,7 +1940,7 @@ def refine_pages(
                                     element_id=issue.element_id,
                                     action=action,
                                     accepted=False,
-                                    metric_before=current_metric,
+                                    metric_before=state.current_metric,
                                     metric_after=None,
                                     details={
                                         **details,
@@ -1612,22 +1951,21 @@ def refine_pages(
                                     noop=False,
                                 )
                             )
-                            # Stop this page; keep prior accepts.
-                            made_progress = False
-                            improving_iters = iters  # force exit outer while
+                            state.has_untried_candidates = False
+                            state.improving_iters = iters
                             break
 
                         if not trial_rendered:
                             working[:] = snapshot
                             page = working[page_index]
-                            _write_single(page_index, single_path)
+                            _write_single(page_index, state.single_path)
                             slide_report.fixes.append(
                                 RefineFixAttempt(
                                     issue_kind=issue.kind,
                                     element_id=issue.element_id,
                                     action=action,
                                     accepted=False,
-                                    metric_before=current_metric,
+                                    metric_before=state.current_metric,
                                     metric_after=None,
                                     details={**details, "reject_reason": "missing_rendered_slide"},
                                     xml_changed=True,
@@ -1639,15 +1977,15 @@ def refine_pages(
                         trial_candidate = trial_rendered[0]
                         trial_metric = compute_ssim(reference, resize_to_match(reference, trial_candidate))
                         try:
-                            trial_edit = slide_editability_score(single_path, slide_index=0)
-                            trial_text_f1 = slide_text_f1_vs_pdf(single_path, pdf_path, page_index=page_index)
+                            trial_edit = slide_editability_score(state.single_path, slide_index=0)
+                            trial_text_f1 = slide_text_f1_vs_pdf(state.single_path, pdf_path, page_index=page_index)
                         except Exception:  # noqa: BLE001
-                            trial_edit = current_edit
-                            trial_text_f1 = current_text_f1
+                            trial_edit = state.current_edit
+                            trial_text_f1 = state.current_text_f1
 
-                        ssim_improved = trial_metric > current_metric + METRIC_IMPROVE_EPSILON
-                        edit_ok = trial_edit + EDITABILITY_EPSILON >= current_edit
-                        text_ok = trial_text_f1 + TEXT_F1_EPSILON >= current_text_f1
+                        ssim_improved = trial_metric > state.current_metric + METRIC_IMPROVE_EPSILON
+                        edit_ok = trial_edit + EDITABILITY_EPSILON >= state.current_edit
+                        text_ok = trial_text_f1 + TEXT_F1_EPSILON >= state.current_text_f1
                         accepted = ssim_improved and edit_ok and text_ok
 
                         reject_reason = None
@@ -1664,14 +2002,14 @@ def refine_pages(
                                 element_id=issue.element_id,
                                 action=action,
                                 accepted=accepted,
-                                metric_before=current_metric,
+                                metric_before=state.current_metric,
                                 metric_after=trial_metric,
                                 details={
                                     **details,
                                     **({"reject_reason": reject_reason} if reject_reason is not None else {}),
-                                    "editability_before": current_edit,
+                                    "editability_before": state.current_edit,
                                     "editability_after": trial_edit,
-                                    "text_f1_before": current_text_f1,
+                                    "text_f1_before": state.current_text_f1,
                                     "text_f1_after": trial_text_f1,
                                 },
                                 xml_changed=True,
@@ -1679,39 +2017,101 @@ def refine_pages(
                             )
                         )
                         if accepted:
-                            current_metric = trial_metric
-                            current_edit = trial_edit
-                            current_text_f1 = trial_text_f1
+                            state.current_metric = trial_metric
+                            state.current_edit = trial_edit
+                            state.current_text_f1 = trial_text_f1
                             candidate = trial_candidate
                             candidates[page_index] = trial_candidate
                             page = working[page_index]
-                            last_good_digest = trial_digest
-                            fixes_applied += 1
-                            improving_iters += 1
+                            state.last_good_digest = trial_digest
+                            state.fixes_applied += 1
+                            state.improving_iters += 1
                             made_progress = True
-                            # Allow a follow-up fix on the same element (e.g. widen then shrink).
-                            element_attempts[issue.element_id] = 0
+                            made_any_progress = True
+                            state.element_attempts[issue.element_id] = 0
                             break
 
                         working[:] = snapshot
                         page = working[page_index]
-                        _write_single(page_index, single_path)
+                        _write_single(page_index, state.single_path)
                     else:
                         continue
-                    break  # next improving iteration after one accepted issue fix
+                    break
 
                 if slide_report.skipped_reason in {"render_failed", "time_budget"}:
                     break
                 if not made_progress:
+                    if not found_candidate:
+                        state.has_untried_candidates = False
                     break
 
-            slide_report.iterations = improving_iters
-            slide_report.metric_after = current_metric
-            slide_report.editability_after = current_edit
-            slide_report.text_f1_after = current_text_f1
-            slide_report.attempt_count = attempts
-            slide_report.soffice_call_count = soffice_calls - page_soffice_before
+            slot_used = max(0.0, perf_counter() - page_started)
+            state.time_used_seconds += slot_used
+            state.last_slot_unused = max(0.0, float(allowance) - slot_used)
+            slide_report.iterations = state.improving_iters
+            slide_report.metric_after = state.current_metric
+            slide_report.editability_after = state.current_edit
+            slide_report.text_f1_after = state.current_text_f1
+            slide_report.attempt_count = state.attempts
+            slide_report.soffice_call_count = soffice_calls - state.page_soffice_before
+            slide_report.time_used_seconds = round(state.time_used_seconds, 3)
+            slide_report.accepted_fix_count = sum(1 for fix in slide_report.fixes if fix.accepted)
+            if (
+                not state.has_untried_candidates
+                and slide_report.skipped_reason == "time_budget"
+                and (state.attempts > 0 or made_any_progress)
+            ):
+                # Candidates exhausted under the slot; keep telemetry but prefer
+                # not to look like a hard skip when work completed normally.
+                slide_report.skipped_reason = None
             reports_by_index[page_index] = slide_report
+
+        # ----- First pass: severity order, fair-share slots -----
+        pages_left = len(work_order)
+
+        for order_pos, page_index in enumerate(work_order):
+            remaining = _remaining_budget()
+            minimum_now = min_soffice_timeout_seconds(last_render_seconds)
+            if remaining + 1e-9 < minimum_now:
+                _mark_remaining_time_budget(work_order[order_pos:])
+                break
+
+            allowance = page_time_allowance_seconds(
+                remaining,
+                pages_left=pages_left,
+                minimum_seconds=minimum_now,
+            )
+            pages_left = max(0, pages_left - 1)
+            if allowance + 1e-9 < minimum_now:
+                _mark_remaining_time_budget(work_order[order_pos:])
+                break
+
+            state = _init_trial_state(page_index)
+            if state is None:
+                continue
+
+            remaining_after_setup = _remaining_budget()
+            minimum_after_setup = min_soffice_timeout_seconds(last_render_seconds)
+            if remaining_after_setup + 1e-9 < minimum_after_setup:
+                state.slide_report.skipped_reason = "time_budget"
+                reports_by_index[page_index] = state.slide_report
+                trial_states[page_index] = state
+                _mark_remaining_time_budget(work_order[order_pos + 1 :])
+                break
+
+            allowance = min(
+                allowance,
+                page_time_allowance_seconds(
+                    remaining_after_setup,
+                    pages_left=max(1, pages_left + 1),
+                    minimum_seconds=minimum_after_setup,
+                ),
+            )
+            allowance = max(allowance, minimum_after_setup)
+            allowance = min(allowance, remaining_after_setup)
+
+            trial_states[page_index] = state
+            _run_page_trials(state, allowance=allowance, borrowed=0.0)
 
             if deck_skipped == "render_failed":
                 for later_index in work_order[order_pos + 1 :]:
@@ -1724,17 +2124,85 @@ def refine_pages(
                         metric_after=metrics_before[later_index],
                         issues=list(issues_by_page[later_index]),
                         skipped_reason="render_failed",
+                        severity=severity_by_index.get(later_index),
                     )
                 break
 
-            # Stop the queue when the global budget can no longer fund a trial.
             if (
-                slide_report.skipped_reason == "time_budget"
-                and _remaining_budget() + 1e-9
-                < min_soffice_timeout_seconds(last_render_seconds)
+                state.slide_report.skipped_reason == "time_budget"
+                and _remaining_budget() + 1e-9 < min_soffice_timeout_seconds(last_render_seconds)
             ):
-                _mark_remaining_time_budget(order_pos + 1)
+                _mark_remaining_time_budget(work_order[order_pos + 1 :])
                 break
+
+        # ----- Second pass: reallocate leftover wall time by severity -----
+        if deck_skipped != "render_failed":
+            while True:
+                remaining = _remaining_budget()
+                minimum_now = min_soffice_timeout_seconds(last_render_seconds)
+                if remaining + 1e-9 < minimum_now:
+                    break
+
+                candidates_left: list[int] = []
+                for index, state in trial_states.items():
+                    if (
+                        state.has_untried_candidates
+                        and state.attempts < max_attempts_per_slide
+                        and state.fixes_applied < max_fixes_per_slide
+                        and state.improving_iters < iters
+                        and state.slide_report.skipped_reason != "render_failed"
+                    ):
+                        candidates_left.append(index)
+                # Pages never started in the first pass but still diagnosed dirty.
+                for index in work_order:
+                    if index in trial_states or index in diagnose_failures:
+                        continue
+                    if not issues_by_page[index]:
+                        continue
+                    existing = reports_by_index.get(index)
+                    if existing is not None and existing.skipped_reason == "render_failed":
+                        continue
+                    candidates_left.append(index)
+
+                seen: set[int] = set()
+                ordered_left: list[int] = []
+                for index in order_pages_for_refine(
+                    [(idx, severity_by_index.get(idx, 0.0)) for idx in candidates_left]
+                ):
+                    if index in seen:
+                        continue
+                    seen.add(index)
+                    ordered_left.append(index)
+
+                if not ordered_left:
+                    break
+
+                reallocation_passes += 1
+                page_index = ordered_left[0]
+                allowance = page_time_allowance_seconds(
+                    remaining,
+                    pages_left=len(ordered_left),
+                    minimum_seconds=minimum_now,
+                )
+                if allowance + 1e-9 < minimum_now:
+                    break
+
+                if page_index not in trial_states:
+                    state = _init_trial_state(page_index)
+                    if state is None:
+                        continue
+                    trial_states[page_index] = state
+                else:
+                    state = trial_states[page_index]
+
+                _run_page_trials(state, allowance=allowance, borrowed=allowance)
+                if deck_skipped == "render_failed":
+                    break
+                if (
+                    state.slide_report.skipped_reason == "time_budget"
+                    and _remaining_budget() + 1e-9 < min_soffice_timeout_seconds(last_render_seconds)
+                ):
+                    break
 
         # Emit reports in original page order for stable JSON.
         page_reports = [
@@ -1747,12 +2215,23 @@ def refine_pages(
                     metric_after=metrics_before[index],
                     issues=list(issues_by_page[index]),
                     skipped_reason="time_budget",
+                    severity=severity_by_index.get(index),
                 ),
             )
             for index in range(len(working))
         ]
+        for report in page_reports:
+            if report.skipped_reason == "time_budget":
+                already = any(entry.get("page_number") == report.page_number for entry in pages_skipped)
+                if not already:
+                    pages_skipped.append(
+                        {
+                            "page_number": report.page_number,
+                            "reason": "time_budget",
+                            "detail": "trial_or_baseline",
+                        }
+                    )
 
-        # Final write of accepted pages (full deck).
         _write_full()
         return _report(working_pages=working, skipped=deck_skipped, page_reports=page_reports)
     except RenderCompareError as error:
@@ -1802,14 +2281,18 @@ __all__ = [
     "diagnose_low_local_ssim",
     "diagnose_slide",
     "diagnose_text_overflow",
+    "estimate_baseline_render_seconds",
     "min_soffice_timeout_seconds",
     "order_pages_for_refine",
     "page_issue_severity",
+    "page_prerank_score",
+    "page_refine_severity",
     "page_time_allowance_seconds",
     "pptx_content_digest",
     "propose_fixes_for_issue",
     "refine_pages",
     "region_ssim",
+    "select_baseline_page_indices",
     "shrink_font_floor",
     "write_refine_report",
 ]

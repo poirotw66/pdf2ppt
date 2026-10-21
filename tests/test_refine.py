@@ -42,14 +42,17 @@ from pdf2ppt.refine import (
     diagnose_low_local_ssim,
     diagnose_slide,
     diagnose_text_overflow,
+    estimate_baseline_render_seconds,
     min_soffice_timeout_seconds,
     order_pages_for_refine,
     page_issue_severity,
+    page_refine_severity,
     page_time_allowance_seconds,
     pptx_content_digest,
     propose_fixes_for_issue,
     refine_pages,
     region_ssim,
+    select_baseline_page_indices,
     shrink_font_floor,
     write_refine_report,
 )
@@ -1179,15 +1182,312 @@ class AcceptRejectLoopTests(unittest.TestCase):
         ordered = order_pages_for_refine([(0, 0.2), (1, 0.9), (2, 0.9), (3, 0.0)])
         self.assertEqual(ordered, [1, 2, 0, 3])
         self.assertEqual(page_issue_severity([]), 0.0)
-        self.assertEqual(
-            page_issue_severity(
-                [
-                    RefineIssue(kind="a", element_id="x", severity=0.2),
-                    RefineIssue(kind="b", element_id="y", severity=0.7),
-                ]
-            ),
-            0.7,
+        # Continuous score: sum of issue severities + count weight (not max-clamped).
+        continuous = page_issue_severity(
+            [
+                RefineIssue(kind="a", element_id="x", severity=0.2),
+                RefineIssue(kind="b", element_id="y", severity=0.7),
+            ]
         )
+        self.assertGreater(continuous, 0.7)
+        self.assertGreater(continuous, 1.0)
+
+    def test_page_refine_severity_spreads_beyond_unit_clamp(self) -> None:
+        """Worse fidelity and more issues must outrank saturated per-issue 1.0 ties."""
+
+        mild = page_refine_severity(
+            page_ssim=0.95,
+            issues=[
+                RefineIssue(
+                    kind="low_local_ssim",
+                    element_id="a",
+                    severity=1.0,
+                    details={"bbox": [0, 0, 10, 10], "element_kind": "shape"},
+                )
+            ],
+            page_width_pt=100.0,
+            page_height_pt=100.0,
+        )
+        severe = page_refine_severity(
+            page_ssim=0.70,
+            issues=[
+                RefineIssue(
+                    kind="low_local_ssim",
+                    element_id="a",
+                    severity=1.0,
+                    details={"bbox": [0, 0, 40, 40], "element_kind": "shape"},
+                ),
+                RefineIssue(
+                    kind="text_overflow",
+                    element_id="t",
+                    severity=1.0,
+                    details={"bbox": [10, 10, 80, 30], "element_kind": "text"},
+                ),
+            ],
+            page_width_pt=100.0,
+            page_height_pt=100.0,
+        )
+        self.assertGreater(severe, mild)
+        self.assertGreater(severe, 1.0)
+        self.assertGreater(mild, 0.0)
+        # Ordering must prefer the worse page even when both have severity≥1 issues.
+        self.assertEqual(order_pages_for_refine([(0, mild), (1, severe)]), [1, 0])
+
+    def test_select_baseline_partial_under_short_budget(self) -> None:
+        pages = [
+            _page(
+                shape_elements=[ShapeElement(id=f"s{i}", kind="rect", bbox=(10, 10, 40, 40), fill_color="#FF0000")]
+                if i < 5
+                else [],
+                width=64.0,
+                height=36.0,
+            )
+            for i in range(30)
+        ]
+        for i, page in enumerate(pages):
+            page.page_number = i + 1
+        indices, mode = select_baseline_page_indices(
+            pages,
+            remaining_budget=10.0,
+            minimum_trial_seconds=5.0,
+        )
+        self.assertIn(mode, {"partial", "full"})
+        self.assertTrue(indices)
+        self.assertLessEqual(len(indices), 30)
+        if mode == "partial":
+            self.assertLess(len(indices), 30)
+            # Highest prerank pages (shapes) should be preferred.
+            self.assertTrue(any(i < 5 for i in indices))
+        est = estimate_baseline_render_seconds(len(indices))
+        self.assertLessEqual(est, 10.0 + 1e-9)
+
+    def test_short_budget_partial_baseline_still_runs_trials(self) -> None:
+        """30-page deck + 10s budget must not spend the whole budget on baseline only."""
+
+        import time as time_module
+
+        page_count = 30
+        pages = [
+            _page(
+                shape_elements=[
+                    ShapeElement(
+                        id=f"card_{index}",
+                        kind="rect",
+                        bbox=(12, 12, 40, 40),
+                        fill_color="#FF0000",
+                    )
+                ],
+                width=64.0,
+                height=36.0,
+            )
+            for index in range(page_count)
+        ]
+        for index, page in enumerate(pages):
+            page.page_number = index + 1
+            # Make early pages riskier for prerank when baseline is partial.
+            if index >= 10:
+                page.shape_elements = []
+
+        reference = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(reference).rectangle((12, 12, 40, 40), fill=(0, 100, 200))
+        bad = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(bad).rectangle((12, 12, 40, 40), fill=(200, 0, 0))
+
+        render_meta: list[tuple[str, int]] = []
+        digests = iter([f"d{i}" for i in range(200)])
+        written_slide_counts: dict[str, int] = {}
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            path = Path(output_path)
+            path.write_bytes(b"PK fake")
+            count = len(pages_arg)
+            written_slide_counts[path.name] = count
+            written_slide_counts[str(path)] = count
+            return path
+
+        def timed_render(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            path = Path(pptx_path)
+            name = path.name
+            n = written_slide_counts.get(name) or written_slide_counts.get(str(path), 1)
+            label = str(work_dir or "")
+            if "baseline" in label or name in {"out.pptx", "baseline-partial.pptx"}:
+                time_module.sleep(0.15 + 0.03 * n)
+                kind = "partial" if name == "baseline-partial.pptx" else "full"
+                render_meta.append((kind, n))
+                return [bad.copy() for _ in range(n)]
+            time_module.sleep(0.2)
+            render_meta.append(("trial", 1))
+            return [reference.copy()]
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return reference.copy()
+
+        # Patch estimator so 30-page full baseline is clearly too expensive for 10s.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch(
+                "pdf2ppt.refine.estimate_baseline_render_seconds",
+                side_effect=lambda n, **kw: 2.0 + 0.25 * float(n),
+            ):
+                with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                    with patch(
+                        "pdf2ppt.refine.pptx_content_digest",
+                        side_effect=lambda _p: next(digests, "done"),
+                    ):
+                        with patch("pdf2ppt.refine.slide_editability_score", return_value=0.4):
+                            with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                                _pages, report = refine_pages(
+                                    pages,
+                                    pdf_path=Path(tmp) / "src.pdf",
+                                    output_pptx=out,
+                                    slide_width_pt=64.0,
+                                    slide_height_pt=36.0,
+                                    iterations=1,
+                                    max_fixes_per_slide=1,
+                                    max_attempts_per_slide=2,
+                                    time_budget_seconds=10.0,
+                                    dpi=72,
+                                    write_pptx=fake_write,
+                                    render_pptx=timed_render,
+                                    render_pdf_page=fake_render_pdf,
+                                    work_dir=Path(tmp) / "work",
+                                )
+
+        self.assertEqual(report.baseline_mode, "partial")
+        self.assertIsNotNone(report.baseline_page_count)
+        assert report.baseline_page_count is not None
+        self.assertLess(report.baseline_page_count, page_count)
+        self.assertTrue(report.pages_skipped)
+        self.assertTrue(all(entry["reason"] == "time_budget" for entry in report.pages_skipped))
+        # At least one trial should have run (not baseline-only).
+        trial_calls = [entry for entry in render_meta if entry[0] == "trial"]
+        self.assertTrue(trial_calls)
+        tried_pages = [page for page in report.pages if page.attempt_count > 0 or page.accepted_fix_count > 0]
+        self.assertTrue(tried_pages)
+        self.assertLessEqual(float(report.runtime_seconds or 0.0), 10.0 + 2.0)
+
+    def test_reallocation_gives_late_page_borrowed_time(self) -> None:
+        """Early pages finishing fast must free budget so a late page can accept a fix."""
+
+        import time as time_module
+
+        page_count = 6
+        pages = [
+            _page(
+                shape_elements=[
+                    ShapeElement(
+                        id=f"card_{index}",
+                        kind="rect",
+                        bbox=(12, 12, 40, 40),
+                        fill_color="#FF0000",
+                    )
+                ],
+                width=64.0,
+                height=36.0,
+            )
+            for index in range(page_count)
+        ]
+        for index, page in enumerate(pages):
+            page.page_number = index + 1
+
+        reference = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(reference).rectangle((12, 12, 40, 40), fill=(0, 100, 200))
+        bad = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(bad).rectangle((12, 12, 40, 40), fill=(200, 0, 0))
+
+        # Force late page to look worst so first pass visits it last; early pages
+        # exhaust candidates quickly (noop digests), leaving wall time for pass 2.
+        digests = iter([f"d{i}" for i in range(200)])
+        call_state = {"n": 0}
+        late_accepts = {"n": 0}
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def fake_render_pptx(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            call_state["n"] += 1
+            name = Path(pptx_path).name
+            if name == "out.pptx" or "baseline" in str(work_dir or ""):
+                time_module.sleep(0.05)
+                return [bad.copy() for _ in range(page_count)]
+            # Trials: early pages stay bad (rejects); late page eventually improves.
+            time_module.sleep(0.05)
+            if name.startswith("page-"):
+                page_index = int(name.split("-")[1].split(".")[0])
+                if page_index == page_count - 1:
+                    late_accepts["n"] += 1
+                    if late_accepts["n"] >= 2:
+                        return [reference.copy()]
+            return [bad.copy()]
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return reference.copy()
+
+        # Patch diagnose so every page has an actionable issue; last page looks worst.
+        from pdf2ppt.refine import diagnose_slide as real_diagnose
+
+        def fake_diagnose(reference_img, candidate_img, page_result, *, page_ssim=None, local_ssim_gap=0.02):
+            metric, issues = real_diagnose(
+                reference_img,
+                candidate_img,
+                page_result,
+                page_ssim=page_ssim,
+                local_ssim_gap=local_ssim_gap,
+            )
+            # Ensure there is always at least one actionable issue.
+            if not issues:
+                issues = [
+                    RefineIssue(
+                        kind="low_local_ssim",
+                        element_id=page_result.shape_elements[0].id,
+                        severity=1.0,
+                        details={"element_kind": "shape", "render_evidence": True, "bbox": [12, 12, 40, 40]},
+                    )
+                ]
+            # Make last page look worse.
+            if page_result.page_number == page_count:
+                metric = min(metric, 0.55)
+            else:
+                metric = max(metric, 0.85)
+            return metric, issues
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch(
+                    "pdf2ppt.refine.pptx_content_digest",
+                    side_effect=lambda _p: next(digests, "done"),
+                ):
+                    with patch("pdf2ppt.refine.diagnose_slide", side_effect=fake_diagnose):
+                        with patch("pdf2ppt.refine.slide_editability_score", return_value=0.4):
+                            with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                                _pages, report = refine_pages(
+                                    pages,
+                                    pdf_path=Path(tmp) / "src.pdf",
+                                    output_pptx=out,
+                                    slide_width_pt=64.0,
+                                    slide_height_pt=36.0,
+                                    iterations=2,
+                                    max_fixes_per_slide=2,
+                                    max_attempts_per_slide=4,
+                                    time_budget_seconds=25.0,
+                                    dpi=72,
+                                    write_pptx=fake_write,
+                                    render_pptx=fake_render_pptx,
+                                    render_pdf_page=fake_render_pdf,
+                                    work_dir=Path(tmp) / "work",
+                                )
+
+        late = report.pages[-1]
+        self.assertGreaterEqual(report.reallocation_passes, 1)
+        self.assertGreater(late.accepted_fix_count, 0)
+        self.assertGreater(float(late.borrowed_seconds or 0.0), 0.0)
+        self.assertIsNotNone(late.severity)
+        self.assertIsNotNone(late.slot_seconds)
+        self.assertIsNotNone(late.time_used_seconds)
 
     def test_page_time_allowance_never_starves_usable_slot(self) -> None:
         floor = float(DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS)
