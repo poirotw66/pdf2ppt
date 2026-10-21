@@ -1460,20 +1460,19 @@ def refine_pages(
 
     Budget and ordering (deterministic):
 
-    * **Baseline**: one soffice render for diagnosis. When a full-deck baseline
-      would leave too little room for trials (short ``--refine-time-budget`` on
-      large decks), only the highest conversion-time risk pages are baselined
-      (``baseline_mode=partial``); others are ``pages_skipped`` with reason
-      ``time_budget``. Subset slides stay pixel-identical to a per-page render.
-      Never schedule a render whose remaining budget is below the soffice floor;
-      a started render may overrun by at most one call's duration.
-    * **Page order**: continuous severity ``(1-SSIM) + weighted issues``, then
-      ascending page index. Clean pages skip trials.
-    * **Per-page share**: fair share of remaining time among pages still waiting,
-      never below ``max(5s, 1.5× last render)`` when the budget can still afford
-      a call. Unused slot time returns to the shared pool.
-    * **Reallocation**: after the first pass, a second severity-ordered pass
-      revisits pages that still have untried candidate fixes while budget remains.
+    * **Baseline**: soffice render + per-page diagnosis (both costed). When a
+      full-deck phase would leave too little room for trials, only the highest
+      conversion-time risk pages are baselined (``baseline_mode=partial``);
+      diagnosis also stops when the trial floor would be breached. Others are
+      ``pages_skipped`` with reason ``time_budget``. Subset slides stay
+      pixel-identical to a per-page render. A started render may overrun by at
+      most one call's duration.
+    * **Page order**: continuous severity ``40×(1-SSIM) + normalised issues``,
+      then ascending page index. Clean pages skip trials.
+    * **Per-page share**: first-pass slots capped at equal fair share; trial
+      floor is ``max(~2.5s, 1.5× measured per-page render)``.
+    * **Reallocation**: round-robin second pass (one attempt per page, severity
+      order) while budget and untried candidates remain.
     * **Attempts**: XML no-ops do not count; real attempts are capped per
       element, and the per-element counter **resets after an accepted fix**.
     """
