@@ -521,6 +521,7 @@ def _deserialize_text_block(payload: Any, *, page_index: int, block_index: int) 
             paragraphs=paragraphs,
             line_bboxes=line_bboxes,
             use_title_placeholder=bool(payload.get("use_title_placeholder", False)),
+            pin_font_size=bool(payload.get("pin_font_size", False)),
         )
     except (KeyError, TypeError, ValueError, SlideIrError) as error:
         raise SlideIrError(

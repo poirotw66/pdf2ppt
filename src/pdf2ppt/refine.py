@@ -56,10 +56,24 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_REFINE_ITERS = 2
 DEFAULT_MAX_FIXES_PER_SLIDE = 8
-DEFAULT_MAX_ATTEMPTS_PER_SLIDE = 24
+# Bench on PR #14 fixtures: ~97% of attempts were rejected; 8 caps waste while
+# still covering the rare accepted path (median accepts per improved slide ≤ 2).
+DEFAULT_MAX_ATTEMPTS_PER_SLIDE = 8
+# Cap real (XML-changing) attempts per element so one title cannot burn the slide budget.
+DEFAULT_MAX_ATTEMPTS_PER_ELEMENT = 2
 DEFAULT_TIME_BUDGET_SECONDS = 90.0
 DEFAULT_FONT_SHRINK_STEP_PT = 0.5
+# Measurement floor (layout heuristics); shrink floor is stricter (see below).
 DEFAULT_MIN_FONT_SIZE_PT = 6.0
+# Never shrink below max(absolute floor, source_size * ratio). 0.95 ≈ at most one
+# 0.5pt step on typical body sizes (14pt → floor 13.3pt), preserving OCR legibility.
+DEFAULT_SHRINK_MIN_FONT_SIZE_PT = 8.0
+DEFAULT_MIN_FONT_RATIO = 0.95
+DEFAULT_LIBREOFFICE_TIMEOUT_CAP_SECONDS = 180
+# Floor for soffice trial timeouts. A single-slide convert needs ~1.5–3s; issuing
+# a 1s timeout falsely classifies budget exhaustion as render_failed.
+DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS = 5.0
+DEFAULT_SOFFICE_TIMEOUT_SLACK = 1.5
 # SSIM is insensitive to flat recolors; a modest gap still catches structural
 # misses. Local MAE catches mis-coloured / missing patches that SSIM misses.
 DEFAULT_LOCAL_SSIM_GAP = 0.02
@@ -727,24 +741,64 @@ def _replace_text_block(page: PageResult, updated: TextBlock) -> None:
     page.text_blocks = [updated if block.id == updated.id else block for block in page.text_blocks]
 
 
+def shrink_font_floor(
+    source_font_size: float,
+    *,
+    min_font_size_pt: float = DEFAULT_SHRINK_MIN_FONT_SIZE_PT,
+    min_font_ratio: float = DEFAULT_MIN_FONT_RATIO,
+) -> float:
+    """Lower bound for ``shrink_font``: ``max(absolute_min, source * ratio)``."""
+
+    source = max(0.0, float(source_font_size))
+    absolute = max(0.0, float(min_font_size_pt))
+    ratio = min(1.0, max(0.0, float(min_font_ratio)))
+    return max(absolute, source * ratio)
+
+
 def apply_shrink_font(
-    page: PageResult, element_id: str, *, step_pt: float = DEFAULT_FONT_SHRINK_STEP_PT
+    page: PageResult,
+    element_id: str,
+    *,
+    step_pt: float = DEFAULT_FONT_SHRINK_STEP_PT,
+    min_font_size_pt: float = DEFAULT_SHRINK_MIN_FONT_SIZE_PT,
+    min_font_ratio: float = DEFAULT_MIN_FONT_RATIO,
+    source_font_size: float | None = None,
+    source_paragraph_sizes: list[float] | None = None,
 ) -> dict[str, Any] | None:
-    """Shrink ``block.font_size`` and every paragraph ``font_size`` (writer prefers paras)."""
+    """Shrink ``block.font_size`` and every paragraph ``font_size`` (writer prefers paras).
+
+    Never shrinks below ``max(min_font_size_pt, source * min_font_ratio)``. ``source_*``
+    should be the pre-refine sizes so repeated shrinks cannot dig under the ratio floor.
+    """
 
     block = _find_text_block(page, element_id)
     if block is None:
         return None
     current = float(block.font_size or 12.0)
-    new_size = max(DEFAULT_MIN_FONT_SIZE_PT, round(current - step_pt, 2))
+    source = float(source_font_size) if source_font_size is not None else current
+    floor = shrink_font_floor(
+        source,
+        min_font_size_pt=min_font_size_pt,
+        min_font_ratio=min_font_ratio,
+    )
+    new_size = max(floor, round(current - step_pt, 2))
     paragraphs = list(block.paragraphs or [])
     para_changed = False
     new_paragraphs: list[TextParagraph] | None = None
     if paragraphs:
         new_paragraphs = []
-        for para in paragraphs:
+        for index, para in enumerate(paragraphs):
             para_size = float(para.font_size) if para.font_size is not None else current
-            para_new = max(DEFAULT_MIN_FONT_SIZE_PT, round(para_size - step_pt, 2))
+            if source_paragraph_sizes is not None and index < len(source_paragraph_sizes):
+                para_source = float(source_paragraph_sizes[index])
+            else:
+                para_source = para_size
+            para_floor = shrink_font_floor(
+                para_source,
+                min_font_size_pt=min_font_size_pt,
+                min_font_ratio=min_font_ratio,
+            )
+            para_new = max(para_floor, round(para_size - step_pt, 2))
             if para_new < para_size - 1e-9:
                 para_changed = True
             new_paragraphs.append(replace(para, font_size=para_new))
@@ -759,6 +813,8 @@ def apply_shrink_font(
     return {
         "font_size_before": current,
         "font_size_after": updated.font_size,
+        "font_size_floor": round(floor, 3),
+        "source_font_size": round(source, 3),
         "paragraph_sizes_scaled": para_changed,
     }
 
@@ -821,8 +877,14 @@ def apply_widen_for_wrap(page: PageResult, element_id: str) -> dict[str, Any] | 
     if new_bbox == block.bbox:
         return None
     before = list(block.bbox)
-    _replace_text_block(page, replace(block, bbox=new_bbox))
-    return {"bbox_before": before, "bbox_after": list(new_bbox), "needed_width_pt": round(needed_width, 3)}
+    # Pin font size so a larger box cannot grow glyphs via fit_text / fallback sizing.
+    _replace_text_block(page, replace(block, bbox=new_bbox, pin_font_size=True))
+    return {
+        "bbox_before": before,
+        "bbox_after": list(new_bbox),
+        "needed_width_pt": round(needed_width, 3),
+        "pin_font_size": True,
+    }
 
 
 def _erase_overlapping_text_from_crop(
@@ -964,9 +1026,20 @@ def apply_fix_action(
     element_id: str,
     action: str,
     reference_page_image: Image.Image | None,
+    min_font_size_pt: float = DEFAULT_SHRINK_MIN_FONT_SIZE_PT,
+    min_font_ratio: float = DEFAULT_MIN_FONT_RATIO,
+    source_font_size: float | None = None,
+    source_paragraph_sizes: list[float] | None = None,
 ) -> dict[str, Any] | None:
     if action == "shrink_font":
-        return apply_shrink_font(page, element_id)
+        return apply_shrink_font(
+            page,
+            element_id,
+            min_font_size_pt=min_font_size_pt,
+            min_font_ratio=min_font_ratio,
+            source_font_size=source_font_size,
+            source_paragraph_sizes=source_paragraph_sizes,
+        )
     if action == "widen_bbox":
         return apply_widen_for_wrap(page, element_id)
     if action == "match_line_bboxes":
@@ -992,6 +1065,36 @@ def _deepcopy_pages(pages: list[PageResult]) -> list[PageResult]:
     return copy.deepcopy(pages)
 
 
+def min_soffice_timeout_seconds(last_render_seconds: float | None = None) -> float:
+    """Minimum soffice allowance before issuing a trial (avoids false 1s timeouts)."""
+
+    floor = float(DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS)
+    if last_render_seconds is not None and last_render_seconds > 0:
+        return max(floor, float(DEFAULT_SOFFICE_TIMEOUT_SLACK) * float(last_render_seconds))
+    return floor
+
+
+def _soffice_timeout_seconds(remaining_seconds: float, *, minimum: float) -> int:
+    """Clamp remaining budget to a soffice timeout under the 180s cap and above ``minimum``."""
+
+    capped = min(float(DEFAULT_LIBREOFFICE_TIMEOUT_CAP_SECONDS), max(float(remaining_seconds), float(minimum)))
+    return max(1, int(math.ceil(capped)))
+
+
+def _source_font_snapshot(page: PageResult) -> dict[str, tuple[float, list[float]]]:
+    """Capture pre-refine font sizes so shrink floors stay relative to the source."""
+
+    snapshot: dict[str, tuple[float, list[float]]] = {}
+    for block in page.text_blocks:
+        block_size = float(block.font_size or 12.0)
+        para_sizes = [
+            float(para.font_size) if para.font_size is not None else block_size
+            for para in (block.paragraphs or [])
+        ]
+        snapshot[block.id] = (block_size, para_sizes)
+    return snapshot
+
+
 def refine_pages(
     pages: list[PageResult],
     *,
@@ -1002,7 +1105,10 @@ def refine_pages(
     iterations: int = DEFAULT_REFINE_ITERS,
     max_fixes_per_slide: int = DEFAULT_MAX_FIXES_PER_SLIDE,
     max_attempts_per_slide: int = DEFAULT_MAX_ATTEMPTS_PER_SLIDE,
+    max_attempts_per_element: int = DEFAULT_MAX_ATTEMPTS_PER_ELEMENT,
     time_budget_seconds: float = DEFAULT_TIME_BUDGET_SECONDS,
+    min_font_size_pt: float = DEFAULT_SHRINK_MIN_FONT_SIZE_PT,
+    min_font_ratio: float = DEFAULT_MIN_FONT_RATIO,
     dpi: float = DEFAULT_COMPARE_DPI,
     write_pptx: WritePptxFn | None = None,
     render_pptx: RenderPagesFn | None = None,
@@ -1014,6 +1120,13 @@ def refine_pages(
     Returns the (possibly improved) page list and a deck-level report. When
     LibreOffice is missing or fails, restores the last accepted PPTX and
     returns a skipped report instead of raising.
+
+    The wall-clock budget is split fairly across remaining pages for refine
+    work (unused time rolls forward). Baseline renders use
+    ``min(remaining, 180s)`` each — not an equal per-page share — so early
+    baselines are not starved. Trials are only issued when remaining time
+    meets ``max(5s, 1.5× last render)``; otherwise the page is marked
+    ``time_budget`` (never a false ``render_failed`` from a 1s timeout).
     """
 
     from .pipeline import render_pages_to_pptx
@@ -1022,6 +1135,14 @@ def refine_pages(
     iters = max(0, int(iterations))
     soffice_calls = 0
     total_attempts = 0
+    deck_skipped: str | None = None
+    last_render_seconds: float | None = None
+
+    def _elapsed() -> float:
+        return perf_counter() - started
+
+    def _remaining_budget() -> float:
+        return max(0.0, float(time_budget_seconds) - _elapsed())
 
     def _report(
         *,
@@ -1035,7 +1156,7 @@ def refine_pages(
             iterations=iters,
             dpi=dpi,
             pages=list(page_reports or []),
-            runtime_seconds=round(perf_counter() - started, 3),
+            runtime_seconds=round(_elapsed(), 3),
             soffice_call_count=soffice_calls,
             attempt_count=total_attempts,
         )
@@ -1058,10 +1179,19 @@ def refine_pages(
     root = Path(tempfile.mkdtemp(prefix="pdf2ppt-refine-")) if owns_work else Path(work_dir or ".")
     root.mkdir(parents=True, exist_ok=True)
 
-    def _safe_render(pptx_path: Path, label: str) -> list[Image.Image]:
-        nonlocal soffice_calls
+    def _safe_render(pptx_path: Path, label: str, *, timeout_seconds: int) -> list[Image.Image]:
+        nonlocal soffice_calls, last_render_seconds
         soffice_calls += 1
-        return render_pptx_fn(pptx_path, dpi=dpi, work_dir=root / label)
+        render_started = perf_counter()
+        try:
+            return render_pptx_fn(
+                pptx_path,
+                dpi=dpi,
+                work_dir=root / label,
+                timeout_seconds=timeout_seconds,
+            )
+        finally:
+            last_render_seconds = max(0.0, perf_counter() - render_started)
 
     def _write_full() -> None:
         write_fn(
@@ -1079,18 +1209,41 @@ def refine_pages(
             slide_height_pt=slide_height_pt,
         )
 
+    def _trial_timeout_for(available: float) -> int | None:
+        """Return a soffice timeout, or ``None`` when the remaining share is too small."""
+
+        minimum = min_soffice_timeout_seconds(last_render_seconds)
+        if available + 1e-9 < minimum:
+            return None
+        return _soffice_timeout_seconds(available, minimum=minimum)
+
     try:
         # Baseline: write full deck (caller expects a valid PPTX even if refine skips later).
         _write_full()
         try:
             # Prefer per-slide temps for diagnosis/fix trials (cheaper on multi-page).
+            # Baseline uses min(remaining, 180s) — not an equal per-page share — so a
+            # short deck budget cannot starve the first convert into a 1s false timeout.
             baseline_images: list[Image.Image] = []
             for page_index in range(len(working)):
-                if perf_counter() - started > time_budget_seconds:
+                remaining = _remaining_budget()
+                minimum = min_soffice_timeout_seconds(last_render_seconds)
+                if remaining + 1e-9 < minimum:
                     break
                 single_path = root / f"baseline-p{page_index}.pptx"
                 _write_single(page_index, single_path)
-                rendered_one = _safe_render(single_path, f"baseline-r{page_index}")
+                timeout = _soffice_timeout_seconds(remaining, minimum=minimum)
+                try:
+                    rendered_one = _safe_render(
+                        single_path,
+                        f"baseline-r{page_index}",
+                        timeout_seconds=timeout,
+                    )
+                except RenderCompareError as error:
+                    # Timeout despite a reasonable allowance → real render failure.
+                    logger.warning("Refine skipped: LibreOffice render failed (%s)", error)
+                    _write_full()
+                    return _report(working_pages=pages, skipped="render_failed")
                 baseline_images.append(rendered_one[0] if rendered_one else Image.new("RGB", (8, 8)))
         except RenderCompareError as error:
             logger.warning("Refine skipped: LibreOffice render failed (%s)", error)
@@ -1098,9 +1251,12 @@ def refine_pages(
             return _report(working_pages=pages, skipped="render_failed")
 
         page_reports: list[SlideRefineReport] = []
+        pages_left = len(working)
 
         for page_index, page in enumerate(working):
-            if perf_counter() - started > time_budget_seconds:
+            remaining = _remaining_budget()
+            minimum_now = min_soffice_timeout_seconds(last_render_seconds)
+            if remaining + 1e-9 < minimum_now or pages_left <= 0:
                 page_reports.append(
                     SlideRefineReport(
                         page_number=page.page_number,
@@ -1110,7 +1266,12 @@ def refine_pages(
                         skipped_reason="time_budget",
                     )
                 )
+                pages_left = max(0, pages_left - 1)
                 continue
+            page_share = remaining / pages_left
+            page_deadline = perf_counter() + page_share
+            pages_left -= 1
+
             if page_index >= len(baseline_images):
                 page_reports.append(
                     SlideRefineReport(
@@ -1118,7 +1279,9 @@ def refine_pages(
                         iterations=0,
                         metric_before=None,
                         metric_after=None,
-                        skipped_reason="missing_rendered_slide",
+                        skipped_reason="time_budget"
+                        if remaining + 1e-9 < minimum_now
+                        else "missing_rendered_slide",
                     )
                 )
                 continue
@@ -1165,15 +1328,18 @@ def refine_pages(
             current_text_f1 = text_f1_before
             fixes_applied = 0
             attempts = 0
+            element_attempts: dict[str, int] = {}
             page_soffice_before = soffice_calls
             last_good_digest = pptx_content_digest(single_path)
+            source_fonts = _source_font_snapshot(page)
 
-            # Accepted improving iterations only (no-ops / rejects do not consume).
+            # Accepted improving iterations only (no-ops do not consume the attempt cap).
             improving_iters = 0
             while improving_iters < iters and fixes_applied < max_fixes_per_slide:
                 if attempts >= max_attempts_per_slide:
                     break
-                if perf_counter() - started > time_budget_seconds:
+                available_now = min(page_deadline - perf_counter(), _remaining_budget())
+                if available_now + 1e-9 < min_soffice_timeout_seconds(last_render_seconds):
                     slide_report.skipped_reason = slide_report.skipped_reason or "time_budget"
                     break
 
@@ -1185,11 +1351,23 @@ def refine_pages(
                 for issue in issues:
                     if attempts >= max_attempts_per_slide or fixes_applied >= max_fixes_per_slide:
                         break
+                    if element_attempts.get(issue.element_id, 0) >= max_attempts_per_element:
+                        continue
                     for action in propose_fixes_for_issue(issue):
                         if attempts >= max_attempts_per_slide or fixes_applied >= max_fixes_per_slide:
                             break
-                        if perf_counter() - started > time_budget_seconds:
+                        if element_attempts.get(issue.element_id, 0) >= max_attempts_per_element:
                             break
+                        available = min(page_deadline - perf_counter(), _remaining_budget())
+                        trial_timeout = _trial_timeout_for(available)
+                        if trial_timeout is None:
+                            slide_report.skipped_reason = slide_report.skipped_reason or "time_budget"
+                            break
+
+                        source_size: float | None = None
+                        source_paras: list[float] | None = None
+                        if issue.element_id in source_fonts:
+                            source_size, source_paras = source_fonts[issue.element_id]
 
                         snapshot = _deepcopy_pages(working)
                         details = apply_fix_action(
@@ -1197,17 +1375,19 @@ def refine_pages(
                             element_id=issue.element_id,
                             action=action,
                             reference_page_image=reference,
+                            min_font_size_pt=min_font_size_pt,
+                            min_font_ratio=min_font_ratio,
+                            source_font_size=source_size,
+                            source_paragraph_sizes=source_paras,
                         )
                         if details is None:
                             continue
 
-                        attempts += 1
-                        total_attempts += 1
                         _write_single(page_index, single_path)
                         trial_digest = pptx_content_digest(single_path)
                         xml_changed = trial_digest != last_good_digest
                         if not xml_changed:
-                            # No-op: revert IR, do not consume improving iteration.
+                            # No-op: revert IR; do not count toward attempt caps.
                             working[:] = snapshot
                             page = working[page_index]
                             _write_single(page_index, single_path)
@@ -1226,10 +1406,15 @@ def refine_pages(
                             )
                             continue
 
+                        attempts += 1
+                        total_attempts += 1
+                        element_attempts[issue.element_id] = element_attempts.get(issue.element_id, 0) + 1
+
                         try:
                             trial_rendered = _safe_render(
                                 single_path,
                                 f"trial-p{page_index}-a{attempts}-{action}",
+                                timeout_seconds=trial_timeout,
                             )
                         except RenderCompareError as error:
                             logger.warning(
@@ -1240,6 +1425,7 @@ def refine_pages(
                             page = working[page_index]
                             _write_full()
                             slide_report.skipped_reason = "render_failed"
+                            deck_skipped = "render_failed"
                             slide_report.fixes.append(
                                 RefineFixAttempt(
                                     issue_kind=issue.kind,
@@ -1248,7 +1434,11 @@ def refine_pages(
                                     accepted=False,
                                     metric_before=current_metric,
                                     metric_after=None,
-                                    details={**details, "reject_reason": "render_failed"},
+                                    details={
+                                        **details,
+                                        "reject_reason": "render_failed",
+                                        "soffice_timeout_seconds": trial_timeout,
+                                    },
                                     xml_changed=True,
                                     noop=False,
                                 )
@@ -1338,7 +1528,7 @@ def refine_pages(
                         continue
                     break  # next improving iteration after one accepted issue fix
 
-                if slide_report.skipped_reason == "render_failed":
+                if slide_report.skipped_reason in {"render_failed", "time_budget"}:
                     break
                 if not made_progress:
                     break
@@ -1351,9 +1541,23 @@ def refine_pages(
             slide_report.soffice_call_count = soffice_calls - page_soffice_before
             page_reports.append(slide_report)
 
+            if deck_skipped == "render_failed":
+                # Mid-loop soffice failure: keep prior accepts, stop remaining pages.
+                for later in working[page_index + 1 :]:
+                    page_reports.append(
+                        SlideRefineReport(
+                            page_number=later.page_number,
+                            iterations=0,
+                            metric_before=None,
+                            metric_after=None,
+                            skipped_reason="render_failed",
+                        )
+                    )
+                break
+
         # Final write of accepted pages (full deck).
         _write_full()
-        return _report(working_pages=working, skipped=None, page_reports=page_reports)
+        return _report(working_pages=working, skipped=deck_skipped, page_reports=page_reports)
     except RenderCompareError as error:
         logger.warning("Refine skipped: LibreOffice render failed (%s)", error)
         try:
@@ -1378,9 +1582,13 @@ def write_refine_report(report: DeckRefineReport, path: Path) -> Path:
 
 
 __all__ = [
+    "DEFAULT_MAX_ATTEMPTS_PER_ELEMENT",
     "DEFAULT_MAX_ATTEMPTS_PER_SLIDE",
     "DEFAULT_MAX_FIXES_PER_SLIDE",
+    "DEFAULT_MIN_FONT_RATIO",
+    "DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS",
     "DEFAULT_REFINE_ITERS",
+    "DEFAULT_SHRINK_MIN_FONT_SIZE_PT",
     "DEFAULT_TIME_BUDGET_SECONDS",
     "METRIC_IMPROVE_EPSILON",
     "DeckRefineReport",
@@ -1397,9 +1605,11 @@ __all__ = [
     "diagnose_low_local_ssim",
     "diagnose_slide",
     "diagnose_text_overflow",
+    "min_soffice_timeout_seconds",
     "pptx_content_digest",
     "propose_fixes_for_issue",
     "refine_pages",
     "region_ssim",
+    "shrink_font_floor",
     "write_refine_report",
 ]
