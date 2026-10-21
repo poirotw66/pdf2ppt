@@ -1369,41 +1369,38 @@ def refine_pages(
 
         pages_left = len(work_order)
 
+        def _mark_remaining_time_budget(from_pos: int) -> None:
+            for later_index in work_order[from_pos:]:
+                if later_index in reports_by_index:
+                    continue
+                reports_by_index[later_index] = SlideRefineReport(
+                    page_number=working[later_index].page_number,
+                    iterations=0,
+                    metric_before=metrics_before[later_index],
+                    metric_after=metrics_before[later_index],
+                    issues=list(issues_by_page[later_index]),
+                    skipped_reason="time_budget",
+                )
+
         for order_pos, page_index in enumerate(work_order):
             page = working[page_index]
             remaining = _remaining_budget()
             minimum_now = min_soffice_timeout_seconds(last_render_seconds)
+            # Global budget exhausted: stop the severity-ordered queue.
+            if remaining + 1e-9 < minimum_now:
+                _mark_remaining_time_budget(order_pos)
+                break
+
             allowance = page_time_allowance_seconds(
                 remaining,
                 pages_left=pages_left,
                 minimum_seconds=minimum_now,
             )
             pages_left = max(0, pages_left - 1)
-
             if allowance + 1e-9 < minimum_now:
-                reports_by_index[page_index] = SlideRefineReport(
-                    page_number=page.page_number,
-                    iterations=0,
-                    metric_before=metrics_before[page_index],
-                    metric_after=metrics_before[page_index],
-                    issues=list(issues_by_page[page_index]),
-                    skipped_reason="time_budget",
-                )
-                # Later work-order pages also lack a usable slot.
-                for later_index in work_order[order_pos + 1 :]:
-                    if later_index in reports_by_index:
-                        continue
-                    reports_by_index[later_index] = SlideRefineReport(
-                        page_number=working[later_index].page_number,
-                        iterations=0,
-                        metric_before=metrics_before[later_index],
-                        metric_after=metrics_before[later_index],
-                        issues=list(issues_by_page[later_index]),
-                        skipped_reason="time_budget",
-                    )
+                _mark_remaining_time_budget(order_pos)
                 break
 
-            page_deadline = perf_counter() + allowance
             reference_opt = references[page_index]
             metric_opt = metrics_before[page_index]
             if reference_opt is None or metric_opt is None:
@@ -1421,6 +1418,9 @@ def refine_pages(
             metric_before = metric_opt
             issues = list(issues_by_page[page_index])
 
+            # Setup (write / editability) must not consume the fair-share deadline;
+            # otherwise allowance==minimum is burned before the first trial and
+            # high-severity pages exit with attempts=0 while later pages run.
             single_path = root / f"page-{page_index}.pptx"
             _write_single(page_index, single_path)
             try:
@@ -1429,6 +1429,37 @@ def refine_pages(
             except Exception:  # noqa: BLE001
                 edit_before = 0.0
                 text_f1_before = 0.0
+
+            remaining_after_setup = _remaining_budget()
+            minimum_after_setup = min_soffice_timeout_seconds(last_render_seconds)
+            if remaining_after_setup + 1e-9 < minimum_after_setup:
+                reports_by_index[page_index] = SlideRefineReport(
+                    page_number=page.page_number,
+                    iterations=0,
+                    metric_before=metric_before,
+                    metric_after=metric_before,
+                    issues=list(issues),
+                    editability_before=edit_before,
+                    editability_after=edit_before,
+                    text_f1_before=text_f1_before,
+                    text_f1_after=text_f1_before,
+                    skipped_reason="time_budget",
+                )
+                _mark_remaining_time_budget(order_pos + 1)
+                break
+
+            # Re-clamp allowance to post-setup remaining so the first trial fits.
+            allowance = min(
+                allowance,
+                page_time_allowance_seconds(
+                    remaining_after_setup,
+                    pages_left=max(1, pages_left + 1),
+                    minimum_seconds=minimum_after_setup,
+                ),
+            )
+            allowance = max(allowance, minimum_after_setup)
+            allowance = min(allowance, remaining_after_setup)
+            page_deadline = perf_counter() + allowance
 
             slide_report = SlideRefineReport(
                 page_number=page.page_number,
@@ -1451,12 +1482,32 @@ def refine_pages(
             last_good_digest = pptx_content_digest(single_path)
             source_fonts = _source_font_snapshot(page)
 
+            def _trial_available_seconds() -> float:
+                """Seconds available for the next soffice trial.
+
+                Fair-share deadline caps long runs, but if the global remaining
+                budget can still afford a call and this page has not tried yet,
+                allow one trial so severity-ordered early pages are not starved
+                by setup overhead on an allowance equal to the soffice floor.
+                """
+
+                remaining_now = _remaining_budget()
+                minimum = min_soffice_timeout_seconds(last_render_seconds)
+                until_deadline = page_deadline - perf_counter()
+                if remaining_now + 1e-9 < minimum:
+                    return 0.0
+                if until_deadline + 1e-9 >= minimum:
+                    return min(until_deadline, remaining_now)
+                if attempts == 0:
+                    return min(remaining_now, max(minimum, until_deadline))
+                return 0.0
+
             # Accepted improving iterations only (no-ops do not consume the attempt cap).
             improving_iters = 0
             while improving_iters < iters and fixes_applied < max_fixes_per_slide:
                 if attempts >= max_attempts_per_slide:
                     break
-                available_now = min(page_deadline - perf_counter(), _remaining_budget())
+                available_now = _trial_available_seconds()
                 if available_now + 1e-9 < min_soffice_timeout_seconds(last_render_seconds):
                     slide_report.skipped_reason = slide_report.skipped_reason or "time_budget"
                     break
@@ -1476,7 +1527,7 @@ def refine_pages(
                             break
                         if element_attempts.get(issue.element_id, 0) >= max_attempts_per_element:
                             break
-                        available = min(page_deadline - perf_counter(), _remaining_budget())
+                        available = _trial_available_seconds()
                         trial_timeout = _trial_timeout_for(available)
                         if trial_timeout is None:
                             slide_report.skipped_reason = slide_report.skipped_reason or "time_budget"
@@ -1674,6 +1725,15 @@ def refine_pages(
                         issues=list(issues_by_page[later_index]),
                         skipped_reason="render_failed",
                     )
+                break
+
+            # Stop the queue when the global budget can no longer fund a trial.
+            if (
+                slide_report.skipped_reason == "time_budget"
+                and _remaining_budget() + 1e-9
+                < min_soffice_timeout_seconds(last_render_seconds)
+            ):
+                _mark_remaining_time_budget(order_pos + 1)
                 break
 
         # Emit reports in original page order for stable JSON.
