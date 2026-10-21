@@ -27,10 +27,12 @@ from pdf2ppt.refine import (
     DEFAULT_MAX_ATTEMPTS_PER_ELEMENT,
     DEFAULT_MAX_ATTEMPTS_PER_SLIDE,
     DEFAULT_MIN_FONT_RATIO,
+    DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS,
     DEFAULT_REFINE_ITERS,
     DEFAULT_SHRINK_MIN_FONT_SIZE_PT,
     METRIC_IMPROVE_EPSILON,
     DeckRefineReport,
+    RefineIssue,
     apply_match_line_bboxes,
     apply_raster_fallback,
     apply_shrink_font,
@@ -41,6 +43,9 @@ from pdf2ppt.refine import (
     diagnose_slide,
     diagnose_text_overflow,
     min_soffice_timeout_seconds,
+    order_pages_for_refine,
+    page_issue_severity,
+    page_time_allowance_seconds,
     pptx_content_digest,
     propose_fixes_for_issue,
     refine_pages,
@@ -842,7 +847,8 @@ class AcceptRejectLoopTests(unittest.TestCase):
 
         def fake_render_pptx(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
             render_timeouts.append(int(timeout_seconds))
-            return [_solid((64, 36), (255, 255, 255))]
+            # One baseline image per page in the deck.
+            return [_solid((64, 36), (255, 255, 255)) for _ in pages]
 
         def fake_render_pdf(pdf_path, page_index, *, dpi=144):
             return _solid((64, 36), (255, 255, 255))
@@ -874,14 +880,328 @@ class AcceptRejectLoopTests(unittest.TestCase):
         self.assertEqual(len(report.pages), 4)
         self.assertTrue(all(page.skipped_reason != "time_budget" for page in report.pages))
         self.assertNotIn("render_failed", [page.skipped_reason for page in report.pages])
-        # Each soffice call should see a timeout at/above the min floor and ≤ 180.
+        # Deck baseline is a single soffice call.
+        self.assertEqual(report.soffice_call_count, 1)
         self.assertTrue(render_timeouts)
         floor = int(min_soffice_timeout_seconds(None))
         self.assertTrue(all(floor <= value <= 180 for value in render_timeouts))
 
+    def test_baseline_is_one_deck_render(self) -> None:
+        """N-page decks must not issue N baseline soffice calls."""
+
+        page_count = 12
+        pages = [
+            _page(
+                text_blocks=[
+                    TextBlock(
+                        id=f"t{index}",
+                        source="native",
+                        bbox=(5, 5, 40, 20),
+                        text=f"P{index}",
+                        confidence=1.0,
+                        font_size=12.0,
+                    )
+                ],
+                width=64.0,
+                height=36.0,
+            )
+            for index in range(page_count)
+        ]
+        for index, page in enumerate(pages):
+            page.page_number = index + 1
+
+        render_calls: list[int] = []
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def fake_render_pptx(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            render_calls.append(len(pages))
+            return [_solid((64, 36), (255, 255, 255)) for _ in pages]
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return _solid((64, 36), (255, 255, 255))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch("pdf2ppt.refine.pptx_content_digest", return_value="digest"):
+                    with patch("pdf2ppt.refine.slide_editability_score", return_value=0.5):
+                        with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                            _pages, report = refine_pages(
+                                pages,
+                                pdf_path=Path(tmp) / "src.pdf",
+                                output_pptx=out,
+                                slide_width_pt=64.0,
+                                slide_height_pt=36.0,
+                                iterations=1,
+                                max_fixes_per_slide=1,
+                                max_attempts_per_slide=1,
+                                time_budget_seconds=30.0,
+                                dpi=72,
+                                write_pptx=fake_write,
+                                render_pptx=fake_render_pptx,
+                                render_pdf_page=fake_render_pdf,
+                                work_dir=Path(tmp) / "work",
+                            )
+
+        # Clean pages: only the shared baseline soffice call.
+        self.assertEqual(len(render_calls), 1)
+        self.assertEqual(report.soffice_call_count, 1)
+        self.assertEqual(len(report.pages), page_count)
+        self.assertTrue(all(page.skipped_reason != "time_budget" for page in report.pages))
+
+    def test_page_order_prefers_severity_then_early_index(self) -> None:
+        """Short budget must refine high-severity / early pages, not only the tail."""
+
+        page_count = 8
+        pages = [
+            _page(
+                shape_elements=[
+                    ShapeElement(
+                        id=f"card_{index}",
+                        kind="rect",
+                        bbox=(12, 12, 40, 40),
+                        fill_color="#FF0000",
+                    )
+                ],
+                width=64.0,
+                height=36.0,
+            )
+            for index in range(page_count)
+        ]
+        for index, page in enumerate(pages):
+            page.page_number = index + 1
+
+        # Page 0 and 1 look wrong (red vs blue); later pages match (no issues).
+        # Severity on early pages should win over later clean pages.
+        reference_good = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(reference_good).rectangle((12, 12, 40, 40), fill=(0, 100, 200))
+        reference_bad_target = reference_good.copy()
+        candidate_bad = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(candidate_bad).rectangle((12, 12, 40, 40), fill=(200, 0, 0))
+
+        trial_pages: list[int] = []
+        digests = iter([f"d{i}" for i in range(40)])
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def fake_render_pptx(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            label = str(pptx_path)
+            if "baseline" in label or pptx_path.name.endswith("out.pptx") or "deck" in str(pptx_path):
+                # Shared baseline: early pages mismatched, late pages matched.
+                images = []
+                for index in range(page_count):
+                    if index <= 1:
+                        images.append(candidate_bad.copy())
+                    else:
+                        images.append(reference_good.copy())
+                return images
+            # Trial path encodes page index as page-{index}.pptx
+            name = Path(pptx_path).name
+            if name.startswith("page-"):
+                page_index = int(name.split("-")[1].split(".")[0])
+                trial_pages.append(page_index)
+            return [reference_good.copy()]
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return reference_bad_target.copy()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch(
+                    "pdf2ppt.refine.pptx_content_digest",
+                    side_effect=lambda _p: next(digests, "done"),
+                ):
+                    with patch("pdf2ppt.refine.slide_editability_score", return_value=0.4):
+                        with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                            _pages, report = refine_pages(
+                                pages,
+                                pdf_path=Path(tmp) / "src.pdf",
+                                output_pptx=out,
+                                slide_width_pt=64.0,
+                                slide_height_pt=36.0,
+                                iterations=1,
+                                max_fixes_per_slide=1,
+                                max_attempts_per_slide=2,
+                                time_budget_seconds=25.0,
+                                dpi=72,
+                                write_pptx=fake_write,
+                                render_pptx=fake_render_pptx,
+                                render_pdf_page=fake_render_pdf,
+                                work_dir=Path(tmp) / "work",
+                            )
+
+        self.assertEqual(len(report.pages), page_count)
+        # Only pages with issues should be trialled; early indices first.
+        self.assertTrue(trial_pages)
+        self.assertLessEqual(max(trial_pages), 1)
+        self.assertIn(0, trial_pages)
+        # Late clean pages must not be marked time_budget solely due to ordering.
+        self.assertIsNone(report.pages[-1].skipped_reason)
+
+    def test_accepted_fix_resets_element_attempt_cap(self) -> None:
+        """After an accept, the same element may try another action (widen then shrink)."""
+
+        reference = _solid((120, 80), (255, 255, 255))
+        ImageDraw.Draw(reference).text((12, 20), "Body text here", fill=(0, 0, 0))
+        # Start slightly worse; each accepted trial improves SSIM toward the reference.
+        baseline = _solid((120, 80), (255, 255, 255))
+        ImageDraw.Draw(baseline).text((12, 20), "Body text here", fill=(90, 90, 90))
+        after_widen = _solid((120, 80), (255, 255, 255))
+        ImageDraw.Draw(after_widen).text((12, 20), "Body text here", fill=(40, 40, 40))
+        after_shrink = reference.copy()
+
+        page = _page(
+            text_blocks=[
+                TextBlock(
+                    id="body",
+                    source="native",
+                    bbox=(10, 10, 60, 70),
+                    text="Body text here",
+                    confidence=1.0,
+                    font_size=18.0,
+                    line_bboxes=[(10, 10, 60, 25), (10, 28, 60, 43), (10, 46, 60, 61)],
+                    paragraphs=[TextParagraph(text="Body text here", font_size=18.0)],
+                )
+            ],
+            width=120.0,
+            height=80.0,
+        )
+        call_state = {"n": 0}
+        digests = iter([f"d{i}" for i in range(30)])
+        issue = RefineIssue(
+            kind="extra_wrap",
+            element_id="body",
+            severity=0.8,
+            details={"element_kind": "text", "render_evidence": True, "source_lines": 2, "rendered_lines": 3},
+        )
+
+        def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
+            Path(output_path).write_bytes(b"PK fake")
+            return Path(output_path)
+
+        def fake_render_pptx(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
+            call_state["n"] += 1
+            if call_state["n"] == 1:
+                return [baseline.copy()]
+            if call_state["n"] == 2:
+                return [after_widen.copy()]
+            return [after_shrink.copy()]
+
+        def fake_render_pdf(pdf_path, page_index, *, dpi=144):
+            return reference.copy()
+
+        diagnose_calls = {"n": 0}
+
+        def fake_diagnose(reference_img, candidate_img, page_result, *, page_ssim=None, local_ssim_gap=0.02):
+            diagnose_calls["n"] += 1
+            # Keep surfacing the same body issue until two accepts land.
+            metric = 0.70 + 0.05 * max(0, call_state["n"] - 1)
+            if diagnose_calls["n"] <= 4:
+                return metric, [issue]
+            return metric, []
+
+        apply_calls: list[str] = []
+        propose_calls = {"n": 0}
+
+        def fake_apply(page_arg, *, element_id, action, reference_page_image, **kwargs):
+            apply_calls.append(action)
+            # Mutate font/bbox so XML digests differ.
+            block = page_arg.text_blocks[0]
+            if action == "widen_bbox":
+                x0, y0, x1, y1 = block.bbox
+                block.bbox = (x0, y0, x1 + 4.0 + len(apply_calls), y1)
+                return {"action": action, "element_id": element_id}
+            if action == "shrink_font":
+                block.font_size = float(block.font_size or 18.0) - 0.5
+                return {"action": action, "element_id": element_id}
+            return {"action": action, "element_id": element_id}
+
+        def fake_propose(_issue: RefineIssue) -> list[str]:
+            # First improving pass: widen only; after reset, allow shrink follow-up.
+            propose_calls["n"] += 1
+            if propose_calls["n"] <= 1:
+                return ["widen_bbox"]
+            return ["shrink_font"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
+            with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
+                with patch(
+                    "pdf2ppt.refine.pptx_content_digest",
+                    side_effect=lambda _p: next(digests, "done"),
+                ):
+                    with patch("pdf2ppt.refine.diagnose_slide", side_effect=fake_diagnose):
+                        with patch("pdf2ppt.refine.apply_fix_action", side_effect=fake_apply):
+                            with patch(
+                                "pdf2ppt.refine.propose_fixes_for_issue",
+                                side_effect=fake_propose,
+                            ):
+                                with patch("pdf2ppt.refine.slide_editability_score", return_value=0.5):
+                                    with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
+                                        _pages, report = refine_pages(
+                                            [page],
+                                            pdf_path=Path(tmp) / "src.pdf",
+                                            output_pptx=out,
+                                            slide_width_pt=120.0,
+                                            slide_height_pt=80.0,
+                                            iterations=2,
+                                            max_fixes_per_slide=4,
+                                            max_attempts_per_slide=8,
+                                            max_attempts_per_element=1,
+                                            dpi=72,
+                                            write_pptx=fake_write,
+                                            render_pptx=fake_render_pptx,
+                                            render_pdf_page=fake_render_pdf,
+                                            work_dir=Path(tmp) / "work",
+                                        )
+
+        accepted = [fix for fix in report.pages[0].fixes if fix.accepted]
+        # Cap of 1 without reset would stop after widen; reset allows shrink follow-up.
+        self.assertGreaterEqual(len(accepted), 2)
+        self.assertEqual({fix.element_id for fix in accepted}, {"body"})
+        self.assertIn("widen_bbox", [fix.action for fix in accepted])
+        self.assertIn("shrink_font", [fix.action for fix in accepted])
+
     def test_default_max_attempts_is_eight(self) -> None:
         self.assertEqual(DEFAULT_MAX_ATTEMPTS_PER_SLIDE, 8)
         self.assertEqual(DEFAULT_MAX_ATTEMPTS_PER_ELEMENT, 2)
+
+    def test_order_pages_for_refine_is_deterministic(self) -> None:
+        ordered = order_pages_for_refine([(0, 0.2), (1, 0.9), (2, 0.9), (3, 0.0)])
+        self.assertEqual(ordered, [1, 2, 0, 3])
+        self.assertEqual(page_issue_severity([]), 0.0)
+        self.assertEqual(
+            page_issue_severity(
+                [
+                    RefineIssue(kind="a", element_id="x", severity=0.2),
+                    RefineIssue(kind="b", element_id="y", severity=0.7),
+                ]
+            ),
+            0.7,
+        )
+
+    def test_page_time_allowance_never_starves_usable_slot(self) -> None:
+        floor = float(DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS)
+        # 90s / 30 pages would be 3s crumbs; allowance must stay at the floor.
+        allowance = page_time_allowance_seconds(90.0, pages_left=30, minimum_seconds=floor)
+        self.assertEqual(allowance, floor)
+        self.assertEqual(
+            page_time_allowance_seconds(4.0, pages_left=10, minimum_seconds=floor),
+            0.0,
+        )
+        self.assertAlmostEqual(
+            page_time_allowance_seconds(60.0, pages_left=4, minimum_seconds=floor),
+            15.0,
+        )
 
     def test_noops_do_not_count_toward_attempt_cap(self) -> None:
         """XML-unchanged trials must not burn max_attempts_per_slide."""
@@ -1019,14 +1339,12 @@ class AcceptRejectLoopTests(unittest.TestCase):
 
         pages = [
             _page(
-                text_blocks=[
-                    TextBlock(
-                        id=f"t{index}",
-                        source="native",
-                        bbox=(5, 5, 40, 20),
-                        text=f"P{index}",
-                        confidence=1.0,
-                        font_size=12.0,
+                shape_elements=[
+                    ShapeElement(
+                        id=f"card_{index}",
+                        kind="rect",
+                        bbox=(12, 12, 40, 40),
+                        fill_color="#FF0000",
                     )
                 ],
                 width=64.0,
@@ -1037,7 +1355,13 @@ class AcceptRejectLoopTests(unittest.TestCase):
         for index, page in enumerate(pages):
             page.page_number = index + 1
 
+        reference = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(reference).rectangle((12, 12, 40, 40), fill=(0, 100, 200))
+        bad = _solid((64, 36), (255, 255, 255))
+        ImageDraw.Draw(bad).rectangle((12, 12, 40, 40), fill=(200, 0, 0))
+
         timeouts: list[int] = []
+        digests = iter([f"d{i}" for i in range(40)])
 
         def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
             Path(output_path).write_bytes(b"PK fake")
@@ -1045,19 +1369,25 @@ class AcceptRejectLoopTests(unittest.TestCase):
 
         def slow_render(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
             timeouts.append(int(timeout_seconds))
-            # Mimic a real single-slide convert (~2s) without actually hanging forever.
+            # Mimic a real convert (~2s) without hanging forever.
             sleep_for = min(2.0, max(0.0, float(timeout_seconds) - 0.05))
             time_module.sleep(sleep_for)
-            return [_solid((64, 36), (255, 255, 255))]
+            # Baseline returns one image per slide; trials return a single slide.
+            if Path(pptx_path).name == "out.pptx":
+                return [bad.copy() for _ in pages]
+            return [bad.copy()]
 
         def fake_render_pdf(pdf_path, page_index, *, dpi=144):
-            return _solid((64, 36), (255, 255, 255))
+            return reference.copy()
 
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out.pptx"
             (Path(tmp) / "src.pdf").write_bytes(b"%PDF-1.4")
             with patch("pdf2ppt.refine.find_libreoffice_executable", return_value=Path("/usr/bin/soffice")):
-                with patch("pdf2ppt.refine.pptx_content_digest", return_value="digest"):
+                with patch(
+                    "pdf2ppt.refine.pptx_content_digest",
+                    side_effect=lambda _p: next(digests, "done"),
+                ):
                     with patch("pdf2ppt.refine.slide_editability_score", return_value=0.5):
                         with patch("pdf2ppt.refine.slide_text_f1_vs_pdf", return_value=1.0):
                             _pages, report = refine_pages(

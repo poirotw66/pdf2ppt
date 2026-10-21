@@ -171,21 +171,28 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
 `pdf2ppt --refine` runs a deterministic loop after the PPTX is written
 (**experimental** — default off; refine-off output stays byte-identical):
 
-1. Render each slide via LibreOffice → PDF → PNG (same stack as this evaluator).
+1. Render the **whole deck once** via LibreOffice → PDF → PNG for baseline
+   diagnosis (same stack as this evaluator). Trial renders use a single-slide
+   PPTX for the page under test only.
 2. Diagnose page SSIM plus localized issues with **render evidence** ranked
    first (ink spill / extra wrap lines, low local SSIM+MAE) — no LLM.
-3. Apply bounded rule-based fixes to SlideIR / `PageResult` (shrink font
+3. Visit pages with issues by **descending severity**, then **ascending page
+   index** (early slides win ties). Clean pages skip trials.
+4. Apply bounded rule-based fixes to SlideIR / `PageResult` (shrink font
    including paragraph sizes, widen/reposition boxes; raster crop only for
    **non-text** regions, with overlying text glyphs erased from the crop).
    `shrink_font` never goes below `max(--refine-min-font-size, source * --refine-min-font-ratio)`
    (default ratio 0.95). `widen_bbox` pins the declared font size so fit_text
    cannot grow glyphs in the larger box.
-4. Keep a fix only when page SSIM **strictly improves** and editability / text
+5. Keep a fix only when page SSIM **strictly improves** and editability / text
    F1 do not regress; XML no-ops are rejected and do **not** consume the attempt
-   cap; real attempts are also capped per element (default 2). Caps:
-   `--refine-max-attempts` (default 8), `--refine-time-budget` (fair per-page
-   refine share; baseline uses `min(remaining, 180s)`; trials require at least
-   `max(5s, 1.5× last render)` or the page is marked `time_budget`).
+   cap; real attempts are capped per element (default 2) and the per-element
+   counter **resets after an accepted fix** (so a widen can be followed by a
+   shrink), still bounded by slide/global caps. Caps:
+   `--refine-max-attempts` (default 8), `--refine-time-budget` (default 90s;
+   plan ~**3s per page**; fair share among remaining issue pages, never below
+   `max(5s, 1.5× last render)` when the total budget can still afford a call,
+   else `time_budget`).
 
 When `soffice` is unavailable **or fails** (including mid-loop), the loop
 restores the last accepted PPTX, sets deck-level `skipped_reason`, and
