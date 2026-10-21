@@ -201,18 +201,20 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
    plan ~**3s per page**). First-pass slots are capped at the equal fair
    share. A trial may *start* when remaining ≥ `max(~2.5s, 1.5× per-page
    render)`, but the issued soffice timeout is decoupled:
-   `max(5s, 3× measured single-page render)`. Candidates are ordered by
-   expected acceptance (`widen_bbox` before `raster_fallback`); editability /
-   text-F1 gates run on the written PPTX **before** soffice so doomed
-   candidates skip without counting an attempt. Unused time returns to the
-   pool; a **round-robin second pass** (up to two attempts per page when the
-   budget can afford it, severity order) continues while candidates remain.
-   A single trial timeout rejects that candidate and continues; two
-   consecutive timeouts abort refine. Per-page report fields include
-   `severity`, `slot_seconds` / `borrowed_seconds` / `time_used_seconds`
-   (actual used), `granted_seconds`, `attempt_count`, and
-   `accepted_fix_count`. Wall-clock counts in benches are
-   **machine-dependent**.
+   `max(5s, 3× last successful single-page render)`. Baseline/diagnose
+   planning reserves that same issued amount so short budgets (e.g. 10s)
+   still leave a real trial slot. Within each issue, prefer `widen_bbox`
+   before `shrink_font` / `raster_fallback`; issues themselves stay in
+   severity order (not a global widen-first pass). Duplicate
+   `(element, action, params)` edits and editability/text-F1 precheck
+   failures skip without counting an attempt. Unused time returns to the
+   pool; a **round-robin second pass** (up to two attempts per page when
+   the budget can afford it) continues while candidates remain. A single
+   trial timeout rejects that candidate and continues; two consecutive
+   timeouts abort refine. Per-page report fields include `severity`,
+   `slot_seconds` / `borrowed_seconds` / `time_used_seconds` (actual used),
+   `granted_seconds`, `attempt_count`, and `accepted_fix_count`.
+   Wall-clock counts in benches are **machine-dependent**.
 
 When `soffice` is unavailable **or fails** (including mid-loop), the loop
 restores the last accepted PPTX, sets deck-level `skipped_reason`, and

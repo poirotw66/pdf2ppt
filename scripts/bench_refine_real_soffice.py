@@ -163,10 +163,7 @@ def main() -> None:
     args = parser.parse_args()
     if find_libreoffice_executable() is None:
         raise SystemExit("LibreOffice (soffice) is required for this bench")
-    print(
-        f"Real soffice refine bench ({args.pages} pages, dpi={args.dpi}; "
-        "counts are machine-dependent)"
-    )
+    print(f"Real soffice refine bench ({args.pages} pages, dpi={args.dpi}; counts are machine-dependent)")
     print(
         f"{'budget':>8} {'mode':>8} {'base_n':>6} {'skip':>5} {'tried':>5} "
         f"{'accept':>6} {'attempts':>8} {'ssim_b':>10} {'ssim_a':>10} {'wall':>7} "
