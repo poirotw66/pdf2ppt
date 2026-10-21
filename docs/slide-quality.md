@@ -172,17 +172,19 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
 (**experimental** — default off; refine-off output stays byte-identical):
 
 1. **Baseline render** via LibreOffice → PDF → PNG (same stack as this
-   evaluator). Prefer one full-deck convert. On short
-   `--refine-time-budget` / large decks, if a full baseline would leave too
+   evaluator). Prefer one full-deck convert. Cost estimates include
+   per-page diagnosis (~0.45s/page) as well as soffice render. On short
+   `--refine-time-budget` / large decks, if that phase would leave too
    little room for trials, only the highest conversion-time risk pages are
-   baselined (`baseline_mode=partial`); others appear in deck
+   baselined (`baseline_mode=partial`); the diagnosis loop also stops when
+   the trial floor would be breached. Others appear in deck
    `pages_skipped` with reason `time_budget`. Subset slides stay
    pixel-identical to a per-page render. Trial renders use a single-slide
    PPTX for the page under test only.
 2. Diagnose page SSIM plus localized issues with **render evidence** ranked
    first (ink spill / extra wrap lines, low local SSIM+MAE) — no LLM.
 3. Visit pages with issues by **descending continuous severity**
-   (`(1−SSIM) + weighted issue counts/areas`, not clamped to 1.0), then
+   (`40×(1−SSIM)` plus normalised issue terms, so fidelity dominates), then
    **ascending page index**. Clean pages skip trials.
 4. Apply bounded rule-based fixes to SlideIR / `PageResult` (shrink font
    including paragraph sizes, widen/reposition boxes; raster crop only for
@@ -196,12 +198,12 @@ see [`generative-inpaint.md`](./generative-inpaint.md).
    counter **resets after an accepted fix** (so a widen can be followed by a
    shrink), still bounded by slide/global caps. Caps:
    `--refine-max-attempts` (default 8), `--refine-time-budget` (default 90s;
-   plan ~**3s per page**; fair share among remaining issue pages, never below
-   `max(5s, 1.5× last render)` when the total budget can still afford a call,
-   else `time_budget`). Unused fair-share time returns to the pool; after the
-   first pass, a **second severity-ordered pass** revisits pages that still
-   have untried candidate fixes while budget remains. Per-page report fields
-   include `severity`, `slot_seconds`, `time_used_seconds`, `borrowed_seconds`,
+   plan ~**3s per page**). First-pass slots are capped at the equal fair
+   share; the trial floor is `max(~2.5s, 1.5× measured per-page render)`.
+   Unused time returns to the pool; a **round-robin second pass** (one
+   attempt per page, severity order) continues while budget and candidates
+   remain. Per-page report fields include `severity`, `slot_seconds` /
+   `borrowed_seconds` / `time_used_seconds` (actual used), `granted_seconds`,
    `attempt_count`, and `accepted_fix_count`.
 
 When `soffice` is unavailable **or fails** (including mid-loop), the loop

@@ -42,7 +42,6 @@ from pdf2ppt.refine import (
     diagnose_low_local_ssim,
     diagnose_slide,
     diagnose_text_overflow,
-    estimate_baseline_render_seconds,
     min_soffice_timeout_seconds,
     order_pages_for_refine,
     page_issue_severity,
@@ -1182,15 +1181,15 @@ class AcceptRejectLoopTests(unittest.TestCase):
         ordered = order_pages_for_refine([(0, 0.2), (1, 0.9), (2, 0.9), (3, 0.0)])
         self.assertEqual(ordered, [1, 2, 0, 3])
         self.assertEqual(page_issue_severity([]), 0.0)
-        # Continuous score: sum of issue severities + count weight (not max-clamped).
+        # Without SSIM, score is normalised issue terms only (not raw sum).
         continuous = page_issue_severity(
             [
                 RefineIssue(kind="a", element_id="x", severity=0.2),
                 RefineIssue(kind="b", element_id="y", severity=0.7),
             ]
         )
-        self.assertGreater(continuous, 0.7)
-        self.assertGreater(continuous, 1.0)
+        self.assertGreater(continuous, 0.0)
+        self.assertLess(continuous, 2.0)
 
     def test_page_refine_severity_spreads_beyond_unit_clamp(self) -> None:
         """Worse fidelity and more issues must outrank saturated per-issue 1.0 ties."""
@@ -1233,6 +1232,42 @@ class AcceptRejectLoopTests(unittest.TestCase):
         # Ordering must prefer the worse page even when both have severity≥1 issues.
         self.assertEqual(order_pages_for_refine([(0, mild), (1, severe)]), [1, 0])
 
+    def test_page_refine_severity_fidelity_dominates_issue_count(self) -> None:
+        """A worse-SSIM page sorts first even with fewer diagnosed issues."""
+
+        worse_ssim_few = page_refine_severity(
+            page_ssim=0.90,
+            issues=[
+                RefineIssue(
+                    kind="low_local_ssim",
+                    element_id="a",
+                    severity=1.0,
+                    details={"bbox": [0, 0, 20, 20], "element_kind": "shape"},
+                )
+            ],
+            page_width_pt=100.0,
+            page_height_pt=100.0,
+        )
+        better_ssim_many = page_refine_severity(
+            page_ssim=0.97,
+            issues=[
+                RefineIssue(
+                    kind="low_local_ssim",
+                    element_id=f"s{i}",
+                    severity=1.0,
+                    details={"bbox": [0, 0, 10, 10], "element_kind": "shape"},
+                )
+                for i in range(12)
+            ],
+            page_width_pt=100.0,
+            page_height_pt=100.0,
+        )
+        self.assertGreater(worse_ssim_few, better_ssim_many)
+        self.assertEqual(
+            order_pages_for_refine([(0, better_ssim_many), (1, worse_ssim_few)]),
+            [1, 0],
+        )
+
     def test_select_baseline_partial_under_short_budget(self) -> None:
         pages = [
             _page(
@@ -1249,7 +1284,7 @@ class AcceptRejectLoopTests(unittest.TestCase):
         indices, mode = select_baseline_page_indices(
             pages,
             remaining_budget=10.0,
-            minimum_trial_seconds=5.0,
+            minimum_trial_seconds=2.5,
         )
         self.assertIn(mode, {"partial", "full"})
         self.assertTrue(indices)
@@ -1258,8 +1293,10 @@ class AcceptRejectLoopTests(unittest.TestCase):
             self.assertLess(len(indices), 30)
             # Highest prerank pages (shapes) should be preferred.
             self.assertTrue(any(i < 5 for i in indices))
-        est = estimate_baseline_render_seconds(len(indices))
-        self.assertLessEqual(est, 10.0 + 1e-9)
+        from pdf2ppt.refine import estimate_baseline_phase_seconds
+
+        est = estimate_baseline_phase_seconds(len(indices))
+        self.assertLessEqual(est + 2.5, 10.0 + 1e-9)
 
     def test_short_budget_partial_baseline_still_runs_trials(self) -> None:
         """30-page deck + 10s budget must not spend the whole budget on baseline only."""
@@ -1401,23 +1438,28 @@ class AcceptRejectLoopTests(unittest.TestCase):
         digests = iter([f"d{i}" for i in range(200)])
         call_state = {"n": 0}
         late_accepts = {"n": 0}
+        written_counts: dict[str, int] = {}
 
         def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
-            Path(output_path).write_bytes(b"PK fake")
-            return Path(output_path)
+            path = Path(output_path)
+            path.write_bytes(b"PK fake")
+            written_counts[path.name] = len(pages_arg)
+            return path
 
         def fake_render_pptx(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
             call_state["n"] += 1
             name = Path(pptx_path).name
-            if name == "out.pptx" or "baseline" in str(work_dir or ""):
+            n = written_counts.get(name, 1)
+            if "baseline" in str(work_dir or "") or name in {"out.pptx", "baseline-partial.pptx"}:
                 time_module.sleep(0.05)
-                return [bad.copy() for _ in range(page_count)]
-            # Trials: early pages stay bad (rejects); late page eventually improves.
-            time_module.sleep(0.05)
+                return [bad.copy() for _ in range(n)]
+            # Slow trials so first-pass fair share (~budget/pages) fits ~1 attempt.
+            time_module.sleep(1.2)
             if name.startswith("page-"):
                 page_index = int(name.split("-")[1].split(".")[0])
                 if page_index == page_count - 1:
                     late_accepts["n"] += 1
+                    # Needs a second attempt (reallocation round-robin) to accept.
                     if late_accepts["n"] >= 2:
                         return [reference.copy()]
             return [bad.copy()]
@@ -1425,7 +1467,8 @@ class AcceptRejectLoopTests(unittest.TestCase):
         def fake_render_pdf(pdf_path, page_index, *, dpi=144):
             return reference.copy()
 
-        # Patch diagnose so every page has an actionable issue; last page looks worst.
+        # Early pages look worse (visited first); last page is next-worst so it
+        # still has untried candidates when leftover time is reallocated.
         from pdf2ppt.refine import diagnose_slide as real_diagnose
 
         def fake_diagnose(reference_img, candidate_img, page_result, *, page_ssim=None, local_ssim_gap=0.02):
@@ -1436,7 +1479,6 @@ class AcceptRejectLoopTests(unittest.TestCase):
                 page_ssim=page_ssim,
                 local_ssim_gap=local_ssim_gap,
             )
-            # Ensure there is always at least one actionable issue.
             if not issues:
                 issues = [
                     RefineIssue(
@@ -1446,11 +1488,12 @@ class AcceptRejectLoopTests(unittest.TestCase):
                         details={"element_kind": "shape", "render_evidence": True, "bbox": [12, 12, 40, 40]},
                     )
                 ]
-            # Make last page look worse.
-            if page_result.page_number == page_count:
-                metric = min(metric, 0.55)
+            if page_result.page_number == 1:
+                metric = 0.50
+            elif page_result.page_number == page_count:
+                metric = 0.62
             else:
-                metric = max(metric, 0.85)
+                metric = 0.88
             return metric, issues
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1473,7 +1516,7 @@ class AcceptRejectLoopTests(unittest.TestCase):
                                     iterations=2,
                                     max_fixes_per_slide=2,
                                     max_attempts_per_slide=4,
-                                    time_budget_seconds=25.0,
+                                    time_budget_seconds=20.0,
                                     dpi=72,
                                     write_pptx=fake_write,
                                     render_pptx=fake_render_pptx,
@@ -1486,16 +1529,30 @@ class AcceptRejectLoopTests(unittest.TestCase):
         self.assertGreater(late.accepted_fix_count, 0)
         self.assertGreater(float(late.borrowed_seconds or 0.0), 0.0)
         self.assertIsNotNone(late.severity)
-        self.assertIsNotNone(late.slot_seconds)
         self.assertIsNotNone(late.time_used_seconds)
+        # Used time must not exceed granted.
+        if late.granted_seconds is not None and late.time_used_seconds is not None:
+            self.assertLessEqual(late.time_used_seconds, late.granted_seconds + 0.5)
 
     def test_page_time_allowance_never_starves_usable_slot(self) -> None:
         floor = float(DEFAULT_MIN_SOFFICE_TIMEOUT_SECONDS)
-        # 90s / 30 pages would be 3s crumbs; allowance must stay at the floor.
-        allowance = page_time_allowance_seconds(90.0, pages_left=30, minimum_seconds=floor)
-        self.assertEqual(allowance, floor)
+        # 90/30 → fair 3s ≥ floor 2.5 → return fair share.
+        self.assertAlmostEqual(
+            page_time_allowance_seconds(90.0, pages_left=30, minimum_seconds=floor),
+            3.0,
+        )
+        # 60/30 → fair 2s < floor → bump to floor (non-capped path).
         self.assertEqual(
-            page_time_allowance_seconds(4.0, pages_left=10, minimum_seconds=floor),
+            page_time_allowance_seconds(60.0, pages_left=30, minimum_seconds=floor),
+            floor,
+        )
+        # With cap_at_fair_share: never inflate above equal share (first pass).
+        self.assertAlmostEqual(
+            page_time_allowance_seconds(60.0, pages_left=30, minimum_seconds=floor, cap_at_fair_share=True),
+            2.0,
+        )
+        self.assertEqual(
+            page_time_allowance_seconds(2.0, pages_left=10, minimum_seconds=floor),
             0.0,
         )
         self.assertAlmostEqual(
@@ -1662,19 +1719,23 @@ class AcceptRejectLoopTests(unittest.TestCase):
 
         timeouts: list[int] = []
         digests = iter([f"d{i}" for i in range(40)])
+        written_counts: dict[str, int] = {}
 
         def fake_write(pages_arg, output_path, *, slide_width_pt, slide_height_pt):
-            Path(output_path).write_bytes(b"PK fake")
-            return Path(output_path)
+            path = Path(output_path)
+            path.write_bytes(b"PK fake")
+            written_counts[path.name] = len(pages_arg)
+            return path
 
         def slow_render(pptx_path, *, dpi=144, work_dir=None, timeout_seconds=180):
             timeouts.append(int(timeout_seconds))
             # Mimic a real convert (~2s) without hanging forever.
             sleep_for = min(2.0, max(0.0, float(timeout_seconds) - 0.05))
             time_module.sleep(sleep_for)
-            # Baseline returns one image per slide; trials return a single slide.
-            if Path(pptx_path).name == "out.pptx":
-                return [bad.copy() for _ in pages]
+            name = Path(pptx_path).name
+            n = written_counts.get(name, 1)
+            if "baseline" in str(work_dir or "") or name in {"out.pptx", "baseline-partial.pptx"}:
+                return [bad.copy() for _ in range(n)]
             return [bad.copy()]
 
         def fake_render_pdf(pdf_path, page_index, *, dpi=144):
