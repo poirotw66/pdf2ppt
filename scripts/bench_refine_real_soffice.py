@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 import fitz
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from pdf2ppt.models import PageResult, QualityScore, ShapeElement
 from pdf2ppt.pipeline import render_pages_to_pptx
