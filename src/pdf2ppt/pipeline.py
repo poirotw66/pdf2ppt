@@ -210,14 +210,15 @@ def convert_pdf(
         )
 
     layout_planner_report = None
-    if isinstance(getattr(options, "layout_planner_budget", None), LayoutPlannerBudget):
-        layout_planner_report = options.layout_planner_budget.to_dict()
+    layout_planner_budget = getattr(options, "layout_planner_budget", None)
+    if isinstance(layout_planner_budget, LayoutPlannerBudget):
+        layout_planner_report = layout_planner_budget.to_dict()
         logger.info(
             "Layout planner run stats: calls=%s cache_hits=%s fallbacks=%s est_cost_usd=%.4f",
-            options.layout_planner_budget.calls,
-            options.layout_planner_budget.cache_hits,
-            options.layout_planner_budget.fallbacks,
-            options.layout_planner_budget.estimated_cost_usd,
+            layout_planner_budget.calls,
+            layout_planner_budget.cache_hits,
+            layout_planner_budget.fallbacks,
+            layout_planner_budget.estimated_cost_usd,
         )
 
     if emit_ir_path is not None:
