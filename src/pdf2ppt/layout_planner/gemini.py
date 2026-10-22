@@ -23,7 +23,7 @@ from .budget import (
 )
 from .schema import LAYOUT_PLAN_RESPONSE_SCHEMA, LAYOUT_PLANNER_SYSTEM_PROMPT
 from .types import PROMPT_VERSION, BlockEvidence, LayoutPlan
-from .validate import parse_and_validate_layout_plan
+from .validate import LayoutPlanValidationError, parse_and_validate_layout_plan
 
 logger = logging.getLogger(__name__)
 
@@ -225,14 +225,25 @@ class GeminiLayoutPlanner:
                 output_tokens=output_tokens,
             ) from error
 
-        plan = parse_and_validate_layout_plan(
-            parsed,
-            known_block_ids=known_ids,
-            model=self._model,
-            prompt_version=PROMPT_VERSION,
-            min_confidence=self._min_confidence,
-            estimated_cost_usd=cost if cost is not None else self._estimated_cost_usd,
-        )
+        try:
+            plan = parse_and_validate_layout_plan(
+                parsed,
+                known_block_ids=known_ids,
+                model=self._model,
+                prompt_version=PROMPT_VERSION,
+                min_confidence=self._min_confidence,
+                estimated_cost_usd=cost if cost is not None else self._estimated_cost_usd,
+            )
+        except LayoutPlanValidationError as error:
+            # Parsed JSON that fails schema/consistency still consumed tokens;
+            # carry usage so the service can bill and refund correctly.
+            raise LayoutPlannerError(
+                str(error),
+                kind="validation",
+                estimated_cost_usd=float(cost) if cost is not None else 0.0,
+                prompt_tokens=prompt_tokens,
+                output_tokens=output_tokens,
+            ) from error
         plan.prompt_tokens = prompt_tokens
         plan.output_tokens = output_tokens
         return plan

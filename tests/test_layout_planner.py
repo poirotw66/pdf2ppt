@@ -699,6 +699,101 @@ class LayoutPlannerFailureRefundServiceTests(unittest.TestCase):
             budget, expected_cost=0.0, expected_calls=1, fallback_kind="validation"
         )
 
+    def _validation_failure_payload_unknown_id(self) -> dict:
+        payload = _valid_plan_payload()
+        payload["blocks"][0]["id"] = "missing"
+        return payload
+
+    def _validation_failure_payload_overlap(self) -> dict:
+        payload = _valid_plan_payload()
+        payload["groups"].append(
+            {
+                "id": "g_dup",
+                "member_ids": ["b2"],
+                "role": "body",
+                "reading_order": 9,
+                "confidence": 0.9,
+            }
+        )
+        return payload
+
+    def _transport_plan(self, plan: dict, usage: dict | None = None):
+        def transport(_body: dict) -> dict:
+            body: dict = {
+                "candidates": [{"content": {"parts": [{"text": json.dumps(plan)}]}}],
+            }
+            if usage is not None:
+                body["usageMetadata"] = usage
+            return body
+
+        return transport
+
+    def test_unknown_id_with_usage_bills_usage_and_records_tokens(self) -> None:
+        from pdf2ppt.layout_planner.budget import cost_from_usage_metadata
+
+        usage = {"promptTokenCount": 1800, "candidatesTokenCount": 350}
+        expected = cost_from_usage_metadata(usage)
+        assert expected is not None
+
+        service, budget = self._service(
+            self._transport_plan(self._validation_failure_payload_unknown_id(), usage)
+        )
+        self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=expected, expected_calls=1, fallback_kind="validation"
+        )
+        record = budget.records[0]
+        self.assertEqual(record.prompt_tokens, 1800)
+        self.assertEqual(record.output_tokens, 350)
+        self.assertIn("unknown", (record.note or "").lower())
+
+    def test_unknown_id_without_usage_refunds_to_zero(self) -> None:
+        service, budget = self._service(
+            self._transport_plan(self._validation_failure_payload_unknown_id())
+        )
+        self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=0.0, expected_calls=1, fallback_kind="validation"
+        )
+        record = budget.records[0]
+        self.assertIsNone(record.prompt_tokens)
+        self.assertIsNone(record.output_tokens)
+        self.assertEqual(budget.to_dict()["estimated_cost_usd"], 0.0)
+
+    def test_overlap_with_usage_bills_usage_and_records_tokens(self) -> None:
+        from pdf2ppt.layout_planner.budget import cost_from_usage_metadata
+
+        usage = {"promptTokenCount": 2200, "candidatesTokenCount": 480}
+        expected = cost_from_usage_metadata(usage)
+        assert expected is not None
+
+        service, budget = self._service(
+            self._transport_plan(self._validation_failure_payload_overlap(), usage)
+        )
+        self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=expected, expected_calls=1, fallback_kind="validation"
+        )
+        record = budget.records[0]
+        self.assertEqual(record.prompt_tokens, 2200)
+        self.assertEqual(record.output_tokens, 480)
+        self.assertIn("Contradictory", record.note or "")
+
+    def test_overlap_without_usage_refunds_to_zero(self) -> None:
+        service, budget = self._service(
+            self._transport_plan(self._validation_failure_payload_overlap())
+        )
+        self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=0.0, expected_calls=1, fallback_kind="validation"
+        )
+        record = budget.records[0]
+        self.assertIsNone(record.prompt_tokens)
+        self.assertIsNone(record.output_tokens)
+        printed = budget.to_dict()["estimated_cost_usd"]
+        self.assertEqual(printed, 0.0)
+        self.assertEqual(str(printed), "0.0")
+
     def test_retries_each_count_as_calls_and_usd_cap_still_blocks(self) -> None:
         """Each failed attempt counts; refunds free the USD reserve so the cap still gates."""
         from pdf2ppt.layout_planner.budget import DEFAULT_WORST_CASE_CALL_COST_USD
