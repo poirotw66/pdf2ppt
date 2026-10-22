@@ -167,7 +167,7 @@ def detect_inferred_tables(
 
 
 def _expand_grid_to_supporting_fills(page: fitz.Page, grid: dict[str, Any]) -> dict[str, Any]:
-    """Widen an inferred grid to overlapping header-band / row-fill / rule extents."""
+    """Widen/tall-snap an inferred grid to header-band / row-fill / rule extents."""
 
     bbox: BBox = grid["bbox"]
     try:
@@ -175,7 +175,11 @@ def _expand_grid_to_supporting_fills(page: fitz.Page, grid: dict[str, Any]) -> d
     except Exception:  # noqa: BLE001
         return grid
     x0, x1 = bbox[0], bbox[2]
+    y0, y1 = bbox[1], bbox[3]
+    header_band: BBox | None = None
+    row_bands: list[BBox] = []
     expanded = False
+    first_row_h = float((grid.get("row_heights") or [40.0])[0])
     for path in drawings:
         rect = path.get("rect")
         if rect is None:
@@ -202,15 +206,43 @@ def _expand_grid_to_supporting_fills(page: fitz.Page, grid: dict[str, Any]) -> d
         if band[3] < bbox[1] - 2.0 or band[1] > bbox[3] + 2.0:
             continue
         if intersection_ratio(band, bbox) < 0.15 and not (
-            bbox[1] - 2.0 <= band[1] <= bbox[1] + (grid["row_heights"][0] if grid.get("row_heights") else 40.0)
+            bbox[1] - 2.0 <= band[1] <= bbox[1] + first_row_h
         ):
             continue
         x0 = min(x0, band[0])
         x1 = max(x1, band[2])
+        y0 = min(y0, band[1])
+        y1 = max(y1, band[3])
         expanded = True
-    if not expanded or (x0 >= bbox[0] - 0.5 and x1 <= bbox[2] + 0.5):
+        if is_band:
+            row_bands.append(band)
+            # Header band: topmost wide fill overlapping the first text row.
+            if band[1] <= bbox[1] + first_row_h and (header_band is None or band[1] < header_band[1]):
+                header_band = band
+    if not expanded:
         return grid
-    return _snap_column_widths_to_bbox(grid, (x0, bbox[1], x1, bbox[3]))
+
+    row_heights = [float(height) for height in (grid.get("row_heights") or [])]
+    if header_band is not None and row_heights:
+        y0 = float(header_band[1])
+        row_heights[0] = max(1.0, float(header_band[3] - header_band[1]))
+    if row_bands and row_heights and len(row_bands) >= len(row_heights):
+        # Prefer per-row band heights when a full zebra/header stack is present.
+        ordered = sorted(row_bands, key=lambda item: item[1])[: len(row_heights)]
+        row_heights = [max(1.0, band[3] - band[1]) for band in ordered]
+        y0 = float(ordered[0][1])
+        y1 = float(ordered[-1][3])
+    elif row_heights:
+        # Keep middle rows; stretch the last row so the table ends on the last rule/stripe.
+        used = sum(row_heights[:-1])
+        row_heights[-1] = max(1.0, y1 - y0 - used)
+        y1 = y0 + sum(row_heights)
+
+    grid = _snap_column_widths_to_bbox(grid, (x0, y0, x1, y1))
+    if row_heights:
+        grid["row_heights"] = row_heights
+        grid["bbox"] = (x0, y0, x1, y0 + sum(row_heights))
+    return grid
 
 
 def _collect_words(page: fitz.Page) -> list[_Word]:
@@ -611,7 +643,10 @@ def _iter_zebra_grid_candidates(
                 # Snap bbox / row heights to zebra bands when row counts match.
                 if grid["row_count"] == len(group):
                     grid = _snap_column_widths_to_bbox(dict(grid), bbox)
-                    grid["row_heights"] = [max(1.0, band.bbox[3] - band.bbox[1]) for band in group]
+                    row_heights = [max(1.0, band.bbox[3] - band.bbox[1]) for band in group]
+                    grid["row_heights"] = row_heights
+                    # Vertical snap: table top/bottom match the stripe stack exactly.
+                    grid["bbox"] = (bbox[0], bbox[1], bbox[2], bbox[1] + sum(row_heights))
                     grid["zebra_fills"] = [band.fill_color for band in group]
                 grids.append(grid)
             continue
@@ -627,9 +662,11 @@ def _iter_zebra_grid_candidates(
         if built is None:
             continue
         built = _snap_column_widths_to_bbox(built, bbox)
-        built["row_heights"] = [
+        row_heights = [
             max(1.0, band.bbox[3] - band.bbox[1]) for band in group[: int(built["row_count"])]
         ]
+        built["row_heights"] = row_heights
+        built["bbox"] = (bbox[0], bbox[1], bbox[2], bbox[1] + sum(row_heights))
         built["zebra_fills"] = [band.fill_color for band in group[: int(built["row_count"])]]
         grids.append(built)
     return _dedupe_grids(grids)

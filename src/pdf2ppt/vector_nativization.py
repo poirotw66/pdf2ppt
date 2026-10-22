@@ -283,6 +283,7 @@ def _raise_hairlines_above_borderless_tables(
             continue
         if not any(_bbox_center_inside(shape.bbox, table.bbox, padding=2.0) for table in borderless):
             continue
+        shape.render_above_tables = True
         shape.z_order = max_table_z + bump
         bump += 1
 

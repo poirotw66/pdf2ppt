@@ -350,6 +350,7 @@ class BorderlessAndZebraDetectionTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(hairlines), 8)
         # Must paint above the table so white body fills do not hide them.
+        self.assertTrue(all(shape.render_above_tables for shape in hairlines))
         self.assertTrue(all(shape.z_order > table.z_order for shape in hairlines))
         prs = Presentation(str(pptx_path))
         slide = prs.slides[0]
@@ -359,6 +360,73 @@ class BorderlessAndZebraDetectionTests(unittest.TestCase):
         rect_positions = [i for i, tag in enumerate(tags) if tag == "sp"]
         hairline_after = [pos for pos in rect_positions if pos > table_pos]
         self.assertGreaterEqual(len(hairline_after), 8)
+
+    def test_ir_without_table_z_order_keeps_table_on_top(self) -> None:
+        """SlideIR tables omitting z_order must still paint above later card shapes."""
+
+        import json
+
+        from pdf2ppt.ir_io import SLIDEIR_SCHEMA_VERSION
+        from pdf2ppt.pipeline import convert_from_ir
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-ir-noz-"))
+        ir_path = work / "deck.slideir.json"
+        pptx_path = work / "out.pptx"
+        # Minimal IR: grey cards wrap a table; no z_order on any element.
+        payload = {
+            "schema_version": SLIDEIR_SCHEMA_VERSION,
+            "slide_width_pt": 612.0,
+            "slide_height_pt": 792.0,
+            "pages": [
+                {
+                    "page_number": 1,
+                    "page_kind": "digital",
+                    "background_mode": "elements",
+                    "width_pt": 612.0,
+                    "height_pt": 792.0,
+                    "text_blocks": [],
+                    "shapes": [
+                        {
+                            "id": "card_under",
+                            "kind": "rect",
+                            "bbox": [40.0, 40.0, 400.0, 300.0],
+                            "fill_color": "#DDDDDD",
+                        },
+                        {
+                            "id": "card_over",
+                            "kind": "rect",
+                            "bbox": [60.0, 80.0, 380.0, 280.0],
+                            "fill_color": "#CCCCCC",
+                        },
+                    ],
+                    "tables": [
+                        {
+                            "id": "t1",
+                            "bbox": [80.0, 100.0, 360.0, 250.0],
+                            "row_count": 2,
+                            "col_count": 2,
+                            "column_widths": [140.0, 140.0],
+                            "row_heights": [40.0, 40.0],
+                            "cells": [
+                                {"row": 0, "col": 0, "text": "A"},
+                                {"row": 0, "col": 1, "text": "B"},
+                                {"row": 1, "col": 0, "text": "1"},
+                                {"row": 1, "col": 1, "text": "2"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        ir_path.write_text(json.dumps(payload), encoding="utf-8")
+        convert_from_ir(ir_path, pptx_path)
+        prs = Presentation(str(pptx_path))
+        tags = [child.tag.split("}")[-1] for child in prs.slides[0].shapes._spTree]  # noqa: SLF001
+        table_pos = next(i for i, tag in enumerate(tags) if tag == "graphicFrame")
+        # All non-table drawing shapes must precede the table (tables last).
+        shape_positions = [i for i, tag in enumerate(tags) if tag == "sp"]
+        self.assertTrue(shape_positions)
+        self.assertGreater(table_pos, max(shape_positions))
 
     def test_centred_columns_keep_centre_alignment(self) -> None:
         """Columns with stable text centres stay centred after band snap (H2)."""
@@ -412,6 +480,10 @@ class BorderlessAndZebraDetectionTests(unittest.TestCase):
         self.assertEqual(len(tables), 1)
         table = tables[0]
         self.assertEqual(table.col_count, 4)
+        # Vertical band snap: table top and header row match the 32pt stripe.
+        self.assertAlmostEqual(table.bbox[1], 80.0, delta=0.5)
+        self.assertAlmostEqual(table.row_heights[0], 32.0, delta=0.5)
+        self.assertAlmostEqual(table.row_heights[-1], 32.0, delta=0.5)
         expected_cx = [145.0, None, 530.0, 700.0]
         name_x = 295.5
         for col_index, expected in enumerate(expected_cx):

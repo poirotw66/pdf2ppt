@@ -577,6 +577,7 @@ def _deserialize_shape(payload: Any, *, page_index: int, shape_index: int) -> Sh
             drawing_index=_optional_int(payload.get("drawing_index")),
             is_page_background=bool(payload.get("is_page_background", False)),
             render_under_raster=bool(payload.get("render_under_raster", False)),
+            render_above_tables=bool(payload.get("render_above_tables", False)),
             arrow_direction=payload.get("arrow_direction"),
         )
     except (KeyError, TypeError, ValueError, SlideIrError) as error:
@@ -620,7 +621,9 @@ def _deserialize_table(payload: Any, *, page_index: int, table_index: int) -> Ta
             border_width=_optional_float(payload.get("border_width")),
             outer_border_width=_optional_float(payload.get("outer_border_width")),
             inner_border_width=_optional_float(payload.get("inner_border_width")),
-            z_order=int(payload.get("z_order", 0)),
+            # Missing z_order must still sit above typical shapes (main always
+            # drew tables last). Default 10000+index matches the PDF pipeline.
+            z_order=int(payload["z_order"]) if payload.get("z_order") is not None else 10_000 + table_index,
             provenance=str(payload.get("provenance") or "native_table"),
             confidence=float(payload.get("confidence", 0.9)),
             locked=bool(payload.get("locked", True)),
