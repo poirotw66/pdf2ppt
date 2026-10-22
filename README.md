@@ -108,12 +108,12 @@ the PDF pipeline. Schema: `src/pdf2ppt/schemas/slideir.schema.json`. I/O:
 | Deck | `slide_width_pt` / `slide_height_pt` | Slide size in PDF points |
 | Deck | `assets_dir` | Sibling asset directory name (default `{ir_filename}.assets`) |
 | Deck | `source` | Optional source path and page count |
-| Deck | `plan_metadata` | Optional; deck-level planner stats when the layout planner succeeds |
+| Deck | `plan_metadata` | Optional; written whenever `--layout-planner` is enabled (including when pages fall back) |
 | Page | `page_number` / `page_kind` / `background_mode` | Page index, digital/scanned/hybrid, background mode |
 | Page | `text_blocks` | Text boxes (`id`, `bbox`, `text`, style, `block_role`, `reading_order`, `paragraphs`, …) |
 | Page | `shapes` / `tables` / `images` | Native shapes, tables, image crops (images reference assets by relative path) |
 | Page | `layout_regions` | Layout regions |
-| Page | `groups` | Optional element groups (`id`, `member_ids`, optional `bbox`/`confidence`); filled by the layout planner for merge membership |
+| Page | `groups` | Optional element groups (`id`, `member_ids`, optional `bbox`/`confidence`); written only with `--layout-planner-apply-grouping` |
 | Page | `plan_metadata` | Optional per-page planner metadata (engine, model, accepted groups, …) |
 | Page | `background` | Optional background image asset ref |
 | Page | `reading_order` | Optional explicit element-id order |
@@ -125,16 +125,17 @@ deck.slideir.json
 deck.slideir.json.assets/
   pages/
     001/
-      background.jpg   # optional
+      background.png  # optional; .png/.jpg depending on image data
       image_000.png
 ```
 
 Treat emitted text as ground truth (`locked: true`). Prefer editing
 `block_role`, `reading_order`, and renderer-supported styles over rewriting
 strings; do not invent text or point assets outside `assets_dir`. With
-`--layout-planner gemini`, a successful plan writes `pages[].groups` and
-`plan_metadata` and applies roles, reading order, and paragraph merges into
-`text_blocks` before the IR is saved; `from-ir` renders the structures already
+`--layout-planner gemini`, a successful plan writes `pages[].plan_metadata`
+and applies block roles and reading order to `text_blocks` before the IR is
+saved. Paragraph merges and `pages[].groups` are written only with
+`--layout-planner-apply-grouping`. `from-ir` renders the structures already
 present in the IR.
 
 ### Export IR from a PDF
@@ -163,12 +164,17 @@ pdf2ppt --from-ir deck.slideir.json -o rebuilt.pptx
 
 HTTP (Review UI backend, default `http://127.0.0.1:8008`):
 
-| Endpoint | Behaviour |
+| Endpoint | Behavior |
 | --- | --- |
 | `POST /jobs/{id}/emit-ir` | Analysis → SlideIR only |
 | `GET /jobs/{id}/slideir.json` | Download IR JSON |
 | `GET /jobs/{id}/slideir-assets.zip` | Download assets directory as a zip |
 | `POST /from-ir` | Multipart: required `ir_file` + optional `assets_zip` → PPTX |
+
+`POST /jobs/{id}/emit-ir` needs a job created first via `POST /jobs` with a
+JSON body (`{}` is fine). IR downloaded from the API names its assets folder
+`output.slideir.json.assets`, so CLI `from-ir` users must unzip into a folder
+of that name (`POST /from-ir` handles it automatically).
 
 ```bash
 curl -o rebuilt.pptx \

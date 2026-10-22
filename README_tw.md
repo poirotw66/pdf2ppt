@@ -63,7 +63,7 @@ pdf2ppt input.pdf output.pptx --refine --refine-iters 2
 # 實驗性可選 Phase-3 VLM 版面規劃器（需 GEMINI_API_KEY；失敗時逐頁退回幾何啟發式）
 pdf2ppt input.pdf output.pptx --layout-planner gemini
 
-# Agent / SlideIR round-trip（先不產 PPTX，再用 from-ir 重建）
+# Agent / SlideIR round-trip（先不產生 PPTX，再用 from-ir 重建）
 pdf2ppt emit-ir input.pdf deck.slideir.json
 pdf2ppt from-ir deck.slideir.json rebuilt.pptx
 ```
@@ -97,13 +97,13 @@ SlideIR 是 pdf2ppt 的**版本化 JSON 中介表示**（schema `1.0`）。Agent
 | Deck | `slide_width_pt` / `slide_height_pt` | 投影片尺寸（PDF 點） |
 | Deck | `assets_dir` | 相對 IR 檔的資產目錄名（預設 `{ir_filename}.assets`） |
 | Deck | `source` | 可選來源路徑與頁數 |
-| Deck | `plan_metadata` | 可選；版面規劃器成功時寫入 deck 級統計 |
+| Deck | `plan_metadata` | 可選；只要啟用 `--layout-planner` 就會寫入（含頁面 fallback 時） |
 | Page | `page_number` / `page_kind` / `background_mode` | 頁碼、digital／scanned／hybrid、背景模式 |
 | Page | `text_blocks` | 文字框（`id`、`bbox`、`text`、樣式、`block_role`、`reading_order`、`paragraphs`…） |
 | Page | `shapes` / `tables` / `images` | 原生形狀、表格、圖片裁切（圖片以相對路徑參照資產） |
 | Page | `layout_regions` | 版面區域 |
-| Page | `groups` | 可選元素分組（`id`、`member_ids`、可選 `bbox`／`confidence`）；版面規劃器可填入合併成員關係 |
-| Page | `plan_metadata` | 可選頁級規劃器中繼資料（engine、model、accepted groups 等） |
+| Page | `groups` | 可選元素分組（`id`、`member_ids`、可選 `bbox`／`confidence`）；只有加上 `--layout-planner-apply-grouping` 時才會寫入 |
+| Page | `plan_metadata` | 可選頁面層級規劃器中繼資料（engine、model、accepted groups 等） |
 | Page | `background` | 可選背景圖資產參照 |
 | Page | `reading_order` | 可選的明確元素 id 順序 |
 
@@ -114,16 +114,16 @@ deck.slideir.json
 deck.slideir.json.assets/
   pages/
     001/
-      background.jpg   # 可選
+      background.png  # 可選；依影像資料可能是 .png／.jpg
       image_000.png
 ```
 
-文字在 emit 時視為 ground truth（`locked: true`）。編輯時優先改 `block_role`、`reading_order`、渲染器已支援的樣式；不要虛構文字或越出 `assets_dir` 的路徑。啟用 `--layout-planner gemini` 且成功時，pipeline 會寫入 `pages[].groups` 與 `plan_metadata`，並把角色、閱讀順序、段落合併等效果套用到 `text_blocks` 後再寫入 IR；`from-ir` 依 IR 內既有結構渲染 PPTX。
+文字在 emit 時視為 ground truth（`locked: true`）。編輯時優先改 `block_role`、`reading_order`、渲染器已支援的樣式；不要虛構文字，也不要讓資產路徑指向 `assets_dir` 以外。啟用 `--layout-planner gemini` 且成功時，pipeline 會寫入 `pages[].plan_metadata`，並把角色與閱讀順序套用到 `text_blocks` 後再寫入 IR；段落合併與 `pages[].groups` 只有加上 `--layout-planner-apply-grouping` 時才會產生。`from-ir` 依 IR 內既有結構渲染 PPTX。
 
 ### 從 PDF 匯出 IR
 
 ```bash
-# 只輸出 IR（不產 PPTX）
+# 只輸出 IR（不產生 PPTX）
 pdf2ppt emit-ir input.pdf deck.slideir.json
 # 等價寫法：
 pdf2ppt input.pdf --emit-ir deck.slideir.json --ir-only
@@ -137,7 +137,7 @@ pdf2ppt input.pdf output.pptx --emit-ir deck.slideir.json
 ### 編輯後重建 PPTX
 
 ```bash
-# 子命令
+# 子指令
 pdf2ppt from-ir deck.slideir.json rebuilt.pptx
 # 等價旗標寫法：
 pdf2ppt --from-ir deck.slideir.json -o rebuilt.pptx
@@ -151,6 +151,8 @@ HTTP（Review UI 後端，預設 `http://127.0.0.1:8008`）：
 | `GET /jobs/{id}/slideir.json` | 下載 IR JSON |
 | `GET /jobs/{id}/slideir-assets.zip` | 下載資產目錄 zip |
 | `POST /from-ir` | multipart：`ir_file`（必填）＋可選 `assets_zip` → 回傳 PPTX |
+
+`POST /jobs/{id}/emit-ir` 需先以 `POST /jobs` 建立 job（JSON body 可為 `{}`）。從 API 下載的 IR，其資產目錄名為 `output.slideir.json.assets`，因此若要用 CLI `from-ir`，必須解壓到同名資料夾（`POST /from-ir` 會自動處理）。
 
 ```bash
 curl -o rebuilt.pptx \

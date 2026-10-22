@@ -20,16 +20,19 @@ IR ⊆ what P1/P2 already render:
 | Pictures / crops | image elements + figure crops |
 | Layout regions | heuristic / PP-Structure |
 | Background mode + raster | overlay / full-page / elements |
-| Groups / `plan_metadata` | optional; populated by the experimental Phase-3 layout planner |
+| Groups / `plan_metadata` | optional; Phase-3 layout planner — see below |
 
 Text is treated as ground truth (`locked: true` on emit). Do not invent geometry
 the renderer cannot express yet.
 
-When `--layout-planner gemini` succeeds, pdf2ppt writes `pages[].groups` (merge
-membership) and `pages[].plan_metadata` / deck `plan_metadata`, and **renders**
-them: reading order → shape order, title roles → title placeholder styling,
-header/footer/page_number filtered per `--keep-header-footer`, paragraph groups
-→ merged text frames, font class → configured font family. See
+With `--layout-planner gemini`, a successful plan writes `pages[].plan_metadata`
+and applies block roles and reading order to `text_blocks` before the IR is
+saved (reading order → shape order, title roles → title placeholder styling,
+header/footer/page_number filtered per `--keep-header-footer`). Paragraph
+merges and `pages[].groups` are written only with
+`--layout-planner-apply-grouping`. Deck-level `plan_metadata` is written
+whenever `--layout-planner` is enabled (including when pages fall back). Font
+class → configured font family requires `--layout-planner-apply-fonts`. See
 [`layout-planner.md`](./layout-planner.md).
 
 ## Asset convention
@@ -41,14 +44,14 @@ deck.slideir.json
 deck.slideir.json.assets/
   pages/
     001/
-      background.jpg   # optional
+      background.png  # optional; .png/.jpg depending on image data
       image_000.png
 ```
 
 - `assets_dir` in the JSON names the sibling directory (default:
   `{ir_filename}.assets`, e.g. `deck.slideir.json.assets`).
 - Asset `path` values are relative to that directory (e.g.
-  `pages/001/background.jpg`).
+  `pages/001/background.png`).
 - Paths must not contain `..` or be absolute.
 
 ## CLI
@@ -73,7 +76,7 @@ apply to `emit-ir` the same way as `convert`.
 
 ## HTTP API (opt-in)
 
-| Endpoint | Behaviour |
+| Endpoint | Behavior |
 |----------|-----------|
 | `POST /jobs/{id}/convert` with `emit_ir` / `ir_only` | Same convert options; optionally write SlideIR |
 | `POST /jobs/{id}/emit-ir` | Analysis → SlideIR only (approved boxes optional) |
@@ -81,14 +84,21 @@ apply to `emit-ir` the same way as `convert`.
 | `GET /jobs/{id}/slideir-assets.zip` | Download the sibling assets directory as a zip |
 | `POST /from-ir` | Multipart: `ir_file` + optional `assets_zip` → PPTX download |
 
-Defaults leave existing convert behaviour unchanged.
+`POST /jobs/{id}/emit-ir` needs a job created first via `POST /jobs` with a
+JSON body (`{}` is fine). IR downloaded from the API names its assets folder
+`output.slideir.json.assets`, so CLI `from-ir` users must unzip into a folder
+of that name (`POST /from-ir` handles it automatically).
+
+Defaults leave existing convert behavior unchanged.
 
 ## Agent workflow
 
 1. `emit-ir` on a PDF → valid SlideIR + assets.
 2. Edit JSON (roles, reading order, styles the renderer already supports)
-   without rewriting text. `groups` / `plan_metadata` are written by the
-   experimental layout planner and are honoured on `from-ir` / convert render.
+   without rewriting text. Default `--layout-planner gemini` writes
+   `plan_metadata` and applies roles / reading order; paragraph merges and
+   `pages[].groups` require `--layout-planner-apply-grouping`. `from-ir`
+   renders the structures already present in the IR.
 3. `from-ir` → schema-valid PPTX via `ppt_render`.
 
 See `skills/pdf2ppt/SKILL.md` for a Codex/Claude-oriented skill pack.
