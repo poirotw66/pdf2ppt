@@ -185,9 +185,17 @@ def _expand_grid_to_supporting_fills(page: fitz.Page, grid: dict[str, Any]) -> d
         band = (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
         width = band[2] - band[0]
         height = band[3] - band[1]
-        # Wide short fills (header band / zebra stripe) or long hairline rules.
+        # Wide short fills (header band / zebra stripe) or long hairline rules
+        # (stroked lines or Word/Excel zero-height filled rects).
         is_band = fill is not None and height >= 8.0 and height <= 72.0 and width >= (bbox[2] - bbox[0]) * 0.85
-        is_rule = stroke is not None and height <= 3.0 and width >= (bbox[2] - bbox[0]) * 0.85
+        is_rule = (
+            (stroke is not None and height <= 3.0 and width >= (bbox[2] - bbox[0]) * 0.85)
+            or (
+                fill is not None
+                and min(width, height) <= 1.5
+                and max(width, height) >= (bbox[2] - bbox[0]) * 0.85
+            )
+        )
         if not (is_band or is_rule):
             continue
         # Vertically overlap the table (header band sits on the first row).
@@ -385,10 +393,36 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
             continue
         col_x0.append(min(word.x0 for word in col_words))
         col_x1.append(max(word.x1 for word in col_words))
+    # Detect centred columns from text geometry alone (before edges bias the vote):
+    # row text centres agree within ~1.5pt while left edges vary >=2pt.
+    column_aligns: list[str] = []
+    for col_index in range(col_count):
+        centres: list[float] = []
+        lefts: list[float] = []
+        for buckets in cell_words:
+            words_in_cell = buckets[col_index]
+            if not words_in_cell:
+                continue
+            text_x0 = min(word.x0 for word in words_in_cell)
+            text_x1 = max(word.x1 for word in words_in_cell)
+            centres.append((text_x0 + text_x1) / 2.0)
+            lefts.append(text_x0)
+        if (
+            len(centres) >= 2
+            and (max(centres) - min(centres)) <= 1.5
+            and (max(lefts) - min(lefts)) >= 2.0
+        ):
+            column_aligns.append("center")
+        else:
+            column_aligns.append("left")
+
     edges = [bbox[0]]
     for col_index in range(col_count - 1):
         gap_mid = (col_x1[col_index] + col_x0[col_index + 1]) / 2.0
-        # Prefer next-col left minus pad when the gap is wide (left-aligned grids).
+        # Centred columns need midpoint edges; left-aligned grids can hug next x0.
+        if column_aligns[col_index] == "center" or column_aligns[col_index + 1] == "center":
+            edges.append(gap_mid)
+            continue
         next_left_inset = col_x0[col_index + 1] - pad
         if next_left_inset > col_x1[col_index]:
             edges.append(max(col_x1[col_index], next_left_inset))
@@ -397,23 +431,43 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
     # Last column must fit the widest glyph run with left inset + slack.
     # Right inset is 0 for inferred tables (marR=0) so "Score" does not wrap.
     last_left = edges[-1] if edges else bbox[0]
-    last_left_inset = max(pad, col_x0[-1] - last_left) if col_x0 else pad
-    last_text_widths = [
-        max(word.x1 for word in buckets[-1]) - min(word.x0 for word in buckets[-1])
-        for buckets in cell_words
-        if buckets[-1]
-    ]
-    max_last_text = max(last_text_widths) if last_text_widths else max(0.0, col_x1[-1] - col_x0[-1])
-    # Extra slack beyond source metrics: PPT/LO fonts are often wider than PDF Helvetica.
-    needed_right = last_left + max_last_text + last_left_inset + 8.0
-    edges.append(max(bbox[2], needed_right, col_x1[-1] + last_left_inset + 8.0))
+    if column_aligns[-1] == "center":
+        # Symmetric slack around the widest centred run.
+        max_last_text = max(
+            (
+                max(word.x1 for word in buckets[-1]) - min(word.x0 for word in buckets[-1])
+                for buckets in cell_words
+                if buckets[-1]
+            ),
+            default=max(0.0, col_x1[-1] - col_x0[-1]),
+        )
+        col_cx = (col_x0[-1] + col_x1[-1]) / 2.0
+        needed_half = max_last_text / 2.0 + 8.0
+        needed_right = max(bbox[2], col_cx + needed_half, col_x1[-1] + 8.0)
+        # Also keep the left edge far enough left of the centre.
+        if col_cx - needed_half < last_left:
+            # Pull previous boundary left is awkward; extend right only and rely on centre align.
+            pass
+        edges.append(needed_right)
+    else:
+        last_left_inset = max(pad, col_x0[-1] - last_left) if col_x0 else pad
+        last_text_widths = [
+            max(word.x1 for word in buckets[-1]) - min(word.x0 for word in buckets[-1])
+            for buckets in cell_words
+            if buckets[-1]
+        ]
+        max_last_text = max(last_text_widths) if last_text_widths else max(0.0, col_x1[-1] - col_x0[-1])
+        # Extra slack beyond source metrics: PPT/LO fonts are often wider than PDF Helvetica.
+        needed_right = last_left + max_last_text + last_left_inset + 8.0
+        edges.append(max(bbox[2], needed_right, col_x1[-1] + last_left_inset + 8.0))
     if edges[-1] > bbox[2]:
         bbox = (bbox[0], bbox[1], edges[-1], bbox[3])
     column_widths = [max(1.0, edges[index + 1] - edges[index]) for index in range(col_count)]
 
-    # Majority horizontal alignment per column (avoids single-cell center/right).
-    column_aligns: list[str] = []
+    # Refine non-centred columns with cell-relative majority vote (right vs left).
     for col_index in range(col_count):
+        if column_aligns[col_index] == "center":
+            continue
         votes: list[str] = []
         cell_left = edges[col_index]
         cell_right = edges[col_index + 1]
@@ -426,16 +480,12 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
             text_x1 = max(word.x1 for word in words_in_cell)
             left_gap = text_x0 - cell_left
             right_gap = cell_right - text_x1
-            if abs(left_gap - right_gap) <= cell_width * 0.12 and left_gap > cell_width * 0.08:
-                votes.append("center")
-            elif right_gap < left_gap * 0.45 and right_gap < cell_width * 0.12:
+            if right_gap < left_gap * 0.45 and right_gap < cell_width * 0.12:
                 votes.append("right")
             else:
                 votes.append("left")
-        if not votes:
-            column_aligns.append("left")
-        else:
-            column_aligns.append(max(set(votes), key=votes.count))
+        if votes:
+            column_aligns[col_index] = max(set(votes), key=votes.count)
 
     # Use midpoints between successive row tops for interior boundaries.
     boundaries = [bbox[1]]

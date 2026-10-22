@@ -291,6 +291,116 @@ class BorderlessAndZebraDetectionTests(unittest.TestCase):
         self.assertEqual(score_cell.text.strip(), "Score")
         self.assertEqual(len(score_cell.text_frame.paragraphs), 1)
 
+    def test_header_band_hairline_row_rules_kept_as_shapes(self) -> None:
+        """Hairline grey row separators must survive borderless inference (H1)."""
+
+        def build(page: fitz.Page) -> None:
+            x0, y0, row_h = 100.0, 80.0, 28.0
+            col_x = [110.0, 280.0, 480.0, 650.0]
+            rows = [["ID", "Name", "Status", "Score"]] + [
+                [str(index), f"Item{index}", "OK", str(80 + index)] for index in range(1, 9)
+            ]
+            # Header band fill.
+            page.draw_rect(
+                fitz.Rect(x0, y0, x0 + 680, y0 + row_h),
+                color=None,
+                fill=(0.2, 0.35, 0.75),
+            )
+            for row_index, row in enumerate(rows):
+                for col_index, value in enumerate(row):
+                    color = (1, 1, 1) if row_index == 0 else (0.1, 0.1, 0.12)
+                    page.insert_text(
+                        fitz.Point(col_x[col_index], y0 + row_index * row_h + 18),
+                        value,
+                        fontsize=12,
+                        fontname="helv",
+                        color=color,
+                    )
+            # Eight thin grey filled-rect row separators under data rows (like Word hairlines).
+            for row_index in range(1, 9):
+                y = y0 + row_index * row_h
+                page.draw_rect(
+                    fitz.Rect(x0, y - 0.4, x0 + 680, y + 0.4),
+                    color=None,
+                    fill=(0.6, 0.6, 0.6),
+                )
+
+        path = _write_pdf(build)
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-hairline-"))
+        pptx_path = work / "out.pptx"
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=path,
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        self.assertTrue(report.pages[0].table_elements)
+        table = report.pages[0].table_elements[0]
+        self.assertEqual(table.border_width, 0.0)
+        # Hairlines kept as native shapes (not absorbed then cleared).
+        hairlines = [
+            shape
+            for shape in report.pages[0].shape_elements
+            if shape.fill_color
+            and abs((shape.bbox[3] - shape.bbox[1]) - 0.8) < 0.6
+            and (shape.bbox[2] - shape.bbox[0]) > 400
+        ]
+        self.assertGreaterEqual(len(hairlines), 8)
+
+    def test_centred_columns_keep_centre_alignment(self) -> None:
+        """Columns with stable text centres and varying left edges stay centred (H2)."""
+
+        def build(page: fitz.Page) -> None:
+            # Four columns; ID/Status/Score are centred on fixed centres, Name left.
+            centres = [90.0, None, 430.0, 610.0]
+            lefts = [None, 170.0, None, None]
+            rows = [
+                ["ID", "Name", "Status", "Score"],
+                ["1", "Alpha", "OK", "9"],
+                ["12", "BetaItem", "WAIT", "88"],
+                ["123", "Gamma", "OK", "100"],
+                ["7", "Delta", "HOLD", "42"],
+            ]
+            y0, row_h = 80.0, 30.0
+            for row_index, row in enumerate(rows):
+                for col_index, value in enumerate(row):
+                    width = fitz.get_text_length(value, fontsize=13, fontname="helv")
+                    if centres[col_index] is not None:
+                        x = float(centres[col_index]) - width / 2.0
+                    else:
+                        x = float(lefts[col_index])
+                    page.insert_text(
+                        fitz.Point(x, y0 + row_index * row_h + 18),
+                        value,
+                        fontsize=13,
+                        fontname="helv",
+                    )
+
+        path = _write_pdf(build)
+        with fitz.open(path) as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+        self.assertEqual(len(tables), 1)
+        table = tables[0]
+        self.assertEqual(table.col_count, 4)
+        by_col = {
+            cell.col: cell.horizontal_align
+            for cell in table.cells
+            if cell.row == 1
+        }
+        self.assertEqual(by_col[0], "center")
+        self.assertEqual(by_col[1], "left")
+        self.assertEqual(by_col[2], "center")
+        self.assertEqual(by_col[3], "center")
+        for col_index in (0, 2, 3):
+            cell = next(cell for cell in table.cells if cell.col == col_index and cell.row == 1)
+            self.assertIsNone(cell.margin_left)
+            self.assertIsNone(cell.margin_right)
+
     @unittest.skipUnless((FIXTURES_DIR / "zebra_borderless_table.pdf").exists(), "fixture missing")
     def test_zebra_column_text_stays_near_source(self) -> None:
         """Zebra snap must not proportionally scale inner columns (regression C2)."""

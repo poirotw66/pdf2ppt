@@ -161,6 +161,11 @@ def extract_vector_content(
 
     tables = extract_tables(page, text_blocks, page_number=page.number + 1)
     table_bboxes = [table.bbox for table in tables]
+    borderless_table_bboxes = [
+        table.bbox
+        for table in tables
+        if (table.border_width or 0) <= 0 and (table.inner_border_width or 0) <= 0
+    ]
     absorbed_ids: set[str] = set()
     for table in tables:
         for cell in table.cells:
@@ -200,7 +205,12 @@ def extract_vector_content(
         )
 
     for index, path in enumerate(drawings):
-        if _drawing_belongs_to_table(path, table_bboxes, page_area=page_area):
+        if _drawing_belongs_to_table(
+            path,
+            table_bboxes,
+            page_area=page_area,
+            borderless_table_bboxes=borderless_table_bboxes,
+        ):
             nativized_indices.append(index)
             continue
         shape = _path_to_shape(
@@ -453,7 +463,13 @@ def _point_xy(point: Any) -> tuple[float, float]:
     return (float(point.x), float(point.y))
 
 
-def _drawing_belongs_to_table(path: dict[str, Any], table_bboxes: list[BBox], *, page_area: float) -> bool:
+def _drawing_belongs_to_table(
+    path: dict[str, Any],
+    table_bboxes: list[BBox],
+    *,
+    page_area: float,
+    borderless_table_bboxes: list[BBox] | None = None,
+) -> bool:
     if not table_bboxes:
         return False
     rect = path.get("rect")
@@ -463,12 +479,40 @@ def _drawing_belongs_to_table(path: dict[str, Any], table_bboxes: list[BBox], *,
     # Never absorb a page-sized fill into a table.
     if bbox_area(bbox) / page_area >= PAGE_BACKGROUND_AREA_RATIO:
         return False
+    hairline = _is_hairline_rule_path(path, bbox)
     for table_bbox in table_bboxes:
-        if intersection_ratio(bbox, table_bbox) >= TABLE_DRAWING_CONTAINMENT_RATIO:
-            return True
-        # Horizontal/vertical rules often have zero area; test the segment midpoint.
-        if _bbox_center_inside(bbox, table_bbox, padding=1.0):
-            return True
+        inside = intersection_ratio(bbox, table_bbox) >= TABLE_DRAWING_CONTAINMENT_RATIO or _bbox_center_inside(
+            bbox, table_bbox, padding=1.0
+        )
+        if not inside:
+            continue
+        # Borderless inferred tables clear PPTX borders; keep hairline row/column
+        # separators as shapes so they are not dropped (b_header_band_fillrules).
+        if hairline and borderless_table_bboxes:
+            if any(
+                intersection_ratio(table_bbox, other) >= 0.9 or intersection_ratio(other, table_bbox) >= 0.9
+                for other in borderless_table_bboxes
+            ):
+                continue
+        return True
+    return False
+
+
+def _is_hairline_rule_path(path: dict[str, Any], bbox: BBox) -> bool:
+    """True for stroked thin rules or Word/Excel hairline filled-rect separators."""
+
+    width = abs(bbox[2] - bbox[0])
+    height = abs(bbox[3] - bbox[1])
+    short_side = min(width, height)
+    long_side = max(width, height)
+    path_type = path.get("type")
+    if path_type in {"s", "fs"}:
+        stroke_width = path.get("width")
+        if path.get("color") is None or stroke_width is None:
+            return False
+        return 0.0 < float(stroke_width) <= 2.0 and long_side >= HAIRLINE_RULE_MIN_LONG_PT
+    if path.get("fill") is not None and short_side <= HAIRLINE_RULE_MAX_SHORT_PT:
+        return long_side >= HAIRLINE_RULE_MIN_LONG_PT
     return False
 
 
