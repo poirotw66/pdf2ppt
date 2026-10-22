@@ -43,10 +43,14 @@ class LayoutPlannerError(RuntimeError):
         *,
         kind: str = "api_error",
         estimated_cost_usd: float = 0.0,
+        prompt_tokens: int | None = None,
+        output_tokens: int | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.estimated_cost_usd = estimated_cost_usd
+        self.prompt_tokens = prompt_tokens
+        self.output_tokens = output_tokens
 
 
 # Bound prompt size so one page cannot blow past the USD worst-case reserve.

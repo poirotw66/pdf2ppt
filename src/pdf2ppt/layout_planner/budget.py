@@ -74,6 +74,15 @@ def cost_from_usage_metadata(
     ) * output_usd_per_mtok
 
 
+def _clamp_printed_cost_usd(value: float, *, digits: int = 6) -> float:
+    """Round for reports and normalize ``-0.0`` / tiny float noise to ``0.0``."""
+
+    rounded = round(float(value), digits)
+    if rounded == 0.0:
+        return 0.0
+    return rounded
+
+
 @dataclass(slots=True)
 class LayoutPlannerCallRecord:
     model: str
@@ -193,6 +202,8 @@ class LayoutPlannerBudget:
                 else reserved
             )
             self.estimated_cost_usd += actual - reserved
+            if abs(self.estimated_cost_usd) < 1e-12:
+                self.estimated_cost_usd = 0.0
             # If actual exceeds remaining budget, still record it (already spent)
             # but open the circuit so no further calls are made.
             if self.estimated_cost_usd > self.max_cost_usd + 1e-9:
@@ -211,9 +222,9 @@ class LayoutPlannerBudget:
     def commit_failure(self, record: LayoutPlannerCallRecord) -> None:
         """Finalize a reserved failed HTTP call (still counts against max_calls).
 
-        Refunds unused worst-case reserve when no actual usage is known, so
-        reported cost is not overstated (charge flat ``DEFAULT_ESTIMATED_COST_USD``
-        unless the record carries a known positive actual).
+        Refunds unused worst-case reserve when no actual usage is known
+        (actual cost 0). When the failed response carried ``usageMetadata``,
+        reconcile to that known positive cost instead.
         """
 
         with self._lock:
@@ -221,8 +232,10 @@ class LayoutPlannerBudget:
             if record.estimated_cost_usd and record.estimated_cost_usd > 0:
                 actual = float(record.estimated_cost_usd)
             else:
-                actual = float(DEFAULT_ESTIMATED_COST_USD)
+                actual = 0.0
             self.estimated_cost_usd += actual - reserved
+            if abs(self.estimated_cost_usd) < 1e-12:
+                self.estimated_cost_usd = 0.0
             self.fallbacks += 1
             self.consecutive_failures += 1
             self.total_latency_ms += record.latency_ms
@@ -261,7 +274,8 @@ class LayoutPlannerBudget:
                 "http_attempts": self.http_attempts,
                 "cache_hits": self.cache_hits,
                 "fallbacks": self.fallbacks,
-                "estimated_cost_usd": round(self.estimated_cost_usd, 6),
+                # Clamp so float noise after reserve/refund never prints as -0.0.
+                "estimated_cost_usd": _clamp_printed_cost_usd(self.estimated_cost_usd),
                 "total_latency_ms": round(self.total_latency_ms, 3),
                 "consecutive_failures": self.consecutive_failures,
                 "circuit_open": self.circuit_open,
@@ -273,7 +287,7 @@ class LayoutPlannerBudget:
                         "cache_hit": record.cache_hit,
                         "success": record.success,
                         "latency_ms": round(record.latency_ms, 3),
-                        "estimated_cost_usd": record.estimated_cost_usd,
+                        "estimated_cost_usd": _clamp_printed_cost_usd(record.estimated_cost_usd),
                         "reserved_cost_usd": record.reserved_cost_usd,
                         "prompt_tokens": record.prompt_tokens,
                         "output_tokens": record.output_tokens,

@@ -234,7 +234,7 @@ class LayoutPlannerService:
             timeout_s=max(1.0, float(getattr(self._planner, "_timeout_s", 45.0)))
         )
         if not acquired:
-            # Reservation already counted; treat as a failed attempt.
+            # Reservation already counted; no HTTP spend — refund reserve.
             self._budget.commit_failure(
                 LayoutPlannerCallRecord(
                     model=self.model,
@@ -242,7 +242,7 @@ class LayoutPlannerService:
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=worst_case,
+                    estimated_cost_usd=0.0,
                     note="concurrency slot timeout",
                     fallback_kind="timeout",
                 )
@@ -265,7 +265,7 @@ class LayoutPlannerService:
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=worst_case,
+                    estimated_cost_usd=0.0,
                     note=str(error),
                     fallback_kind="timeout",
                 )
@@ -275,7 +275,10 @@ class LayoutPlannerService:
             kind = getattr(error, "kind", "validation")
             if isinstance(error, LayoutPlanValidationError):
                 kind = "validation"
-            cost = float(getattr(error, "estimated_cost_usd", 0.0) or worst_case)
+            # Real usage when the failed response carried usageMetadata; else 0
+            # so commit_failure refunds the worst-case reserve (do not pass
+            # the reserve itself — that would book it as known spend).
+            cost = float(getattr(error, "estimated_cost_usd", 0.0) or 0.0)
             self._budget.commit_failure(
                 LayoutPlannerCallRecord(
                     model=self.model,
@@ -286,6 +289,8 @@ class LayoutPlannerService:
                     estimated_cost_usd=cost,
                     note=str(error),
                     fallback_kind=str(kind),
+                    prompt_tokens=getattr(error, "prompt_tokens", None),
+                    output_tokens=getattr(error, "output_tokens", None),
                 )
             )
             return None
@@ -298,7 +303,7 @@ class LayoutPlannerService:
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=worst_case,
+                    estimated_cost_usd=0.0,
                     note=str(error),
                     fallback_kind="api_error",
                 )
