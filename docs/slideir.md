@@ -27,13 +27,13 @@ the renderer cannot express yet.
 
 With `--layout-planner gemini`, a successful plan writes `pages[].plan_metadata`
 and applies block roles and reading order to `text_blocks` before the IR is
-saved (reading order → shape order, title roles → title placeholder styling,
-header/footer/page_number filtered per `--keep-header-footer`). Paragraph
-merges and `pages[].groups` are written only with
-`--layout-planner-apply-grouping`. Deck-level `plan_metadata` is written
-whenever `--layout-planner` is enabled (including when pages fall back). Font
-class → configured font family requires `--layout-planner-apply-fonts`. See
-[`layout-planner.md`](./layout-planner.md).
+saved (reading order → shape order, title roles → title placeholder styling).
+OCR header/footer/page_number blocks are filtered per `--keep-header-footer`;
+native text blocks are kept with their role. Paragraph merges and
+`pages[].groups` are written only with `--layout-planner-apply-grouping`.
+Deck-level `plan_metadata` is written whenever `--layout-planner` is enabled
+(including when pages fall back). Font class → configured font family requires
+`--layout-planner-apply-fonts`. See [`layout-planner.md`](./layout-planner.md).
 
 ## Asset convention
 
@@ -84,10 +84,11 @@ apply to `emit-ir` the same way as `convert`.
 | `GET /jobs/{id}/slideir-assets.zip` | Download the sibling assets directory as a zip |
 | `POST /from-ir` | Multipart: `ir_file` + optional `assets_zip` → PPTX download |
 
-`POST /jobs/{id}/emit-ir` needs a job created first via `POST /jobs` with a
-JSON body (`{}` is fine). IR downloaded from the API names its assets folder
-`output.slideir.json.assets`, so CLI `from-ir` users must unzip into a folder
-of that name (`POST /from-ir` handles it automatically).
+Create the job first with `POST /jobs` (multipart file upload);
+`POST /jobs/{id}/emit-ir` then takes a JSON body (`{}` for defaults). IR
+downloaded from the API names its assets folder `output.slideir.json.assets`,
+so CLI `from-ir` users must unzip into a folder of that name
+(`POST /from-ir` handles it automatically).
 
 Defaults leave existing convert behavior unchanged.
 

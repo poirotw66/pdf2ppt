@@ -171,10 +171,11 @@ HTTP (Review UI backend, default `http://127.0.0.1:8008`):
 | `GET /jobs/{id}/slideir-assets.zip` | Download assets directory as a zip |
 | `POST /from-ir` | Multipart: required `ir_file` + optional `assets_zip` → PPTX |
 
-`POST /jobs/{id}/emit-ir` needs a job created first via `POST /jobs` with a
-JSON body (`{}` is fine). IR downloaded from the API names its assets folder
-`output.slideir.json.assets`, so CLI `from-ir` users must unzip into a folder
-of that name (`POST /from-ir` handles it automatically).
+Create the job first with `POST /jobs` (multipart file upload);
+`POST /jobs/{id}/emit-ir` then takes a JSON body (`{}` for defaults). IR
+downloaded from the API names its assets folder `output.slideir.json.assets`,
+so CLI `from-ir` users must unzip into a folder of that name
+(`POST /from-ir` handles it automatically).
 
 ```bash
 curl -o rebuilt.pptx \

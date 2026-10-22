@@ -152,7 +152,7 @@ HTTP（Review UI 後端，預設 `http://127.0.0.1:8008`）：
 | `GET /jobs/{id}/slideir-assets.zip` | 下載資產目錄 zip |
 | `POST /from-ir` | multipart：`ir_file`（必填）＋可選 `assets_zip` → 回傳 PPTX |
 
-`POST /jobs/{id}/emit-ir` 需先以 `POST /jobs` 建立 job（JSON body 可為 `{}`）。從 API 下載的 IR，其資產目錄名為 `output.slideir.json.assets`，因此若要用 CLI `from-ir`，必須解壓到同名資料夾（`POST /from-ir` 會自動處理）。
+請先以 `POST /jobs`（multipart 上傳 PDF）建立 job；接著 `POST /jobs/{id}/emit-ir` 接受 JSON body（`{}` 即使用預設）。從 API 下載的 IR，其資產目錄名為 `output.slideir.json.assets`，因此若要用 CLI `from-ir`，必須解壓到同名資料夾（`POST /from-ir` 會自動處理）。
 
 ```bash
 curl -o rebuilt.pptx \
