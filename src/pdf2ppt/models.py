@@ -137,6 +137,8 @@ class ShapeElement:
     # Opaque fill kept in the page raster (photo painted after it) must sit under
     # that raster in PPTX. Distinct from is_page_background (≥95% page fills).
     render_under_raster: bool = False
+    # Hairline row/column rules that must paint above a borderless inferred table.
+    render_above_tables: bool = False
     arrow_direction: ArrowDirection | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -160,6 +162,10 @@ class TableCell:
     # "top" | "middle" | "bottom"
     vertical_anchor: str = "middle"
     text_block_ids: list[str] = field(default_factory=list)
+    # Measured source insets (pt). None → leave PowerPoint cell margin defaults.
+    margin_left: float | None = None
+    margin_right: float | None = None
+    margin_top: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

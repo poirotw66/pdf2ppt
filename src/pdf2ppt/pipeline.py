@@ -121,6 +121,7 @@ from .vector_nativization import (
     extract_vector_content,
     filter_text_blocks_outside_tables,
     remaining_visuals_after_nativization,
+    transparent_table_text_mask_blocks,
 )
 
 logger = logging.getLogger(__name__)
@@ -516,7 +517,7 @@ def analyze_page(
         page_kind=page_kind,
     )
     for table in vector_result.tables:
-        apply_cell_fills(table, page)
+        apply_cell_fills(table, page, image_boxes=image_boxes)
     text_blocks = filter_text_blocks_outside_tables(text_blocks, vector_result.absorbed_text_block_ids)
 
     # P2 layout analysis: group lines, bullets, titles, figures; skip headers/footers.
@@ -720,8 +721,19 @@ def analyze_page(
             background_render_started_at = perf_counter()
             background_image = render_page_image(page, dpi=effective_background_render_dpi)
             background_render_seconds += perf_counter() - background_render_started_at
-        if background_mode == "overlay" and text_blocks:
-            mask_blocks = [block for block in text_blocks if block.source == "ocr"] or text_blocks
+        # Transparent tables over photos keep the raster underlay; still inpaint
+        # absorbed cell glyphs. Compute masks first so pages whose text was fully
+        # absorbed into opaque tables do not enter overlay solely for watermark
+        # fallback (grey smudge on otherwise clean whites).
+        table_word_masks = transparent_table_text_mask_blocks(
+            vector_result.tables,
+            page,
+            image_boxes,
+        )
+        if background_mode == "overlay" and (text_blocks or table_word_masks):
+            mask_blocks = [block for block in text_blocks if block.source == "ocr"] or list(text_blocks)
+            if table_word_masks:
+                mask_blocks = [*mask_blocks, *table_word_masks]
             mask_blocks = append_notebooklm_watermark_mask_blocks(
                 mask_blocks,
                 notebooklm_watermark_blocks,
@@ -753,6 +765,7 @@ def analyze_page(
                 vector_result.shapes,
                 [table.bbox for table in vector_result.tables],
                 image_boxes=image_boxes,
+                tables=vector_result.tables,
             )
             if erase_regions:
                 fill_color = resolve_erase_fill_color(vector_result.shapes, background_image)

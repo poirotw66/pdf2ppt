@@ -163,6 +163,10 @@
           "type": "boolean",
           "description": "Opaque fill painted before an overlapping picture; PPTX places it under the page raster without treating it as the page background."
         },
+        "render_above_tables": {
+          "type": "boolean",
+          "description": "Hairline row/column rules that must paint after native tables in the slide tree."
+        },
         "arrow_direction": {
           "anyOf": [
             { "type": "string", "enum": ["left", "right", "up", "down"] },

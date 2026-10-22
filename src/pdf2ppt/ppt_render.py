@@ -103,8 +103,16 @@ def render_page_to_slide(
         background_elements.append(background_picture._element)  # noqa: SLF001
 
     # Foreground shapes and cropped pictures follow PDF paint order via z_order.
+    # Tables stay last (main behaviour) so SlideIR without z_order cannot hide
+    # under later cards; hairlines marked render_above_tables are drawn after.
+    above_table_shapes = [
+        shape for shape in foreground_shapes if bool(getattr(shape, "render_above_tables", False))
+    ]
+    layered_shapes = [
+        shape for shape in foreground_shapes if not bool(getattr(shape, "render_above_tables", False))
+    ]
     layered_items: list[tuple[int, int, str, Any]] = []
-    for index, shape in enumerate(foreground_shapes):
+    for index, shape in enumerate(layered_shapes):
         layered_items.append((int(shape.z_order), index, "shape", shape))
     for index, image_element in enumerate(page_result.image_elements or []):
         image_z = int(getattr(image_element, "z_order", 0) or 0)
@@ -124,6 +132,9 @@ def render_page_to_slide(
 
     for table in sorted(getattr(page_result, "table_elements", None) or [], key=lambda item: item.z_order):
         add_table_element(slide, table, scale_x=scale_x, scale_y=scale_y)
+
+    for shape in sorted(above_table_shapes, key=lambda item: item.z_order):
+        add_shape_element(slide, shape, scale_x=scale_x, scale_y=scale_y)
 
     if title_block is not None and slide.shapes.title is not None:
         _apply_title_placeholder(
@@ -391,7 +402,9 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
     for cell in table.cells:
         ppt_cell = ppt_table.cell(cell.row, cell.col)
         # Borders before fills so tcPr child order matches ECMA-376.
-        if table.border_color:
+        # Borderless inferred tables must clear python-pptx defaults or white
+        # vertical rules appear on dark header fills the source never had.
+        if table.border_color and (table.border_width or 0) > 0:
             _set_cell_borders(
                 ppt_cell,
                 table.border_color,
@@ -405,6 +418,8 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
                 outer_width=table.outer_border_width,
                 inner_width=table.inner_border_width,
             )
+        elif (table.border_width or 0) <= 0 and (table.inner_border_width or 0) <= 0:
+            _clear_cell_borders(ppt_cell)
         if cell.fill_color:
             try:
                 ppt_cell.fill.solid()
@@ -415,6 +430,19 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
             ppt_cell.fill.background()
         # python-pptx may append fills in an arbitrary position; normalize order.
         _normalize_tcpr_child_order(ppt_cell)
+
+        # Apply measured source insets when known; otherwise keep Office defaults
+        # (~0.1") so ruled tables are not flush to borders. Centred cells leave
+        # marL/marR unset so the default pair stays symmetric.
+        try:
+            if cell.margin_left is not None:
+                ppt_cell.margin_left = Pt(max(0.0, float(cell.margin_left)))
+            if cell.margin_right is not None:
+                ppt_cell.margin_right = Pt(max(0.0, float(cell.margin_right)))
+            if cell.margin_top is not None and cell.vertical_anchor == "top":
+                ppt_cell.margin_top = Pt(max(0.0, float(cell.margin_top)))
+        except (AttributeError, TypeError, ValueError):
+            pass
 
         ppt_cell.text = cell.text
         ppt_cell.vertical_anchor = _resolve_table_vertical_anchor(cell.vertical_anchor)
@@ -553,6 +581,24 @@ def _set_cell_borders(
             _insert_tcpr_border(tc_pr, line)
     except Exception:  # noqa: BLE001
         logger.debug("Could not set cell borders", exc_info=True)
+
+
+def _clear_cell_borders(cell: Any) -> None:
+    """Remove default python-pptx cell borders (noFill, zero width)."""
+
+    try:
+        tc = cell._tc  # noqa: SLF001
+        tc_pr = tc.get_or_add_tcPr()
+        for edge in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
+            for child in list(tc_pr):
+                if child.tag == qn(edge):
+                    tc_pr.remove(child)
+            line = OxmlElement(edge)
+            line.set("w", "0")
+            line.append(OxmlElement("a:noFill"))
+            _insert_tcpr_border(tc_pr, line)
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not clear cell borders", exc_info=True)
 
 
 def _insert_tcpr_border(tc_pr: Any, line: Any) -> None:
