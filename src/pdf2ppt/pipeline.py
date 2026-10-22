@@ -118,10 +118,10 @@ from .text_style import (
 )
 from .vector_nativization import (
     apply_cell_fills,
-    transparent_table_text_mask_blocks,
     extract_vector_content,
     filter_text_blocks_outside_tables,
     remaining_visuals_after_nativization,
+    transparent_table_text_mask_blocks,
 )
 
 logger = logging.getLogger(__name__)
