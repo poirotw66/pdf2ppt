@@ -938,6 +938,195 @@ def build_mixed_cjk_en() -> None:
     _save(doc, "mixed_cjk_en.pdf")
 
 
+def build_borderless_table() -> None:
+    """Aligned text columns/rows with no stroked rules (inferred native table)."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1))
+    page.insert_textbox(
+        fitz.Rect(48, 28, 700, 70),
+        "Borderless headcount",
+        fontsize=22,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    rows = [
+        ["Name", "Dept", "Score"],
+        ["Alice", "Eng", "92"],
+        ["Bob", "Sales", "88"],
+        ["Carol", "Ops", "95"],
+        ["Dan", "HR", "91"],
+        ["Eve", "Eng", "87"],
+    ]
+    col_x = [80.0, 300.0, 520.0]
+    y0, row_h = 100.0, 30.0
+    for row_index, row in enumerate(rows):
+        for col_index, value in enumerate(row):
+            page.insert_text(
+                fitz.Point(col_x[col_index], y0 + row_index * row_h + 18),
+                value,
+                fontsize=14,
+                fontname="helv",
+                color=(0.1, 0.1, 0.12),
+            )
+    page.insert_textbox(
+        fitz.Rect(48, 320, 880, 480),
+        "Caption copy keeps native character coverage high for digital classification "
+        "while the headcount grid stays a borderless inferred table.",
+        fontsize=12,
+        fontname="helv",
+        color=(0.2, 0.2, 0.25),
+    )
+    _save(doc, "borderless_table.pdf")
+
+
+def build_zebra_borderless_table() -> None:
+    """Alternating filled row rects without stroked gridlines."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(0.97, 0.96, 0.94))
+    page.insert_textbox(
+        fitz.Rect(48, 24, 700, 64),
+        "Zebra status board",
+        fontsize=22,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    rows = [["ID", "Name", "Status", "Score"]] + [
+        [str(index), f"Item {index}", "OK" if index % 2 else "WAIT", str(80 + index)]
+        for index in range(1, 7)
+    ]
+    col_widths = [90.0, 260.0, 180.0, 140.0]
+    x0, y0, row_h = 70.0, 90.0, 32.0
+    for row_index, row in enumerate(rows):
+        if row_index == 0:
+            fill = (0.2, 0.2, 0.25)
+        elif row_index % 2:
+            fill = (0.9, 0.94, 1.0)
+        else:
+            fill = (1.0, 1.0, 1.0)
+        page.draw_rect(
+            fitz.Rect(x0, y0 + row_index * row_h, x0 + sum(col_widths), y0 + (row_index + 1) * row_h),
+            color=None,
+            fill=fill,
+        )
+        x = x0
+        for col_index, value in enumerate(row):
+            page.insert_text(
+                fitz.Point(x + 10, y0 + row_index * row_h + 22),
+                value,
+                fontsize=13,
+                fontname="helv",
+                color=(1, 1, 1) if row_index == 0 else (0.05, 0.05, 0.08),
+            )
+            x += col_widths[col_index]
+    page.insert_textbox(
+        fitz.Rect(48, 340, 880, 500),
+        "Extra caption text so native character coverage keeps this page digital for CI "
+        "without PaddleOCR while zebra stripes stay vector fills on an inferred table.",
+        fontsize=12,
+        fontname="helv",
+        color=(0.15, 0.15, 0.2),
+    )
+    _save(doc, "zebra_borderless_table.pdf")
+
+
+def build_table_over_photo() -> None:
+    """Ruled transparent table drawn on top of a photo (not full-bleed).
+
+    The photo is sized under the 0.75 image-area digital threshold so CI can
+    convert without OCR while still exercising transparent cells over imagery.
+    """
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(0.98, 0.98, 0.99))
+    photo = fitz.Rect(80, 70, 720, 340)
+    texture = synthetic_photo_texture((int(photo.width), int(photo.height)), seed=19)
+    buffer = io.BytesIO()
+    Image.fromarray(texture, mode="RGB").save(buffer, format="JPEG", quality=78, optimize=True)
+    page.insert_image(photo, stream=buffer.getvalue())
+    x0, y0 = 120.0, 110.0
+    col_widths = [160.0, 160.0, 160.0]
+    row_h = 36.0
+    rows = [
+        ["Region", "Q1", "Q2"],
+        ["North", "12", "15"],
+        ["South", "9", "11"],
+        ["East", "14", "13"],
+    ]
+    table_w = sum(col_widths)
+    table_h = len(rows) * row_h
+    page.draw_rect(fitz.Rect(x0, y0, x0 + table_w, y0 + table_h), color=(1, 1, 1), width=1.5)
+    for row_index in range(1, len(rows)):
+        y = y0 + row_index * row_h
+        page.draw_line(fitz.Point(x0, y), fitz.Point(x0 + table_w, y), color=(1, 1, 1), width=1)
+    x = x0
+    for width in col_widths[:-1]:
+        x += width
+        page.draw_line(fitz.Point(x, y0), fitz.Point(x, y0 + table_h), color=(1, 1, 1), width=1)
+    for row_index, row in enumerate(rows):
+        x = x0
+        for col_index, value in enumerate(row):
+            page.insert_text(
+                fitz.Point(x + 12, y0 + row_index * row_h + 24),
+                value,
+                fontsize=14,
+                fontname="helv",
+                color=(1, 1, 1),
+            )
+            x += col_widths[col_index]
+    page.insert_textbox(
+        fitz.Rect(48, 360, 880, 520),
+        "Body copy beside the photo-backed grid keeps native text coverage high enough "
+        "for digital classification while table cells stay transparent over the photo. "
+        "Stakeholders expect a concise summary before the offsite meeting begins.",
+        fontsize=12,
+        fontname="helv",
+        color=(0.15, 0.15, 0.2),
+    )
+    _save(doc, "table_over_photo.pdf")
+
+
+def build_form_tall_empty_cell() -> None:
+    """Form with a large empty notes cell and top-aligned text in the tall neighbour."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1))
+    page.insert_textbox(
+        fitz.Rect(40, 16, 700, 48),
+        "Review form",
+        fontsize=20,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    page.draw_rect(fitz.Rect(40, 60, 920, 500), color=(0, 0, 0), width=1.5)
+    page.draw_line(fitz.Point(40, 110), fitz.Point(920, 110), color=(0, 0, 0), width=1)
+    page.draw_line(fitz.Point(220, 60), fitz.Point(220, 500), color=(0, 0, 0), width=1)
+    page.insert_text(fitz.Point(52, 92), "Label", fontsize=14, fontname="helv")
+    page.insert_text(fitz.Point(236, 92), "Value", fontsize=14, fontname="helv")
+    # Tall right cell: text near the top (must not vertically centre in PPTX).
+    page.insert_text(
+        fitz.Point(236, 140),
+        "Comment near top of tall cell",
+        fontsize=14,
+        fontname="helv",
+    )
+    page.insert_textbox(
+        fitz.Rect(48, 140, 210, 480),
+        "",
+        fontsize=12,
+        fontname="helv",
+    )
+    page.insert_textbox(
+        fitz.Rect(40, 510, 900, 535),
+        "Footer caption keeps digital coverage without inventing phantom table rows.",
+        fontsize=11,
+        fontname="helv",
+        color=(0.25, 0.25, 0.3),
+    )
+    _save(doc, "form_tall_empty_cell.pdf")
+
+
 def main() -> None:
     build_solid_background()
     build_gradient_linear()
@@ -959,6 +1148,10 @@ def main() -> None:
     build_mixed_cjk_en()
     build_agenda_numbered_list()
     build_cjk_paragraph()
+    build_borderless_table()
+    build_zebra_borderless_table()
+    build_table_over_photo()
+    build_form_tall_empty_cell()
 
 
 if __name__ == "__main__":

@@ -493,20 +493,29 @@ def regions_for_background_erase(
     table_bboxes: list[BBox],
     *,
     image_boxes: list[BBox] | None = None,
+    tables: list[Any] | None = None,
 ) -> list[BBox]:
     """Regions that must disappear from a raster background.
 
     Only opaque filled shapes that do not sit on / cover embedded images are
-    erased. Page-background fills are skipped. Tables are always erased (their
-    grid is fully replaced by a native table).
+    erased. Page-background fills are skipped. Tables with opaque cell fills
+    are erased; transparent tables over photos are kept so the image shows
+    through native cells (``table_should_erase_background``).
     """
+
+    from .vector_nativization import table_should_erase_background
 
     regions = [
         shape.bbox
         for shape in shapes
         if shape_should_erase_background(shape, image_boxes=image_boxes)
     ]
-    regions.extend(table_bboxes)
+    if tables:
+        for table in tables:
+            if table_should_erase_background(table, image_boxes):
+                regions.append(table.bbox)
+    else:
+        regions.extend(table_bboxes)
     return regions
 
 

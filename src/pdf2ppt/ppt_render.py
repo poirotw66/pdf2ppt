@@ -416,6 +416,16 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
         # python-pptx may append fills in an arbitrary position; normalize order.
         _normalize_tcpr_child_order(ppt_cell)
 
+        # Zero default Office cell margins so text anchors to the PDF cell edges
+        # (large empty form cells otherwise shift neighbouring glyphs).
+        try:
+            ppt_cell.margin_left = Emu(0)
+            ppt_cell.margin_right = Emu(0)
+            ppt_cell.margin_top = Emu(0)
+            ppt_cell.margin_bottom = Emu(0)
+        except (AttributeError, TypeError, ValueError):
+            pass
+
         ppt_cell.text = cell.text
         ppt_cell.vertical_anchor = _resolve_table_vertical_anchor(cell.vertical_anchor)
         font_color = cell.font_color or "#1A1A1A"

@@ -253,7 +253,12 @@ def extract_tables(
     *,
     page_number: int,
 ) -> list[TableElement]:
-    """Detect ruled tables and map cell text / style from native text blocks."""
+    """Detect ruled tables plus borderless / zebra grids from aligned text.
+
+    Ruled grids come from PyMuPDF ``find_tables()``. Borderless column-aligned
+    text and alternating row-fill (zebra) tables are recovered by
+    :mod:`pdf2ppt.table_detection` when they do not overlap a ruled hit.
+    """
 
     finder = None
     for kwargs in ({"refine": True}, {}):
@@ -266,22 +271,32 @@ def extract_tables(
             logger.debug("find_tables(%s) failed on page %s: %s", kwargs, page_number, error)
             finder = None
             break
-    if finder is None:
-        return []
 
     span_index = _collect_page_spans(page)
     tables: list[TableElement] = []
-    for table_index, table in enumerate(getattr(finder, "tables", []) or []):
-        element = _table_to_element(
-            table,
-            text_blocks=text_blocks,
-            page_number=page_number,
-            table_index=table_index,
-            span_index=span_index,
-            page=page,
-        )
-        if element is not None:
-            tables.append(element)
+    if finder is not None:
+        for table_index, table in enumerate(getattr(finder, "tables", []) or []):
+            element = _table_to_element(
+                table,
+                text_blocks=text_blocks,
+                page_number=page_number,
+                table_index=table_index,
+                span_index=span_index,
+                page=page,
+            )
+            if element is not None:
+                tables.append(element)
+
+    # Borderless / zebra fallback (lazy import avoids import cycle).
+    from .table_detection import detect_inferred_tables
+
+    inferred = detect_inferred_tables(
+        page,
+        text_blocks,
+        page_number=page_number,
+        existing_table_bboxes=[table.bbox for table in tables],
+    )
+    tables.extend(inferred)
     return tables
 
 
@@ -890,7 +905,8 @@ def _is_spurious_table_candidate(
 
     * the candidate has ``<= max_cells`` cells and covers ``>= page_ratio`` of the
       page (side-by-side page fills misread as a 1×2 table), or
-    * the grid is derived only from fill edges (no stroked rules near the bbox).
+    * the grid is derived only from fill edges (no stroked rules near the bbox)
+      **and** there is no alternating zebra row-fill stack to justify it.
     """
 
     if page_area <= 0 or not cells:
@@ -898,9 +914,47 @@ def _is_spurious_table_candidate(
     covers_page = bbox_area(table_bbox) / page_area >= page_ratio
     if len(cells) <= max_cells and covers_page:
         return True
-    if not _table_has_stroked_rules(page, table_bbox):
-        return True
-    return False
+    if _table_has_stroked_rules(page, table_bbox):
+        return False
+    if _table_has_zebra_row_fills(page, table_bbox):
+        return False
+    return True
+
+
+def _table_has_zebra_row_fills(page: fitz.Page, table_bbox: BBox) -> bool:
+    """True when stacked wide fills under ``table_bbox`` alternate colours."""
+
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001
+        return False
+    bands: list[tuple[BBox, str]] = []
+    for path in drawings:
+        fill = path.get("fill")
+        if fill is None:
+            continue
+        fill_hex = rgb_tuple_to_hex(fill)
+        if fill_hex is None:
+            continue
+        rect = path.get("rect")
+        if rect is None:
+            continue
+        line_bbox = _rect_to_bbox(rect)
+        if intersection_ratio(line_bbox, table_bbox) < 0.5:
+            continue
+        width = abs(line_bbox[2] - line_bbox[0])
+        height = abs(line_bbox[3] - line_bbox[1])
+        if height < 10.0 or height > 64.0 or width < height * 2.5:
+            continue
+        bands.append((line_bbox, fill_hex))
+    if len(bands) < 3:
+        return False
+    bands.sort(key=lambda item: item[0][1])
+    colors = [color for _, color in bands]
+    if len(set(colors)) < 2:
+        return False
+    alternations = sum(1 for left, right in zip(colors, colors[1:]) if left != right)
+    return alternations >= max(1, len(bands) - 2)
 
 
 def _table_has_stroked_rules(page: fitz.Page, table_bbox: BBox, *, pad: float = 2.0) -> bool:
@@ -1120,14 +1174,23 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
     else:
         horizontal_align = "left"
 
-    # Ruled table cells are usually vertically centred; prefer middle unless
-    # the text is clearly packed against one edge.
-    if abs(top_gap - bottom_gap) <= cell_height * 0.35:
+    # Tall / largely empty form cells: if the first line sits near the top,
+    # keep top anchoring even when later lines extend the union downward.
+    # Otherwise PowerPoint vertically centres the whole block and offsets
+    # neighbouring text from its PDF position.
+    line_heights = [max(1.0, span["bbox"][3] - span["bbox"][1]) for span in matched]
+    median_line = float(median(line_heights)) if line_heights else 12.0
+    tall_cell = cell_height >= max(3.0 * median_line, 72.0)
+    if tall_cell and top_gap <= max(median_line * 0.85, cell_height * 0.12):
+        vertical_anchor = "top"
+    elif abs(top_gap - bottom_gap) <= cell_height * 0.35 and not tall_cell:
         vertical_anchor = "middle"
     elif top_gap + cell_height * 0.1 < bottom_gap and top_gap < cell_height * 0.12:
         vertical_anchor = "top"
     elif bottom_gap + cell_height * 0.1 < top_gap and bottom_gap < cell_height * 0.12:
         vertical_anchor = "bottom"
+    elif tall_cell and top_gap < bottom_gap:
+        vertical_anchor = "top"
     else:
         vertical_anchor = "middle"
 
@@ -1211,6 +1274,13 @@ def _estimate_table_geometry(
     row_count: int,
     col_count: int,
 ) -> tuple[list[float], list[float]]:
+    """Derive column widths / row heights from cell rects.
+
+    Prefer the union of all non-merged cell edges so a large empty / merged
+    notes cell cannot skew neighbouring column widths or invent fractional
+    row heights that shift subsequent text in PowerPoint.
+    """
+
     row_heights: list[float] = []
     for row in rows:
         row_bbox = getattr(row, "bbox", None)
@@ -1223,18 +1293,58 @@ def _estimate_table_geometry(
         row_heights.append(max(1.0, (bbox[3] - bbox[1]) / max(row_count, 1)))
     row_heights = row_heights[:row_count]
 
-    # Column widths from first row with complete cells.
-    column_widths = [max(1.0, (bbox[2] - bbox[0]) / max(col_count, 1)) for _ in range(col_count)]
+    # Collect left edges per column from non-None cell rects across rows.
+    col_lefts: list[list[float]] = [[] for _ in range(col_count)]
+    col_rights: list[list[float]] = [[] for _ in range(col_count)]
     for row in rows:
-        row_cells = [cell for cell in (getattr(row, "cells", []) or []) if cell is not None]
-        if len(row_cells) >= col_count:
-            widths = []
-            for cell in row_cells[:col_count]:
-                rect = fitz.Rect(cell)
-                widths.append(max(1.0, float(rect.x1 - rect.x0)))
-            if len(widths) == col_count:
-                column_widths = widths
-                break
+        row_cells = list(getattr(row, "cells", []) or [])
+        while len(row_cells) < col_count:
+            row_cells.append(None)
+        for col_index in range(col_count):
+            cell_rect = row_cells[col_index]
+            if cell_rect is None:
+                continue
+            rect = fitz.Rect(cell_rect)
+            # Skip clearly merged multi-column cells when inferring single-col width.
+            width = float(rect.x1 - rect.x0)
+            nominal = (bbox[2] - bbox[0]) / max(col_count, 1)
+            if width > nominal * 1.6 and col_count > 1:
+                continue
+            col_lefts[col_index].append(float(rect.x0))
+            col_rights[col_index].append(float(rect.x1))
+
+    column_widths = [max(1.0, (bbox[2] - bbox[0]) / max(col_count, 1)) for _ in range(col_count)]
+    if all(col_lefts[index] and col_rights[index] for index in range(col_count)):
+        edges = [bbox[0]]
+        for col_index in range(col_count - 1):
+            right = float(median(col_rights[col_index]))
+            left = float(median(col_lefts[col_index + 1]))
+            edges.append((right + left) / 2.0)
+        edges.append(bbox[2])
+        column_widths = [max(1.0, edges[index + 1] - edges[index]) for index in range(col_count)]
+    else:
+        # Fallback: first row with a full set of non-merged cells.
+        for row in rows:
+            row_cells = [cell for cell in (getattr(row, "cells", []) or []) if cell is not None]
+            if len(row_cells) >= col_count:
+                widths = []
+                for cell in row_cells[:col_count]:
+                    rect = fitz.Rect(cell)
+                    widths.append(max(1.0, float(rect.x1 - rect.x0)))
+                if len(widths) == col_count:
+                    column_widths = widths
+                    break
+
+    # Snap total width/height to the table bbox so empty trailing cells do not
+    # accumulate float drift that shifts later text.
+    width_sum = sum(column_widths) or 1.0
+    target_width = max(1.0, bbox[2] - bbox[0])
+    if abs(width_sum - target_width) > 0.5:
+        column_widths = [width * target_width / width_sum for width in column_widths]
+    height_sum = sum(row_heights) or 1.0
+    target_height = max(1.0, bbox[3] - bbox[1])
+    if abs(height_sum - target_height) > 0.5:
+        row_heights = [height * target_height / height_sum for height in row_heights]
     return column_widths, row_heights
 
 
@@ -1243,30 +1353,53 @@ def apply_cell_fills(
     page: fitz.Page,
     *,
     dpi: int = 72,
+    image_boxes: list[BBox] | None = None,
 ) -> None:
     """Resolve solid cell fills without sampling centred glyphs.
 
     Preference order per cell:
 
-    1. Opaque fill of the smallest filled vector rect containing the cell
+    1. Keep an existing fill (e.g. zebra stripe assigned during inference).
+    2. Opaque fill of the smallest filled vector rect containing the cell
        (inset 2pt). If that smallest rect is translucent, skip the vector step
        entirely (do not fall through to a larger opaque page fill).
-    2. Modal colour of non-text raster pixels (4-bit quantised), when the mode
-       covers ≥60% of remaining pixels.
-    3. Median of non-text raster pixels (covers gradients / soft fills).
+    3. Modal colour of non-text raster pixels (4-bit quantised), when the mode
+       covers ≥60% of remaining pixels — **skipped** when the table sits on an
+       embedded photo so transparent cells keep the image visible.
+    4. Median of non-text raster pixels (covers gradients / soft fills).
     """
 
     if not table.cells:
         return
     filled_rects = _collect_filled_vector_rects(page)
     word_boxes = _collect_word_boxes(page)
+    images = list(image_boxes) if image_boxes is not None else _collect_image_boxes(page)
+    table_over_image = table_overlaps_image(table.bbox, images)
     pixmap: Any | None = None
     scale = dpi / 72.0
     for cell in table.cells:
         cell_bbox = _cell_bbox_from_geometry(table, cell)
+        if cell.fill_color:
+            # Inferred zebra / prior fill — still prefer a tighter vector match.
+            vector_fill = _opaque_vector_fill_for_cell(cell_bbox, filled_rects)
+            if vector_fill is not None:
+                cell.fill_color = vector_fill
+            continue
         vector_fill = _opaque_vector_fill_for_cell(cell_bbox, filled_rects)
         if vector_fill is not None:
+            # Ignore huge backdrop fills that are really the page / photo card
+            # when the table is drawn over an image without per-cell paints.
+            if table_over_image and not _vector_fill_looks_like_cell(
+                cell_bbox, filled_rects, vector_fill
+            ):
+                cell.fill_color = None
+                continue
             cell.fill_color = vector_fill
+            continue
+        if table_over_image:
+            # Source cell has no fill — keep PPTX cell transparent so the photo
+            # under the table remains visible.
+            cell.fill_color = None
             continue
         if pixmap is None:
             try:
@@ -1283,15 +1416,84 @@ def apply_cell_fills(
             cell.fill_color = raster_fill
 
 
+def _collect_image_boxes(page: fitz.Page) -> list[BBox]:
+    boxes: list[BBox] = []
+    try:
+        for image_info in page.get_image_info() or []:
+            bbox = image_info.get("bbox")
+            if bbox is None:
+                continue
+            boxes.append((float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])))
+    except Exception:  # noqa: BLE001
+        return boxes
+    return boxes
+
+
+def table_overlaps_image(
+    table_bbox: BBox,
+    image_boxes: list[BBox] | None,
+    *,
+    min_ratio: float = 0.2,
+) -> bool:
+    """True when a meaningful fraction of the table sits on an embedded image."""
+
+    if not image_boxes:
+        return False
+    table_area = bbox_area(table_bbox)
+    if table_area <= 0:
+        return False
+    for image_bbox in image_boxes:
+        overlap = intersection_area(table_bbox, image_bbox)
+        if overlap / table_area >= min_ratio:
+            return True
+    return False
+
+
+def table_should_erase_background(
+    table: TableElement,
+    image_boxes: list[BBox] | None = None,
+) -> bool:
+    """Whether the table region must be solid-filled out of a raster background.
+
+    Transparent tables drawn over photos must leave the photo pixels in place;
+    ruled / filled tables still erase so native cells are not double-painted.
+    """
+
+    if not table_overlaps_image(table.bbox, image_boxes):
+        return True
+    return any(bool(cell.fill_color) for cell in table.cells)
+
+
+def _vector_fill_looks_like_cell(
+    cell_bbox: BBox,
+    filled_rects: list[tuple[BBox, str, float]],
+    fill_hex: str,
+) -> bool:
+    """True when the chosen vector fill is cell/row sized, not a page backdrop."""
+
+    cell_area = max(bbox_area(cell_bbox), 1.0)
+    for rect_bbox, color, _opacity in filled_rects:
+        if color != fill_hex:
+            continue
+        if intersection_ratio(cell_bbox, rect_bbox) < 0.5:
+            continue
+        rect_area = bbox_area(rect_bbox)
+        # Row stripe or single cell: at most ~12× the cell (full table width).
+        if rect_area <= cell_area * 12.0:
+            return True
+    return False
+
+
 def apply_header_cell_fills(
     table: TableElement,
     page: fitz.Page,
     *,
     dpi: int = 72,
+    image_boxes: list[BBox] | None = None,
 ) -> None:
     """Backwards-compatible alias for :func:`apply_cell_fills`."""
 
-    apply_cell_fills(table, page, dpi=dpi)
+    apply_cell_fills(table, page, dpi=dpi, image_boxes=image_boxes)
 
 
 def _cell_bbox_from_geometry(table: TableElement, cell: TableCell) -> BBox:
@@ -1534,4 +1736,6 @@ __all__ = [
     "resolve_complexity_limits",
     "rgb_tuple_to_hex",
     "should_attempt_vector_nativization",
+    "table_overlaps_image",
+    "table_should_erase_background",
 ]

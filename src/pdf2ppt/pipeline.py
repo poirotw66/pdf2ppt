@@ -516,7 +516,7 @@ def analyze_page(
         page_kind=page_kind,
     )
     for table in vector_result.tables:
-        apply_cell_fills(table, page)
+        apply_cell_fills(table, page, image_boxes=image_boxes)
     text_blocks = filter_text_blocks_outside_tables(text_blocks, vector_result.absorbed_text_block_ids)
 
     # P2 layout analysis: group lines, bullets, titles, figures; skip headers/footers.
@@ -753,6 +753,7 @@ def analyze_page(
                 vector_result.shapes,
                 [table.bbox for table in vector_result.tables],
                 image_boxes=image_boxes,
+                tables=vector_result.tables,
             )
             if erase_regions:
                 fill_color = resolve_erase_fill_color(vector_result.shapes, background_image)

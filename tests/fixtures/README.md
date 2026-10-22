@@ -16,6 +16,10 @@ P1 vector/table fixtures (in addition to the Phase 0 inpaint set):
 - `flowchart.pdf` — flowchart boxes and connectors
 - `merged_table.pdf` — bordered table with a merged header cell
 - `geometric_chart.pdf` / `table.pdf` — also used as vector-nativization targets
+- `borderless_table.pdf` — aligned text columns with no stroked rules
+- `zebra_borderless_table.pdf` — alternating row fills without gridlines
+- `table_over_photo.pdf` — transparent ruled table over a full-bleed photo
+- `form_tall_empty_cell.pdf` — form with a large empty cell / top-aligned neighbour
 
 P2 layout fixtures (plus optional `*.layout.json` ground truth for grouping metrics):
 

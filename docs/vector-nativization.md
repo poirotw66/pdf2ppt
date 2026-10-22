@@ -30,14 +30,24 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
 ### Tables
 
 - Detected with `find_tables()` (prefers `refine=True` when available).
+- **Borderless / zebra fallback:** when ruled detection misses a grid,
+  `table_detection.detect_inferred_tables` recovers column-aligned text
+  (stable x-columns + row baselines) and alternating filled row rectangles as
+  native tables. Guards reject multi-column body copy, bullet lists, and card
+  layouts (see `tests/test_table_reconstruction.py`).
 - Emits a native `pptx` table with cell text, column widths / row heights,
   cell fills, borders, and merges (`colspan` / `rowspan`) when PyMuPDF reports
   them. Cell fills prefer an **opaque** containing filled vector rect, then the
   modal non-text pixel colour (≥60% share, 4-bit quantised), then the median of
   non-text pixels (gradients / soft fills). Translucent vector fills skip the
   vector step so composited colours are sampled from the rendered page.
+  When a table sits on an embedded photo and a cell has **no** source fill, the
+  cell stays transparent (no raster sampling) and the table region is **not**
+  erased from the background so the photo remains visible under the grid.
   Candidates with ≤2 cells covering ≥80% of the page, or grids with neither
-  stroked rules nor Word/Excel hairline filled-rect rules, are rejected.
+  stroked rules, hairline filled-rect rules, nor zebra row fills, are rejected.
+- Tall / largely empty form cells top-anchor text when the first line sits near
+  the top of the cell (avoids PowerPoint vertically centering the block).
 - Grid lines and fills that sit inside the table bbox are **not** also emitted
   as shapes.
 - Text blocks whose content belongs to the table are **not** also emitted as
@@ -102,7 +112,7 @@ python scripts/bench_slide.py --ocr off \
 ## Limits
 
 - Gradients, soft masks, patterns, and very dense illustrations stay raster.
-- Merge detection depends on PyMuPDF’s table finder; unruled tables are not
-  forced into native tables.
+- Merge detection depends on PyMuPDF’s table finder; inferred borderless tables
+  do not invent merges.
 - LibreOffice ≠ PowerPoint metrics still apply when scoring fidelity
   (`docs/slide-quality.md`).
