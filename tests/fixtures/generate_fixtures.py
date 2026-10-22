@@ -1127,6 +1127,57 @@ def build_form_tall_empty_cell() -> None:
     _save(doc, "form_tall_empty_cell.pdf")
 
 
+def build_two_column_bullets() -> None:
+    """Strengths / Risks two-column bullet list — must NOT become a table."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1))
+    page.insert_textbox(
+        fitz.Rect(48, 28, 800, 70),
+        "Strengths and Risks",
+        fontsize=24,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    page.insert_text(fitz.Point(60, 110), "Strengths", fontsize=16, fontname="helv", color=(0.1, 0.1, 0.15))
+    page.insert_text(fitz.Point(500, 110), "Risks", fontsize=16, fontname="helv", color=(0.1, 0.1, 0.15))
+    strengths = [
+        "• Strong product-market fit across enterprise segments",
+        "• Diversified revenue from recurring subscriptions",
+        "• Experienced leadership with domain expertise",
+    ]
+    risks = [
+        "• Competitive pressure from larger platforms",
+        "• Dependency on a small number of key accounts",
+        "• Regulatory uncertainty in new markets",
+    ]
+    for index, line in enumerate(strengths):
+        page.insert_text(
+            fitz.Point(60, 150 + index * 36),
+            line,
+            fontsize=13,
+            fontname="helv",
+            color=(0.15, 0.15, 0.2),
+        )
+    for index, line in enumerate(risks):
+        page.insert_text(
+            fitz.Point(500, 150 + index * 36),
+            line,
+            fontsize=13,
+            fontname="helv",
+            color=(0.15, 0.15, 0.2),
+        )
+    page.insert_textbox(
+        fitz.Rect(48, 320, 880, 500),
+        "Footer caption keeps native character coverage high for digital classification "
+        "while the two-column bullet layout must stay text boxes, not a native table.",
+        fontsize=12,
+        fontname="helv",
+        color=(0.25, 0.25, 0.3),
+    )
+    _save(doc, "two_column_bullets.pdf")
+
+
 def main() -> None:
     build_solid_background()
     build_gradient_linear()
@@ -1152,6 +1203,7 @@ def main() -> None:
     build_zebra_borderless_table()
     build_table_over_photo()
     build_form_tall_empty_cell()
+    build_two_column_bullets()
 
 
 if __name__ == "__main__":

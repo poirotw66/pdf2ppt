@@ -21,6 +21,7 @@ from pdf2ppt.vector_nativization import (
     apply_cell_fills,
     extract_tables,
     table_should_erase_background,
+    transparent_table_text_mask_blocks,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -167,6 +168,83 @@ class BorderlessAndZebraDetectionTests(unittest.TestCase):
             blocks, _images = extract_native_text_blocks(page)
             self.assertEqual(extract_tables(page, blocks, page_number=1), [])
 
+    @unittest.skipUnless((FIXTURES_DIR / "two_column_bullets.pdf").exists(), "fixture missing")
+    def test_two_column_bullets_fixture_is_not_a_table(self) -> None:
+        """Negative fixture: Strengths/Risks bullet columns must not become a table."""
+
+        with fitz.open(FIXTURES_DIR / "two_column_bullets.pdf") as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            self.assertEqual(extract_tables(page, blocks, page_number=1), [])
+
+    def test_two_column_strengths_risks_bullets_are_not_a_table(self) -> None:
+        """deck_eval13-style Strengths/Risks columns must stay text, not a 4×2 table."""
+
+        def build(page: fitz.Page) -> None:
+            page.insert_text(fitz.Point(60, 80), "Strengths and Risks", fontsize=22, fontname="helv")
+            page.insert_text(fitz.Point(60, 120), "Strengths", fontsize=16, fontname="helv")
+            page.insert_text(fitz.Point(500, 120), "Risks", fontsize=16, fontname="helv")
+            for index, line in enumerate(
+                [
+                    "• Strong product-market fit across enterprise segments",
+                    "• Diversified revenue from recurring subscriptions",
+                    "• Experienced leadership with domain expertise",
+                ]
+            ):
+                page.insert_text(fitz.Point(60, 160 + index * 36), line, fontsize=13, fontname="helv")
+            for index, line in enumerate(
+                [
+                    "• Competitive pressure from larger platforms",
+                    "• Dependency on a small number of key accounts",
+                    "• Regulatory uncertainty in new markets",
+                ]
+            ):
+                page.insert_text(fitz.Point(500, 160 + index * 36), line, fontsize=13, fontname="helv")
+
+        path = _write_pdf(build)
+        with fitz.open(path) as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            self.assertEqual(extract_tables(page, blocks, page_number=1), [])
+
+    def test_borderless_column_edges_keep_left_aligned_text(self) -> None:
+        """Column boundaries use text extents so left-aligned glyphs stay near source x."""
+
+        col_x = [80.0, 300.0, 520.0]
+
+        def build(page: fitz.Page) -> None:
+            rows = [
+                ["Name", "Dept", "Score"],
+                ["Alice", "Eng", "92"],
+                ["Bob", "Sales", "88"],
+                ["Carol", "Ops", "95"],
+                ["Dan", "HR", "91"],
+            ]
+            for row_index, row in enumerate(rows):
+                for col_index, value in enumerate(row):
+                    page.insert_text(
+                        fitz.Point(col_x[col_index], 80 + row_index * 28 + 18),
+                        value,
+                        fontsize=14,
+                        fontname="helv",
+                    )
+
+        path = _write_pdf(build)
+        with fitz.open(path) as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+        self.assertEqual(len(tables), 1)
+        table = tables[0]
+        self.assertEqual(table.col_count, 3)
+        # Cell left edges should sit just left of each column's source x0.
+        for col_index, source_x in enumerate(col_x):
+            cell = next(cell for cell in table.cells if cell.col == col_index and cell.row == 1)
+            geom = _cell_bbox_from_geometry(table, cell)
+            self.assertLessEqual(geom[0], source_x)
+            self.assertLess(source_x - geom[0], 12.0)
+            self.assertEqual(cell.horizontal_align, "left")
+
     @unittest.skipUnless((FIXTURES_DIR / "borderless_table.pdf").exists(), "fixture missing")
     def test_borderless_fixture_emits_pptx_table(self) -> None:
         work = Path(tempfile.mkdtemp(prefix="pdf2ppt-borderless-fix"))
@@ -265,6 +343,59 @@ class TableOverPhotoTests(unittest.TestCase):
         slide = prs.slides[0]
         self.assertTrue(any(shape.shape_type is not None and shape.has_table for shape in slide.shapes))
 
+    @unittest.skipUnless((FIXTURES_DIR / "table_over_photo.pdf").exists(), "fixture missing")
+    def test_table_over_photo_inpaints_absorbed_glyphs(self) -> None:
+        """Ghost text must not remain under native cells when the photo underlay is kept."""
+
+        from pdf2ppt.block_analysis import render_page_image
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-table-photo-mask-"))
+        pptx_path = work / "table_over_photo.pptx"
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=FIXTURES_DIR / "table_over_photo.pdf",
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        page_result = report.pages[0]
+        self.assertIsNotNone(page_result.background_image_bytes)
+        assert page_result.background_image_bytes is not None
+        background = Image.open(io.BytesIO(page_result.background_image_bytes)).convert("RGB")
+        bg_dpi = max(72, int(round(background.width * 72.0 / max(page_result.width_pt, 1.0))))
+
+        with fitz.open(FIXTURES_DIR / "table_over_photo.pdf") as document:
+            page = document[0]
+            blocks, image_boxes = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+            masks = transparent_table_text_mask_blocks(tables, page, image_boxes)
+            self.assertGreater(len(masks), 0)
+            source = render_page_image(page, dpi=bg_dpi).convert("RGB")
+
+        # Under a masked word box the background should diverge from the source
+        # glyphs (inpainted) while remaining photo-like (not solid white).
+        sample = masks[0].bbox
+        scale_x = background.width / page_result.width_pt
+        scale_y = background.height / page_result.height_pt
+        left = max(0, int(sample[0] * scale_x))
+        top = max(0, int(sample[1] * scale_y))
+        right = min(background.width, int(sample[2] * scale_x))
+        bottom = min(background.height, int(sample[3] * scale_y))
+        src_right = min(source.width, right)
+        src_bottom = min(source.height, bottom)
+        bg_crop = np.asarray(background.crop((left, top, right, bottom)), dtype=np.float32)
+        src_crop = np.asarray(source.crop((left, top, src_right, src_bottom)), dtype=np.float32)
+        # Align shapes if rounding differs by a pixel.
+        height = min(bg_crop.shape[0], src_crop.shape[0])
+        width = min(bg_crop.shape[1], src_crop.shape[1])
+        bg_crop = bg_crop[:height, :width]
+        src_crop = src_crop[:height, :width]
+        self.assertGreater(float(np.mean(np.abs(bg_crop - src_crop))), 5.0)
+        # Not wiped to near-white (photo must remain).
+        self.assertLess(float(np.mean(bg_crop)), 240.0)
+
 
 class FormTallEmptyCellTests(unittest.TestCase):
     def test_tall_cell_text_uses_top_anchor(self) -> None:
@@ -317,6 +448,47 @@ class FormTallEmptyCellTests(unittest.TestCase):
                     self.assertEqual(int(cell.vertical_anchor), 1)  # TOP
                     found = True
         self.assertTrue(found)
+
+    @unittest.skipUnless((FIXTURES_DIR / "merged_table.pdf").exists(), "fixture missing")
+    def test_merged_table_header_stays_vertically_centred(self) -> None:
+        """Tall merged headers with balanced gaps must not flip to top (regression E)."""
+
+        with fitz.open(FIXTURES_DIR / "merged_table.pdf") as document:
+            page = document[0]
+            blocks, _images = extract_native_text_blocks(page)
+            tables = extract_tables(page, blocks, page_number=1)
+        self.assertGreaterEqual(len(tables), 1)
+        header = next(
+            cell
+            for cell in tables[0].cells
+            if "Americas" in cell.text or "Combined" in cell.text or cell.colspan > 1
+        )
+        self.assertEqual(header.vertical_anchor, "middle")
+
+    @unittest.skipUnless((FIXTURES_DIR / "table.pdf").exists(), "fixture missing")
+    def test_ruled_table_keeps_measured_or_default_margins(self) -> None:
+        """Do not zero Office cell margins globally (regression D)."""
+
+        work = Path(tempfile.mkdtemp(prefix="pdf2ppt-ruled-margin-"))
+        pptx_path = work / "table.pptx"
+        report = convert_pdf(
+            ConversionOptions(
+                input_path=FIXTURES_DIR / "table.pdf",
+                output_path=pptx_path,
+                report_path=work / "report.json",
+                ocr_model_root=None,
+                layout_engine="heuristic",
+            )
+        )
+        cell = report.pages[0].table_elements[0].cells[0]
+        # Measured inset from source or None (Office default) — never forced 0 without measure.
+        if cell.margin_left is not None:
+            self.assertGreater(cell.margin_left, 0.5)
+        prs = Presentation(str(pptx_path))
+        ppt_table = next(shape.table for shape in prs.slides[0].shapes if shape.has_table)
+        ppt_cell = ppt_table.cell(0, 0)
+        # python-pptx reports EMUs; Office default left margin is ~91440 (0.1").
+        self.assertGreater(int(ppt_cell.margin_left), 0)
 
 
 if __name__ == "__main__":

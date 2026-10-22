@@ -50,10 +50,20 @@ ZEBRA_MIN_ROW_HEIGHT_PT = 10.0
 ZEBRA_MIN_WIDTH_OVER_HEIGHT = 2.5
 ZEBRA_MAX_X_DRIFT_PT = 8.0
 ZEBRA_MAX_GAP_PT = 6.0
-# Bullet / list markers in the leftmost column.
+# Bullet / list markers (standalone cell or leading a longer phrase).
 _BULLET_RE = re.compile(
     r"^(\u2022|\u25CF|\u25A0|\u25E6|\u2219|•|●|■|◦|-|–|—|\*|\d+[\.\)])$"
 )
+_LIST_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"[\u2022\u25CF\u25A0\u25E6\u2219•●■◦\-–—\*]"
+    r"|\d+[\.\)]"
+    r"|[a-zA-Z][\.\)]"
+    r")\s+"
+)
+# Cap window search so dense pages cannot hang CI (O(rows²) otherwise).
+MAX_INFERENCE_ROWS = 48
+MAX_WINDOW_ROWS = 24
 # Card-layout: large filled rects that each contain a text cluster.
 CARD_MIN_AREA_PT2 = 8_000.0
 CARD_CONTAINMENT_RATIO = 0.55
@@ -234,14 +244,41 @@ def _iter_text_grid_candidates(words: list[_Word]) -> list[dict[str, Any]]:
     if len(rows) < MIN_TABLE_ROWS:
         return []
 
-    # Enumerate contiguous row windows. Preferring only the maximal window
-    # would glue titles/captions onto the grid and then fail the guards.
+    # Grow maximal windows, then trim leading/trailing title/caption rows.
+    # Full O(n²) enumeration hangs slide-quality CI on dense pages.
+    if len(rows) > MAX_INFERENCE_ROWS:
+        rows = rows[:MAX_INFERENCE_ROWS]
     candidates: list[dict[str, Any]] = []
-    for start in range(len(rows)):
-        for end in range(start + MIN_TABLE_ROWS, len(rows) + 1):
+    start = 0
+    while start < len(rows):
+        best: dict[str, Any] | None = None
+        best_end = start
+        max_end = min(len(rows), start + MAX_WINDOW_ROWS)
+        for end in range(start + MIN_TABLE_ROWS, max_end + 1):
             grid = _try_build_grid(rows[start:end])
-            if grid is not None:
-                candidates.append(grid)
+            if grid is None:
+                if best is not None:
+                    break
+                continue
+            best = grid
+            best_end = end
+        if best is None:
+            start += 1
+            continue
+        candidates.append(best)
+        # Trim up to two rows from each end to drop glued titles/captions.
+        for trim_lo in range(0, 3):
+            for trim_hi in range(0, 3):
+                if trim_lo == 0 and trim_hi == 0:
+                    continue
+                inner_start = start + trim_lo
+                inner_end = best_end - trim_hi
+                if inner_end - inner_start < MIN_TABLE_ROWS:
+                    continue
+                trimmed = _try_build_grid(rows[inner_start:inner_end])
+                if trimmed is not None:
+                    candidates.append(trimmed)
+        start = max(start + 1, best_end - 1)
     return _dedupe_grids(candidates)
 
 
@@ -284,22 +321,65 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
 
     col_count = len(col_centers)
     row_count = len(matrix)
-    # Geometry from word extents + column midlines.
+    # Geometry from word extents; pad so fills that hug text stay inside.
     all_words = [word for row in rows for word in row]
     x_min = min(word.x0 for word in all_words)
     x_max = max(word.x1 for word in all_words)
     y_min = min(word.y0 for word in all_words)
     y_max = max(word.y1 for word in all_words)
-    # Pad slightly so fills/borders that hug text still sit inside the table.
     pad = 4.0
     bbox: BBox = (x_min - pad, y_min - pad * 0.5, x_max + pad, y_max + pad * 0.5)
 
-    # Column edges: midpoints between centers, clamped to bbox.
+    # Column edges from each column's text extent: midpoint between previous
+    # column's max-x1 and next column's min-x0 (not midpoint of left edges).
+    col_x0: list[float] = []
+    col_x1: list[float] = []
+    for col_index in range(col_count):
+        col_words = [word for buckets in cell_words for word in buckets[col_index]]
+        if not col_words:
+            col_x0.append(col_centers[col_index])
+            next_center = col_centers[col_index + 1] if col_index + 1 < col_count else bbox[2]
+            col_x1.append(next_center)
+            continue
+        col_x0.append(min(word.x0 for word in col_words))
+        col_x1.append(max(word.x1 for word in col_words))
     edges = [bbox[0]]
-    for col_left, col_right in zip(col_centers, col_centers[1:]):
-        edges.append((col_left + col_right) / 2.0)
+    for col_index in range(col_count - 1):
+        gap_mid = (col_x1[col_index] + col_x0[col_index + 1]) / 2.0
+        # Prefer next-col left minus pad when the gap is wide (left-aligned grids).
+        next_left_inset = col_x0[col_index + 1] - pad
+        if next_left_inset > col_x1[col_index]:
+            edges.append(max(col_x1[col_index], next_left_inset))
+        else:
+            edges.append(gap_mid)
     edges.append(bbox[2])
     column_widths = [max(1.0, edges[index + 1] - edges[index]) for index in range(col_count)]
+
+    # Majority horizontal alignment per column (avoids single-cell center/right).
+    column_aligns: list[str] = []
+    for col_index in range(col_count):
+        votes: list[str] = []
+        cell_left = edges[col_index]
+        cell_right = edges[col_index + 1]
+        cell_width = max(1.0, cell_right - cell_left)
+        for buckets in cell_words:
+            words_in_cell = buckets[col_index]
+            if not words_in_cell:
+                continue
+            text_x0 = min(word.x0 for word in words_in_cell)
+            text_x1 = max(word.x1 for word in words_in_cell)
+            left_gap = text_x0 - cell_left
+            right_gap = cell_right - text_x1
+            if abs(left_gap - right_gap) <= cell_width * 0.12 and left_gap > cell_width * 0.08:
+                votes.append("center")
+            elif right_gap < left_gap * 0.45 and right_gap < cell_width * 0.12:
+                votes.append("right")
+            else:
+                votes.append("left")
+        if not votes:
+            column_aligns.append("left")
+        else:
+            column_aligns.append(max(set(votes), key=votes.count))
 
     # Use midpoints between successive row tops for interior boundaries.
     boundaries = [bbox[1]]
@@ -318,6 +398,7 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
         "cell_words": cell_words,
         "column_widths": column_widths,
         "row_heights": row_heights,
+        "column_aligns": column_aligns,
         "row_centers": [float(sum(word.cy for word in row) / len(row)) for row in rows],
     }
 
@@ -475,16 +556,26 @@ def _passes_text_grid_guards(
     if max(lengths) > MAX_CELL_CHARS:
         return False
 
-    # Bullet / numbered list: leftmost column dominated by markers.
-    left_col = [row[0].strip() for row in matrix if row and row[0].strip()]
-    if left_col:
-        bullet_hits = sum(1 for cell in left_col if _BULLET_RE.match(cell))
-        if bullet_hits / len(left_col) >= 0.6:
+    # Bullet / numbered list: any column dominated by list markers or prefixes.
+    for col_index in range(col_count):
+        col_cells = [row[col_index].strip() for row in matrix if row[col_index].strip()]
+        if not col_cells:
+            continue
+        bullet_hits = sum(
+            1
+            for cell in col_cells
+            if _BULLET_RE.match(cell) or _LIST_PREFIX_RE.match(cell)
+        )
+        if bullet_hits / len(col_cells) >= 0.5:
             return False
+
+    # Real tables almost always have at least one short/numeric column
+    # (IDs, scores, codes). Two-column Strengths/Risks bullet lists do not.
+    if not any(_column_is_short_or_numeric(matrix, col_index) for col_index in range(col_count)):
+        return False
 
     # Multi-column article: two wide columns of long wrapping text.
     if col_count == 2 and float(median(lengths)) > 18 and occupancy > 0.85:
-        # Dense two-column paragraphs tend to have many words per cell.
         cell_word_counts = [
             len(cell.split())
             for row in matrix
@@ -526,6 +617,23 @@ def _passes_text_grid_guards(
 
     _ = words  # reserved for future density checks
     return True
+
+
+def _column_is_short_or_numeric(matrix: list[list[str]], col_index: int) -> bool:
+    """True when most nonempty cells in a column are short tokens or numbers."""
+
+    cells = [row[col_index].strip() for row in matrix if row[col_index].strip()]
+    if not cells:
+        return False
+    hits = 0
+    for cell in cells:
+        tokens = cell.split()
+        if len(cell) <= 12 and len(tokens) <= 2:
+            hits += 1
+            continue
+        if re.fullmatch(r"[\d.,:%$+\-]+", cell):
+            hits += 1
+    return hits / len(cells) >= 0.55
 
 
 def _looks_like_card_layout(table_bbox: BBox, page: fitz.Page) -> bool:
@@ -592,6 +700,9 @@ def _grid_to_table_element(
         zebra_fills = _map_zebra_fills(bbox, row_heights, zebra_bands)
 
     span_index = _collect_page_spans(page)
+    column_aligns = list(grid.get("column_aligns") or ["left"] * col_count)
+    while len(column_aligns) < col_count:
+        column_aligns.append("left")
     cells: list[TableCell] = []
     y = bbox[1]
     for row_index in range(row_count):
@@ -614,6 +725,8 @@ def _grid_to_table_element(
                 text_blocks=text_blocks,
                 span_index=span_index,
             )
+            # Majority column alignment overrides per-cell guesses.
+            cell.horizontal_align = str(column_aligns[col_index])
             if zebra_fills is not None and row_index < len(zebra_fills):
                 cell.fill_color = zebra_fills[row_index]
             cells.append(cell)

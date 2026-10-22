@@ -18,8 +18,9 @@ P1 vector/table fixtures (in addition to the Phase 0 inpaint set):
 - `geometric_chart.pdf` / `table.pdf` — also used as vector-nativization targets
 - `borderless_table.pdf` — aligned text columns with no stroked rules
 - `zebra_borderless_table.pdf` — alternating row fills without gridlines
-- `table_over_photo.pdf` — transparent ruled table over a full-bleed photo
+- `table_over_photo.pdf` — transparent ruled table over a photo (not full-bleed)
 - `form_tall_empty_cell.pdf` — form with a large empty cell / top-aligned neighbour
+- `two_column_bullets.pdf` — Strengths/Risks bullet columns (must not become a table)
 
 P2 layout fixtures (plus optional `*.layout.json` ground truth for grouping metrics):
 

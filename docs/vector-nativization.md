@@ -44,10 +44,19 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
   When a table sits on an embedded photo and a cell has **no** source fill, the
   cell stays transparent (no raster sampling) and the table region is **not**
   erased from the background so the photo remains visible under the grid.
+  Absorbed cell word boxes are still added to the overlay inpaint mask
+  (1–2pt pad) so baked-in glyphs do not ghost under editable PPTX text.
+  Inferred column edges use the gap between adjacent columns' text extents
+  (not midpoints of left edges); horizontal alignment is majority-voted per
+  column. Cell margins are measured from source insets when available;
+  otherwise PowerPoint defaults are kept (margins are never zeroed globally).
   Candidates with ≤2 cells covering ≥80% of the page, or grids with neither
   stroked rules, hairline filled-rect rules, nor zebra row fills, are rejected.
+  Bullet / numbered list columns and grids with no short/numeric column are
+  rejected so Strengths/Risks-style two-column lists stay text boxes.
 - Tall / largely empty form cells top-anchor text when the first line sits near
-  the top of the cell (avoids PowerPoint vertically centering the block).
+  the top of the cell; tall cells with balanced gaps (merged headers) stay
+  vertically centred.
 - Grid lines and fills that sit inside the table bbox are **not** also emitted
   as shapes.
 - Text blocks whose content belongs to the table are **not** also emitted as

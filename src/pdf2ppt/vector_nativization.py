@@ -1065,6 +1065,8 @@ def _build_table_cell(
         horizontal_align=str(style["horizontal_align"]),
         vertical_anchor=str(style["vertical_anchor"]),
         text_block_ids=[block.id for block in overlapping],
+        margin_left=style.get("margin_left"),
+        margin_top=style.get("margin_top"),
     )
 
 
@@ -1148,6 +1150,8 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
             "bold": False,
             "horizontal_align": "left",
             "vertical_anchor": "middle",
+            "margin_left": None,
+            "margin_top": None,
         }
 
     sizes = [float(span["size"]) for span in matched if span["size"] > 0]
@@ -1174,25 +1178,26 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
     else:
         horizontal_align = "left"
 
-    # Tall / largely empty form cells: if the first line sits near the top,
-    # keep top anchoring even when later lines extend the union downward.
-    # Otherwise PowerPoint vertically centres the whole block and offsets
-    # neighbouring text from its PDF position.
+    # Tall cells: only force top when the first line is packed against the top
+    # edge. Balanced gaps (merged headers, centred labels) stay middle — do not
+    # skip the centring test for tall cells.
     line_heights = [max(1.0, span["bbox"][3] - span["bbox"][1]) for span in matched]
     median_line = float(median(line_heights)) if line_heights else 12.0
     tall_cell = cell_height >= max(3.0 * median_line, 72.0)
     if tall_cell and top_gap <= max(median_line * 0.85, cell_height * 0.12):
         vertical_anchor = "top"
-    elif abs(top_gap - bottom_gap) <= cell_height * 0.35 and not tall_cell:
+    elif abs(top_gap - bottom_gap) <= cell_height * 0.35:
         vertical_anchor = "middle"
     elif top_gap + cell_height * 0.1 < bottom_gap and top_gap < cell_height * 0.12:
         vertical_anchor = "top"
     elif bottom_gap + cell_height * 0.1 < top_gap and bottom_gap < cell_height * 0.12:
         vertical_anchor = "bottom"
-    elif tall_cell and top_gap < bottom_gap:
-        vertical_anchor = "top"
     else:
         vertical_anchor = "middle"
+
+    # Source insets for PPTX cell margins (Office default ~7pt when unknown).
+    margin_left = max(0.0, min(12.0, left_gap))
+    margin_top = max(0.0, min(12.0, top_gap))
 
     return {
         "font_size": float(median(sizes)) if sizes else None,
@@ -1203,6 +1208,8 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
         "bold": bold,
         "horizontal_align": horizontal_align,
         "vertical_anchor": vertical_anchor,
+        "margin_left": margin_left,
+        "margin_top": margin_top,
     }
 
 
@@ -1462,6 +1469,50 @@ def table_should_erase_background(
     if not table_overlaps_image(table.bbox, image_boxes):
         return True
     return any(bool(cell.fill_color) for cell in table.cells)
+
+
+def transparent_table_text_mask_blocks(
+    tables: list[TableElement],
+    page: fitz.Page,
+    image_boxes: list[BBox] | None = None,
+    *,
+    pad_pt: float = 1.5,
+) -> list[TextBlock]:
+    """Word boxes to inpaint when a transparent table sits on a photo.
+
+    The full table bbox is not erased (so the photo remains), but glyphs that
+    were absorbed into native cells must still leave the raster or they ghost
+    under the editable PPTX text.
+    """
+
+    blocks: list[TextBlock] = []
+    word_boxes = _collect_word_boxes(page)
+    index = 0
+    for table in tables:
+        if table_should_erase_background(table, image_boxes):
+            continue
+        for word in word_boxes:
+            cx = (word[0] + word[2]) / 2.0
+            cy = (word[1] + word[3]) / 2.0
+            if not (table.bbox[0] <= cx <= table.bbox[2] and table.bbox[1] <= cy <= table.bbox[3]):
+                continue
+            padded = (
+                word[0] - pad_pt,
+                word[1] - pad_pt,
+                word[2] + pad_pt,
+                word[3] + pad_pt,
+            )
+            blocks.append(
+                TextBlock(
+                    id=f"table_word_mask_{table.id}_{index}",
+                    source="native",
+                    bbox=padded,
+                    text="",
+                    confidence=1.0,
+                )
+            )
+            index += 1
+    return blocks
 
 
 def _vector_fill_looks_like_cell(
@@ -1738,4 +1789,5 @@ __all__ = [
     "should_attempt_vector_nativization",
     "table_overlaps_image",
     "table_should_erase_background",
+    "transparent_table_text_mask_blocks",
 ]

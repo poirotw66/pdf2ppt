@@ -416,13 +416,13 @@ def add_table_element(slide: Any, table: TableElement, *, scale_x: float, scale_
         # python-pptx may append fills in an arbitrary position; normalize order.
         _normalize_tcpr_child_order(ppt_cell)
 
-        # Zero default Office cell margins so text anchors to the PDF cell edges
-        # (large empty form cells otherwise shift neighbouring glyphs).
+        # Apply measured source insets when known; otherwise keep Office defaults
+        # (~0.1") so ruled tables are not flush to borders.
         try:
-            ppt_cell.margin_left = Emu(0)
-            ppt_cell.margin_right = Emu(0)
-            ppt_cell.margin_top = Emu(0)
-            ppt_cell.margin_bottom = Emu(0)
+            if cell.margin_left is not None:
+                ppt_cell.margin_left = Pt(max(0.0, float(cell.margin_left)))
+            if cell.margin_top is not None and cell.vertical_anchor == "top":
+                ppt_cell.margin_top = Pt(max(0.0, float(cell.margin_top)))
         except (AttributeError, TypeError, ValueError):
             pass
 

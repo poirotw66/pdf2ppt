@@ -160,6 +160,9 @@ class TableCell:
     # "top" | "middle" | "bottom"
     vertical_anchor: str = "middle"
     text_block_ids: list[str] = field(default_factory=list)
+    # Measured source insets (pt). None → leave PowerPoint cell margin defaults.
+    margin_left: float | None = None
+    margin_top: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

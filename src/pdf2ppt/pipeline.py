@@ -118,6 +118,7 @@ from .text_style import (
 )
 from .vector_nativization import (
     apply_cell_fills,
+    transparent_table_text_mask_blocks,
     extract_vector_content,
     filter_text_blocks_outside_tables,
     remaining_visuals_after_nativization,
@@ -720,8 +721,17 @@ def analyze_page(
             background_render_started_at = perf_counter()
             background_image = render_page_image(page, dpi=effective_background_render_dpi)
             background_render_seconds += perf_counter() - background_render_started_at
-        if background_mode == "overlay" and text_blocks:
-            mask_blocks = [block for block in text_blocks if block.source == "ocr"] or text_blocks
+        if background_mode == "overlay" and (text_blocks or vector_result.tables):
+            mask_blocks = [block for block in text_blocks if block.source == "ocr"] or list(text_blocks)
+            # Transparent tables over photos keep the raster underlay; still
+            # inpaint absorbed cell glyphs so they do not ghost under native text.
+            table_word_masks = transparent_table_text_mask_blocks(
+                vector_result.tables,
+                page,
+                image_boxes,
+            )
+            if table_word_masks:
+                mask_blocks = [*mask_blocks, *table_word_masks]
             mask_blocks = append_notebooklm_watermark_mask_blocks(
                 mask_blocks,
                 notebooklm_watermark_blocks,
