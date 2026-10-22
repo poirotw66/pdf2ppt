@@ -1,0 +1,11 @@
+{
+  "page_number": 1,
+  "fixture": "figure_caption.pdf",
+  "expect_title": true,
+  "expect_header_footer_ids": [],
+  "reading_order": ["title", "caption"],
+  "paragraphs": [
+    {"id": "title", "bbox": [48, 36, 800, 90], "text": "Figure", "role": "title", "font_family_class": "sans"},
+    {"id": "caption", "bbox": [48, 420, 800, 460], "text": "Caption", "role": "caption", "font_family_class": "serif"}
+  ]
+}

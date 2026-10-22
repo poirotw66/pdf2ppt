@@ -1,0 +1,40 @@
+{
+  "blocks": [
+    {
+      "id": "title",
+      "role": "title",
+      "reading_order": 0,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "caption",
+      "role": "caption",
+      "reading_order": 1,
+      "font_family_class": "serif",
+      "confidence": 0.92
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_title",
+      "member_ids": [
+        "title"
+      ],
+      "role": "title",
+      "reading_order": 0,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_caption",
+      "member_ids": [
+        "caption"
+      ],
+      "role": "caption",
+      "reading_order": 1,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    }
+  ]
+}

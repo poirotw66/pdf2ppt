@@ -11,7 +11,7 @@
 | 原生 PDF 抽取 | 已實作 | PyMuPDF blocks / spans |
 | PP-OCRv5 det + rec | 已實作 | CLI、pipeline、API detect |
 | 同行 OCR 框合併 | 已實作 | `merge_adjacent_ocr_line_blocks`，預設啟用 |
-| Paddle Layout Analysis | **尚未實作** | 規劃於 v1.5；見 §4.3 |
+| Paddle Layout Analysis | **部分完成（實驗性）** | v1.5：opt-in VLM layout planner（`--layout-planner gemini`）已落地；本地方案仍待評估。見 [`layout-planner.md`](./layout-planner.md)、roadmap Phase 3 |
 | 審框前端 + approved boxes | 已實作 | Detect → 人工調整 → Convert |
 | 條件式 inpainting | 已實作 | `opencv-fast` / `white-box` / 可選 LaMa |
 

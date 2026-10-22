@@ -20,6 +20,7 @@
 - 優先原生 PDF 解析；掃描／圖片頁使用 PaddleOCR
 - 同行文字框合併，減少標題碎框，並盡量維持多欄版面
 - 可選版面分析：區域類型、閱讀順序、真實項目符號、標題 placeholder（[`docs/layout-analysis.md`](docs/layout-analysis.md)）
+- 實驗性可選 VLM 版面規劃器（`--layout-planner gemini`）：結構化角色、段落合併、字體家族提示（[`docs/layout-planner.md`](docs/layout-planner.md)）
 - 數位 PDF 上的簡單向量圖與有格線表格可轉成原生 PPT 形狀／表格（[`docs/vector-nativization.md`](docs/vector-nativization.md)）
 - 背景引擎：`opencv-fast`（建議預設）、`white-box`、可選 `lama-onnx`／`lama-pytorch`，以及雲端生成式後端（[`docs/background-engines.md`](docs/background-engines.md)）
 - 可選的確定性 render-compare-refine 迴圈（`--refine`，實驗性）：依預算選擇完整或部分 baseline、連續嚴重度排序、剩餘時間二次分配、接受修正後重設該元素嘗試次數。真實 soffice 的頁數／接受數會因機器而異。
@@ -57,6 +58,9 @@ pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
 
 # 實驗性可選 P4 refine（需要 LibreOffice；若無 soffice 會警告並略過，不中斷轉檔）
 pdf2ppt input.pdf output.pptx --refine --refine-iters 2
+
+# 實驗性可選 Phase-3 VLM 版面規劃器（需 GEMINI_API_KEY；失敗時逐頁退回幾何啟發式）
+pdf2ppt input.pdf output.pptx --layout-planner gemini
 ```
 
 ### Review UI（選用）

@@ -20,4 +20,10 @@ describe("buildConvertRequestPayload", () => {
     expect(buildConvertRequestPayload("generative-gemini").inpaint_engine).toBe("generative-gemini");
     expect(buildConvertRequestPayload("opencv-fast").generative_verify_ocr).toBeUndefined();
   });
+
+  it("opts into layout planner only when gemini is selected", () => {
+    expect(buildConvertRequestPayload("opencv-fast").layout_planner).toBeUndefined();
+    expect(buildConvertRequestPayload("opencv-fast", false, "gemini").layout_planner).toBe("gemini");
+    expect(buildConvertRequestPayload("opencv-fast", false, "gemini").layout_planner_max_calls).toBe(30);
+  });
 });

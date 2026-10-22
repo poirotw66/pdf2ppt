@@ -253,6 +253,8 @@ class PageResult:
     vector_fallback_reason: str | None = None
     layout_engine: str | None = None
     layout_fallback_reason: str | None = None
+    # Opt-in VLM layout planner metadata (Phase 3). Empty when planner is off.
+    plan_metadata: dict[str, object] = field(default_factory=dict)
 
     def to_report_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -278,6 +280,8 @@ class PageResult:
             payload["layout_engine"] = self.layout_engine
         if self.layout_fallback_reason is not None:
             payload["layout_fallback_reason"] = self.layout_fallback_reason
+        if self.plan_metadata:
+            payload["plan_metadata"] = dict(self.plan_metadata)
         return payload
 
 
@@ -288,6 +292,7 @@ class ConversionReport:
     pages: list[PageResult]
     generative_inpaint: dict[str, object] | None = None
     refine: dict[str, object] | None = None
+    layout_planner: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         editable_pages = sum(
@@ -304,4 +309,6 @@ class ConversionReport:
             payload["generative_inpaint"] = self.generative_inpaint
         if self.refine is not None:
             payload["refine"] = self.refine
+        if self.layout_planner is not None:
+            payload["layout_planner"] = self.layout_planner
         return payload

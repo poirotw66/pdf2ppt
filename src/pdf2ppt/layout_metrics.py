@@ -289,3 +289,123 @@ def slide_has_title_placeholder_text(pptx_path: Path) -> bool:
         if title is not None and (title.text or "").strip():
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 layout-planner acceptance metrics
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class PlannerAcceptanceMetrics:
+    """Title / header-footer / reading-order scores vs planner ground truth."""
+
+    title_accuracy: float | None
+    header_footer_filter_rate: float | None
+    reading_order_correctness: float | None
+    title_detected: bool | None = None
+    title_expected: bool | None = None
+    expected_header_footer_count: int = 0
+    filtered_header_footer_count: int = 0
+    reading_order_pairs_checked: int = 0
+    reading_order_pairs_correct: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def load_planner_ground_truth(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Planner ground truth must be an object: {path}")
+    return payload
+
+
+def evaluate_planner_acceptance(
+    predicted_blocks: list[TextBlock],
+    ground_truth: dict[str, Any],
+    *,
+    match_iou_threshold: float = 0.25,
+) -> PlannerAcceptanceMetrics:
+    """Score Phase-3 acceptance criteria against ``*.planner.json`` labels."""
+
+    paragraphs = list(ground_truth.get("paragraphs") or [])
+    expect_title = bool(ground_truth.get("expect_title")) or any(
+        str(item.get("role") or "") == "title" for item in paragraphs
+    )
+    title_detected = any(
+        block.block_role == "title"
+        or block.use_title_placeholder
+        or block.layout_label in {"title", "paragraph_title"}
+        for block in predicted_blocks
+    )
+    if not expect_title and not title_detected:
+        title_accuracy: float | None = 1.0
+    elif expect_title:
+        title_accuracy = 1.0 if title_detected else 0.0
+    else:
+        title_accuracy = 0.0
+
+    hf_ids = [str(item) for item in (ground_truth.get("expect_header_footer_ids") or [])]
+    if not hf_ids:
+        hf_ids = [
+            str(item.get("id"))
+            for item in paragraphs
+            if str(item.get("role") or "") in {"header", "footer", "page_number"}
+        ]
+    hf_gts = [item for item in paragraphs if str(item.get("id")) in set(hf_ids)]
+    filtered = 0
+    for gt in hf_gts:
+        bbox = _as_bbox(gt["bbox"])
+        still_present = any(
+            iou(block.bbox, bbox) >= match_iou_threshold
+            or intersection_area(block.bbox, bbox) / max(bbox_area(bbox), 1.0) >= 0.5
+            for block in predicted_blocks
+        )
+        if not still_present:
+            filtered += 1
+    filter_rate = (filtered / len(hf_gts)) if hf_gts else None
+
+    # Reading order: among GT paragraphs matched to predictions, pairwise order.
+    matched: list[tuple[int, TextBlock]] = []
+    used_pred: set[int] = set()
+    for gt_index, gt in enumerate(paragraphs):
+        if str(gt.get("role") or "") in {"header", "footer", "page_number"}:
+            continue
+        best_pi = None
+        best_score = 0.0
+        gt_bbox = _as_bbox(gt["bbox"])
+        for pi, pred in enumerate(predicted_blocks):
+            if pi in used_pred:
+                continue
+            score = iou(pred.bbox, gt_bbox)
+            if score > best_score:
+                best_score = score
+                best_pi = pi
+        if best_pi is not None and best_score >= match_iou_threshold:
+            used_pred.add(best_pi)
+            matched.append((gt_index, predicted_blocks[best_pi]))
+
+    pairs_checked = 0
+    pairs_correct = 0
+    for left in range(len(matched)):
+        for right in range(left + 1, len(matched)):
+            gt_i, pred_i = matched[left]
+            gt_j, pred_j = matched[right]
+            pairs_checked += 1
+            if (gt_i < gt_j) == (pred_i.reading_order <= pred_j.reading_order):
+                pairs_correct += 1
+    order_score = (pairs_correct / pairs_checked) if pairs_checked else None
+
+    return PlannerAcceptanceMetrics(
+        title_accuracy=title_accuracy,
+        header_footer_filter_rate=None if filter_rate is None else round(filter_rate, 6),
+        reading_order_correctness=None if order_score is None else round(order_score, 6),
+        title_detected=title_detected,
+        title_expected=expect_title,
+        expected_header_footer_count=len(hf_gts),
+        filtered_header_footer_count=filtered,
+        reading_order_pairs_checked=pairs_checked,
+        reading_order_pairs_correct=pairs_correct,
+    )

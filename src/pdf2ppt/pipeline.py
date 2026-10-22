@@ -71,6 +71,12 @@ from .layout import (
     extract_figure_image_placements,
     split_wide_multiline_blocks,
 )
+from .layout_planner import (
+    LayoutPlannerBudget,
+    LayoutPlannerService,
+    build_layout_planner_service,
+    uses_layout_planner,
+)
 from .models import ConversionReport, ImagePlacement, PageResult, QualityScore, TextBlock
 from .native_extraction import (
     assign_block_roles,
@@ -203,16 +209,35 @@ def convert_pdf(
             refine_report_path,
         )
 
+    layout_planner_report = None
+    if isinstance(getattr(options, "layout_planner_budget", None), LayoutPlannerBudget):
+        layout_planner_report = options.layout_planner_budget.to_dict()
+        logger.info(
+            "Layout planner run stats: calls=%s cache_hits=%s fallbacks=%s est_cost_usd=%.4f",
+            options.layout_planner_budget.calls,
+            options.layout_planner_budget.cache_hits,
+            options.layout_planner_budget.fallbacks,
+            options.layout_planner_budget.estimated_cost_usd,
+        )
+
     if emit_ir_path is not None:
         from .ir_io import write_slide_ir
 
         # Emit after refine so SlideIR matches the final PPTX when both are requested.
+        deck_plan_metadata = None
+        if layout_planner_report is not None:
+            deck_plan_metadata = {
+                "engine": "layout_planner",
+                "planner": getattr(options, "layout_planner", None),
+                "stats": layout_planner_report,
+            }
         write_slide_ir(
             page_results,
             emit_ir_path,
             slide_width_pt=slide_width_pt,
             slide_height_pt=slide_height_pt,
             source_path=options.input_path,
+            plan_metadata=deck_plan_metadata,
         )
 
     generative_report = None
@@ -232,6 +257,7 @@ def convert_pdf(
         pages=page_results,
         generative_inpaint=generative_report,
         refine=refine_report_payload,
+        layout_planner=layout_planner_report,
     )
     options.report_path.write_text(
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
@@ -267,6 +293,9 @@ def analyze_pdf(
         model_root=getattr(options, "layout_model_root", None) or options.ocr_model_root,
         skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
     )
+    layout_planner_service: LayoutPlannerService | None = None
+    if uses_layout_planner(getattr(options, "layout_planner", None)):
+        layout_planner_service = build_layout_planner_service(options)
     if uses_generative_inpaint_engine(options.inpaint_engine):
         if options.generative_budget is None:
             options.generative_budget = GenerativeBudget(
@@ -296,6 +325,7 @@ def analyze_pdf(
                     options,
                     ocr_engine,
                     layout_engine=layout_engine,
+                    layout_planner_service=layout_planner_service,
                     precomputed_ocr_page_data=batched_ocr_page_data.get(page.number + 1),
                 )
             except (OcrInitializationError, OcrProcessingError, PageConversionError):
@@ -380,6 +410,7 @@ def analyze_page(
     ocr_engine: OcrEngine,
     *,
     layout_engine: LayoutEngine | None = None,
+    layout_planner_service: LayoutPlannerService | None = None,
     precomputed_ocr_page_data: tuple[Image.Image, OcrPageData] | None = None,
 ) -> PageResult:
     page_started_at = perf_counter()
@@ -467,6 +498,7 @@ def analyze_page(
     text_blocks = filter_text_blocks_outside_tables(text_blocks, vector_result.absorbed_text_block_ids)
 
     # P2 layout analysis: group lines, bullets, titles, figures; skip headers/footers.
+    # Optional Phase-3 VLM planner may replace text grouping when opt-in succeeds.
     if layout_engine is None:
         layout_engine = LayoutEngine(
             engine=str(getattr(options, "layout_engine", "heuristic")),
@@ -474,35 +506,73 @@ def analyze_page(
             skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
         )
     layout_image = ocr_reference_image
-    if layout_image is None and layout_engine.requested_engine == "ppstructure":
+    needs_layout_raster = layout_engine.requested_engine == "ppstructure" or layout_planner_service is not None
+    if layout_image is None and needs_layout_raster:
         layout_render_started_at = perf_counter()
         layout_image = render_page_image(page, dpi=render_dpi)
         if page_image is None:
             page_image = layout_image
         background_render_seconds += perf_counter() - layout_render_started_at
     text_blocks = split_wide_multiline_blocks(text_blocks, page_width=float(page.rect.width))
+
+    plan_metadata: dict[str, object] = {}
+    planner_group_elements: list = []
+    used_layout_planner = False
+    layout_input_blocks = text_blocks
+    if layout_planner_service is not None:
+        planned = layout_planner_service.try_plan_page(
+            page_image=layout_image,
+            text_blocks=text_blocks,
+            page_number=page_number,
+            page_height=float(page.rect.height),
+        )
+        if planned is not None and planned.used_planner:
+            text_blocks = planned.text_blocks
+            planner_group_elements = list(planned.group_elements)
+            plan_metadata = dict(planned.plan_metadata)
+            used_layout_planner = True
+
     layout_page = layout_engine.analyze(
         layout_image,
         page_width=float(page.rect.width),
         page_height=float(page.rect.height),
-        text_blocks=text_blocks,
+        # Figure/region detection still uses pre-merge geometry when the planner
+        # already produced text frames.
+        text_blocks=layout_input_blocks if used_layout_planner else text_blocks,
         page_number=page_number,
         shape_bboxes=[shape.bbox for shape in vector_result.shapes],
         table_bboxes=[table.bbox for table in vector_result.tables],
     )
-    layout_applied = apply_layout_to_page(
-        text_blocks,
-        layout_page,
-        page_width=float(page.rect.width),
-        page_height=float(page.rect.height),
-        page_image=layout_image,
-        table_elements=vector_result.tables,
-        shape_elements=vector_result.shapes,
-        skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
-        page_number=page_number,
-    )
-    text_blocks = layout_applied.text_blocks
-    layout_figure_images = list(layout_applied.figure_images)
+    if used_layout_planner:
+        # Keep geometric figure crops; text boxes already come from the planner.
+        layout_figure_images = extract_figure_image_placements(
+            layout_page.regions,
+            page_image=layout_image,
+            page_width=float(page.rect.width),
+            page_height=float(page.rect.height),
+            shape_elements=vector_result.shapes,
+            table_elements=vector_result.tables,
+        )
+        layout_applied_engine = "layout_planner"
+        layout_applied_fallback = None
+        layout_applied_regions = list(layout_page.regions)
+    else:
+        layout_applied = apply_layout_to_page(
+            text_blocks,
+            layout_page,
+            page_width=float(page.rect.width),
+            page_height=float(page.rect.height),
+            page_image=layout_image,
+            table_elements=vector_result.tables,
+            shape_elements=vector_result.shapes,
+            skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
+            page_number=page_number,
+        )
+        text_blocks = layout_applied.text_blocks
+        layout_figure_images = list(layout_applied.figure_images)
+        layout_applied_engine = layout_applied.engine
+        layout_applied_fallback = layout_applied.fallback_reason
+        layout_applied_regions = layout_applied.regions
 
     has_remaining_visuals = remaining_visuals_after_nativization(
         image_boxes=image_boxes,
@@ -634,12 +704,12 @@ def analyze_page(
                 image_boxes=image_boxes,
                 paint_events=paint_events_from_page(page),
             )
-        if layout_figure_images or layout_applied.regions:
+        if layout_figure_images or layout_applied_regions:
             # Re-crop figures from the text-erased raster so OCR labels aren't
             # doubled under editable text boxes (scanned_vector_shapes).
-            if background_mode == "overlay" and layout_applied.regions:
+            if background_mode == "overlay" and layout_applied_regions:
                 layout_figure_images = extract_figure_image_placements(
-                    layout_applied.regions,
+                    layout_applied_regions,
                     page_image=background_image,
                     page_width=float(page.rect.width),
                     page_height=float(page.rect.height),
@@ -735,11 +805,13 @@ def analyze_page(
         image_elements=image_elements,
         shape_elements=vector_result.shapes if emit_native else [],
         table_elements=vector_result.tables if emit_native else [],
-        layout_regions=layout_applied.regions if emit_native else [],
+        group_elements=planner_group_elements if emit_native else [],
+        layout_regions=layout_applied_regions if emit_native else [],
         vector_mode=str(getattr(options, "vector_mode", "auto")),
         vector_fallback_reason=vector_result.fallback_reason,
-        layout_engine=layout_applied.engine,
-        layout_fallback_reason=layout_applied.fallback_reason,
+        layout_engine=layout_applied_engine,
+        layout_fallback_reason=layout_applied_fallback,
+        plan_metadata=plan_metadata if emit_native else {},
     )
 
 

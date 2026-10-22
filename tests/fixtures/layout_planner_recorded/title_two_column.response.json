@@ -1,0 +1,91 @@
+{
+  "blocks": [
+    {
+      "id": "title",
+      "role": "title",
+      "reading_order": 0,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "left_h",
+      "role": "subtitle",
+      "reading_order": 1,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "left_p",
+      "role": "body",
+      "reading_order": 2,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "right_h",
+      "role": "subtitle",
+      "reading_order": 3,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "right_p",
+      "role": "body",
+      "reading_order": 4,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_title",
+      "member_ids": [
+        "title"
+      ],
+      "role": "title",
+      "reading_order": 0,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_left_h",
+      "member_ids": [
+        "left_h"
+      ],
+      "role": "subtitle",
+      "reading_order": 1,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_left_p",
+      "member_ids": [
+        "left_p"
+      ],
+      "role": "body",
+      "reading_order": 2,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_right_h",
+      "member_ids": [
+        "right_h"
+      ],
+      "role": "subtitle",
+      "reading_order": 3,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_right_p",
+      "member_ids": [
+        "right_p"
+      ],
+      "role": "body",
+      "reading_order": 4,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    }
+  ]
+}

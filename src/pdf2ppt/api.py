@@ -614,6 +614,18 @@ def _conversion_options_from_request(
         layout_engine=request.layout_engine,
         layout_model_root=Path(request.layout_model_root) if request.layout_model_root else None,
         layout_skip_header_footer=request.layout_skip_header_footer,
+        layout_planner=getattr(request, "layout_planner", None),
+        layout_planner_model=getattr(request, "layout_planner_model", None),
+        layout_planner_max_calls=int(getattr(request, "layout_planner_max_calls", 30)),
+        layout_planner_max_cost_usd=float(getattr(request, "layout_planner_max_cost_usd", 1.0)),
+        layout_planner_timeout_s=float(getattr(request, "layout_planner_timeout_s", 45.0)),
+        layout_planner_concurrency=int(getattr(request, "layout_planner_concurrency", 2)),
+        layout_planner_cache_dir=(
+            Path(request.layout_planner_cache_dir)
+            if getattr(request, "layout_planner_cache_dir", None)
+            else None
+        ),
+        layout_planner_min_confidence=float(getattr(request, "layout_planner_min_confidence", 0.55)),
         approved_ocr_blocks_by_page=approved_ocr_blocks_by_page,
         approved_ocr_image_size_by_page=approved_ocr_image_size_by_page,
         apply_notebooklm_watermark_fallback=apply_notebooklm_watermark_fallback,

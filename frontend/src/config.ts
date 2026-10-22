@@ -18,6 +18,15 @@ export const lamaInpaintPaddingPx = 8;
 
 export const generativeInpaintPaddingPx = 8;
 
+export const LAYOUT_PLANNER_OPTIONS = [
+  { value: "", label: "Off (default, geometric heuristics)" },
+  { value: "gemini", label: "Gemini VLM (experimental, API key)" },
+] as const;
+
+export type LayoutPlannerOption = (typeof LAYOUT_PLANNER_OPTIONS)[number]["value"];
+
+export const defaultLayoutPlanner: LayoutPlannerOption = "";
+
 export type ConvertRequestPayload = {
   write_debug_artifacts: boolean;
   inpaint_engine: InpaintEngine;
@@ -28,11 +37,14 @@ export type ConvertRequestPayload = {
   generative_max_calls?: number;
   generative_max_cost_usd?: number;
   generative_verify_ocr?: boolean;
+  layout_planner?: "gemini";
+  layout_planner_max_calls?: number;
 };
 
 export function buildConvertRequestPayload(
   inpaintEngine: InpaintEngine,
   writeDebugArtifacts = false,
+  layoutPlanner: LayoutPlannerOption = defaultLayoutPlanner,
 ): ConvertRequestPayload {
   const payload: ConvertRequestPayload = {
     write_debug_artifacts: writeDebugArtifacts,
@@ -49,6 +61,10 @@ export function buildConvertRequestPayload(
     // and anti-aliased edges are covered; keys come from server env vars.
     payload.inpaint_padding_px = generativeInpaintPaddingPx;
     payload.generative_verify_ocr = true;
+  }
+  if (layoutPlanner === "gemini") {
+    payload.layout_planner = "gemini";
+    payload.layout_planner_max_calls = 30;
   }
   return payload;
 }

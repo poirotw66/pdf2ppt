@@ -20,10 +20,17 @@ IR ⊆ what P1/P2 already render:
 | Pictures / crops | image elements + figure crops |
 | Layout regions | heuristic / PP-Structure |
 | Background mode + raster | overlay / full-page / elements |
-| Groups / `plan_metadata` | optional forward-compat keys for P3 |
+| Groups / `plan_metadata` | optional; populated by the experimental Phase-3 layout planner |
 
 Text is treated as ground truth (`locked: true` on emit). Do not invent geometry
 the renderer cannot express yet.
+
+When `--layout-planner gemini` succeeds, pdf2ppt writes `pages[].groups` (merge
+membership) and `pages[].plan_metadata` / deck `plan_metadata`, and **renders**
+them: reading order → shape order, title roles → title placeholder styling,
+header/footer/page_number filtered per `--keep-header-footer`, paragraph groups
+→ merged text frames, font class → configured font family. See
+[`layout-planner.md`](./layout-planner.md).
 
 ## Asset convention
 
@@ -80,8 +87,8 @@ Defaults leave existing convert behaviour unchanged.
 
 1. `emit-ir` on a PDF → valid SlideIR + assets.
 2. Edit JSON (roles, reading order, styles the renderer already supports)
-   without rewriting text. `groups` / `plan_metadata` are forward-compatible
-   for P3 only — they are not rendered today.
+   without rewriting text. `groups` / `plan_metadata` are written by the
+   experimental layout planner and are honoured on `from-ir` / convert render.
 3. `from-ir` → schema-valid PPTX via `ppt_render`.
 
 See `skills/pdf2ppt/SKILL.md` for a Codex/Claude-oriented skill pack.
