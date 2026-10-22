@@ -91,6 +91,8 @@ class LayoutPlan:
     latency_ms: float = 0.0
     estimated_cost_usd: float = 0.0
     notes: list[str] = field(default_factory=list)
+    prompt_tokens: int | None = None
+    output_tokens: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -102,6 +104,8 @@ class LayoutPlan:
             "latency_ms": self.latency_ms,
             "estimated_cost_usd": self.estimated_cost_usd,
             "notes": list(self.notes),
+            "prompt_tokens": self.prompt_tokens,
+            "output_tokens": self.output_tokens,
         }
 
 
@@ -114,6 +118,10 @@ class LayoutPlannerApplication:
     plan_metadata: dict[str, Any]
     used_planner: bool
     fallback_reason: str | None = None
+    # When False, caller must keep heuristic paragraph/list grouping and then
+    # layer roles via annotate_grouped_blocks_with_plan.
+    plan: LayoutPlan | None = None
+    frames_applied: bool = True
 
 
 @dataclass(slots=True)

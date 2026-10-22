@@ -540,6 +540,7 @@ def analyze_page(
     plan_metadata: dict[str, object] = {}
     planner_group_elements: list = []
     used_layout_planner = False
+    pending_planner_plan = None
     layout_input_blocks = text_blocks
     if layout_planner_service is not None:
         # Chart-like figure regions from a quick heuristic pass are not available
@@ -554,10 +555,15 @@ def analyze_page(
             chart_bboxes=[],
         )
         if planned is not None and planned.used_planner:
-            text_blocks = planned.text_blocks
-            planner_group_elements = list(planned.group_elements)
             plan_metadata = dict(planned.plan_metadata)
-            used_layout_planner = True
+            if planned.frames_applied:
+                # Opt-in grouping: planner produced final text frames.
+                text_blocks = planned.text_blocks
+                planner_group_elements = list(planned.group_elements)
+                used_layout_planner = True
+            else:
+                # Default: keep heuristic paragraph/list grouping; overlay roles later.
+                pending_planner_plan = planned.plan
 
     layout_page = layout_engine.analyze(
         layout_image,
@@ -596,8 +602,24 @@ def analyze_page(
             page_number=page_number,
         )
         text_blocks = layout_applied.text_blocks
+        if pending_planner_plan is not None:
+            from .layout_planner.apply import annotate_grouped_blocks_with_plan
+
+            text_blocks = annotate_grouped_blocks_with_plan(
+                text_blocks,
+                pending_planner_plan,
+                source_blocks=layout_input_blocks,
+                page_height=float(page.rect.height),
+                skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
+                font_map=getattr(options, "layout_planner_font_map", None),
+                apply_fonts=bool(getattr(options, "layout_planner_apply_fonts", False)),
+            )
+            plan_metadata["frames_applied"] = False
+            plan_metadata["heuristic_grouping"] = True
+            layout_applied_engine = "layout_planner"
+        else:
+            layout_applied_engine = layout_applied.engine
         layout_figure_images = list(layout_applied.figure_images)
-        layout_applied_engine = layout_applied.engine
         layout_applied_fallback = layout_applied.fallback_reason
         layout_applied_regions = layout_applied.regions
 

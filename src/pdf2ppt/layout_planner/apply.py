@@ -1,9 +1,9 @@
 """Apply a validated layout plan onto geometric text blocks / SlideIR groups.
 
 Default application is **low-risk only**: roles, reading order, title placeholder,
-and header/footer filtering. Grouping merges and font-class remaps are opt-in
-(``apply_grouping`` / ``apply_fonts``) because they caused SSIM regressions on
-tables, charts, and digital pages with real PDF fonts.
+and header/footer filtering layered on top of **heuristic** paragraph/list
+grouping (see ``annotate_grouped_blocks_with_plan``). Grouping merges and
+font-class remaps are opt-in (``apply_grouping`` / ``apply_fonts``).
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from ..layout import (
     _enrich_block_paragraphs,
     _estimate_font_size_from_bbox,
     _paragraphs_from_members,
+    intersection_area,
     strip_bullet_prefix,
     union_bbox,
 )
@@ -64,6 +65,20 @@ _MAX_FONT_SIZE_RATIO = 1.35
 _MIN_COLUMN_OVERLAP_RATIO = 0.45
 _UNSAFE_GROUP_ROLES: frozenset[str] = frozenset({"table_cell", "other"})
 
+# Prefer these roles when aggregating annotations onto a heuristic frame.
+_ROLE_PRIORITY: dict[str, int] = {
+    "title": 100,
+    "subtitle": 80,
+    "list_item": 70,
+    "caption": 60,
+    "header": 50,
+    "footer": 50,
+    "page_number": 50,
+    "body": 20,
+    "table_cell": 10,
+    "other": 0,
+}
+
 
 def apply_layout_plan(
     text_blocks: list[TextBlock],
@@ -79,33 +94,69 @@ def apply_layout_plan(
     table_bboxes: Sequence[BBox] | None = None,
     chart_bboxes: Sequence[BBox] | None = None,
 ) -> LayoutPlannerApplication:
-    """Annotate (and optionally merge) blocks per plan. Never invents text."""
+    """Annotate (and optionally merge) blocks per plan. Never invents text.
+
+    When ``apply_grouping`` is False, returns ``frames_applied=False`` so the
+    caller can keep heuristic paragraph/list grouping and then call
+    ``annotate_grouped_blocks_with_plan``.
+    """
+
+    resolved_font_map = normalize_font_map(font_map)
+    if not apply_grouping:
+        plan_metadata: dict[str, Any] = {
+            "engine": "layout_planner",
+            "model": plan.model,
+            "prompt_version": plan.prompt_version,
+            "cache_hit": plan.cache_hit,
+            "latency_ms": plan.latency_ms,
+            "estimated_cost_usd": plan.estimated_cost_usd,
+            "block_count": len(plan.blocks),
+            "group_count": len(plan.groups),
+            "accepted_group_count": 0,
+            "apply_grouping": False,
+            "apply_fonts": apply_fonts,
+            "frames_applied": False,
+            "rejected_groups": [],
+            "notes": list(plan.notes) + ["defer_grouping_to_heuristic"],
+            "plan": plan.to_dict(),
+            "layout_regions": [],
+        }
+        return LayoutPlannerApplication(
+            text_blocks=list(text_blocks),
+            group_elements=[],
+            plan_metadata=plan_metadata,
+            used_planner=True,
+            fallback_reason=None,
+            plan=plan,
+            frames_applied=False,
+        )
 
     by_id = {block.id: block for block in text_blocks}
     annotations = {item.id: item for item in plan.blocks}
-    resolved_font_map = normalize_font_map(font_map)
     obstacle_bboxes = list(table_bboxes or []) + list(chart_bboxes or [])
 
     accepted_groups: list[PlannedGroup] = []
     rejected_group_notes: list[str] = []
     claimed: set[str] = set()
 
-    if apply_grouping:
-        for group in sorted(plan.groups, key=lambda item: item.reading_order):
-            members = [by_id[member_id] for member_id in group.member_ids if member_id in by_id]
-            ok, reason = _group_is_safe_to_merge(
-                group,
-                members,
-                annotations=annotations,
-                page_width=page_width,
-                all_blocks=text_blocks,
-                obstacle_bboxes=obstacle_bboxes,
-            )
-            if not ok:
-                rejected_group_notes.append(f"{group.id}: {reason}")
-                continue
-            accepted_groups.append(group)
-            claimed.update(group.member_ids)
+    for group in sorted(plan.groups, key=lambda item: item.reading_order):
+        members = [by_id[member_id] for member_id in group.member_ids if member_id in by_id]
+        if len(members) <= 1:
+            # Singletons stay on the normal per-block path (no pin_font_size).
+            continue
+        ok, reason = _group_is_safe_to_merge(
+            group,
+            members,
+            annotations=annotations,
+            page_width=page_width,
+            all_blocks=text_blocks,
+            obstacle_bboxes=obstacle_bboxes,
+        )
+        if not ok:
+            rejected_group_notes.append(f"{group.id}: {reason}")
+            continue
+        accepted_groups.append(group)
+        claimed.update(group.member_ids)
 
     output_blocks: list[TextBlock] = []
     group_elements: list[GroupElement] = []
@@ -172,7 +223,7 @@ def apply_layout_plan(
         block.reading_order = index
     _assign_title_placeholder(output_blocks, page_height=page_height)
 
-    plan_metadata: dict[str, Any] = {
+    plan_metadata = {
         "engine": "layout_planner",
         "model": plan.model,
         "prompt_version": plan.prompt_version,
@@ -182,8 +233,9 @@ def apply_layout_plan(
         "block_count": len(plan.blocks),
         "group_count": len(plan.groups),
         "accepted_group_count": len(accepted_groups),
-        "apply_grouping": apply_grouping,
+        "apply_grouping": True,
         "apply_fonts": apply_fonts,
+        "frames_applied": True,
         "rejected_groups": rejected_group_notes,
         "notes": list(plan.notes),
         "plan": plan.to_dict(),
@@ -195,7 +247,110 @@ def apply_layout_plan(
         plan_metadata=plan_metadata,
         used_planner=True,
         fallback_reason=None,
+        plan=plan,
+        frames_applied=True,
     )
+
+
+def annotate_grouped_blocks_with_plan(
+    grouped_blocks: list[TextBlock],
+    plan: LayoutPlan,
+    *,
+    source_blocks: Sequence[TextBlock],
+    page_height: float = 540.0,
+    skip_header_footer: bool = True,
+    font_map: Mapping[str, Mapping[str, str]] | Mapping[str, str] | None = None,
+    apply_fonts: bool = False,
+) -> list[TextBlock]:
+    """Layer planner roles / reading order / HF filter onto heuristic frames.
+
+    Frame geometry and paragraph/list structure stay exactly as ``grouped_blocks``
+    (planner-off grouping). Never merges or splits boxes.
+    """
+
+    annotations = {item.id: item for item in plan.blocks}
+    sources = list(source_blocks)
+    resolved_font_map = normalize_font_map(font_map)
+    output: list[TextBlock] = []
+
+    for block in grouped_blocks:
+        matched = _match_source_blocks(block, sources)
+        matched_annotations = [
+            annotations[source.id] for source in matched if source.id in annotations
+        ]
+        if (
+            skip_header_footer
+            and matched_annotations
+            and all(item.role in SKIPPABLE_ROLES for item in matched_annotations)
+            and all(source.source == "ocr" for source in matched)
+        ):
+            continue
+
+        annotated = _copy_block(block)
+        if matched_annotations:
+            chosen = max(
+                matched_annotations,
+                key=lambda item: (_ROLE_PRIORITY.get(item.role, 0), item.confidence),
+            )
+            annotated.block_role = _ROLE_TO_BLOCK_ROLE.get(chosen.role, annotated.block_role)
+            annotated.layout_label = _ROLE_TO_LAYOUT_LABEL.get(chosen.role, annotated.layout_label)
+            annotated.reading_order = min(item.reading_order for item in matched_annotations)
+            annotated.use_title_placeholder = chosen.role in TITLE_ROLES
+            if chosen.role == "list_item" and annotated.block_role != "list":
+                annotated = _force_list_paragraphs(annotated)
+            if apply_fonts:
+                annotated.font_family = resolve_font_family(
+                    chosen.font_family_class,
+                    text=annotated.text,
+                    existing_font_family=annotated.font_family,
+                    font_map=resolved_font_map,
+                    apply_font_class=True,
+                )
+        output.append(annotated)
+
+    output.sort(key=lambda item: (item.reading_order, item.bbox[1], item.bbox[0]))
+    for index, block in enumerate(output):
+        block.reading_order = index
+    _assign_title_placeholder(output, page_height=page_height)
+    return output
+
+
+def _match_source_blocks(grouped: TextBlock, sources: Sequence[TextBlock]) -> list[TextBlock]:
+    """Associate a heuristic frame with the original line blocks it covers."""
+
+    matched: list[TextBlock] = []
+    grouped_text = (grouped.text or "").replace("\n", " ")
+    for source in sources:
+        source_text = (source.text or "").strip()
+        geom = 0.0
+        if source.bbox and grouped.bbox:
+            geom = intersection_area(source.bbox, grouped.bbox) / max(
+                1.0, (source.bbox[2] - source.bbox[0]) * (source.bbox[3] - source.bbox[1])
+            )
+        text_hit = bool(source_text) and source_text in grouped.text
+        # line_bboxes on merged frames often preserve member geometry.
+        line_hit = False
+        if grouped.line_bboxes:
+            for line_bbox in grouped.line_bboxes:
+                if (
+                    abs(line_bbox[0] - source.bbox[0]) < 2.0
+                    and abs(line_bbox[1] - source.bbox[1]) < 2.0
+                    and abs(line_bbox[2] - source.bbox[2]) < 4.0
+                    and abs(line_bbox[3] - source.bbox[3]) < 4.0
+                ):
+                    line_hit = True
+                    break
+        if line_hit or geom >= 0.45 or (text_hit and geom >= 0.15):
+            matched.append(source)
+            continue
+        # Single-line frame identical to a source.
+        if source.id == grouped.id or (
+            source_text
+            and source_text == grouped_text.strip()
+            and geom >= 0.25
+        ):
+            matched.append(source)
+    return matched
 
 
 def _group_is_safe_to_merge(
@@ -208,7 +363,6 @@ def _group_is_safe_to_merge(
     obstacle_bboxes: Sequence[BBox],
 ) -> tuple[bool, str]:
     if len(members) <= 1:
-        # Singleton groups are always fine (no spatial merge).
         return True, ""
     if group.role in _UNSAFE_GROUP_ROLES:
         return False, f"role {group.role!r} must not merge"
@@ -237,14 +391,12 @@ def _group_is_safe_to_merge(
             return False, f"vertical gap {gap:.1f} exceeds {max_gap:.1f}"
         left_delta = abs(current.bbox[0] - previous.bbox[0])
         if left_delta > max_left_delta:
-            # Allow hanging indent for list-like lines.
             indent_ok = (
                 group.role == "list_item"
                 and 0 <= (current.bbox[0] - previous.bbox[0]) <= max_left_delta * 2.5
             )
             if not indent_ok:
                 return False, f"left edges misaligned ({left_delta:.1f}pt)"
-        # Same column: x-ranges must overlap substantially.
         overlap = max(0.0, min(previous.bbox[2], current.bbox[2]) - max(previous.bbox[0], current.bbox[0]))
         min_width = max(1.0, min(previous.bbox[2] - previous.bbox[0], current.bbox[2] - current.bbox[0]))
         if overlap / min_width < _MIN_COLUMN_OVERLAP_RATIO:
@@ -298,7 +450,6 @@ def _annotate_singleton(
     enriched.use_title_placeholder = role in TITLE_ROLES
     if role == "list_item" and not enriched.paragraphs:
         enriched = _force_list_paragraphs(enriched)
-    # Never change size/box. Only remap font when unknown and fonts are enabled.
     enriched.font_family = resolve_font_family(
         annotation.font_family_class,
         text=enriched.text,
@@ -306,6 +457,8 @@ def _annotate_singleton(
         font_map=font_map,
         apply_font_class=apply_fonts,
     )
+    # Never pin — keep shrink-to-fit / autofit available.
+    enriched.pin_font_size = False
     return enriched
 
 
@@ -321,7 +474,6 @@ def _merge_members(
     apply_fonts: bool,
 ) -> TextBlock:
     def sort_key(block: TextBlock) -> tuple[float, float]:
-        # Spatial order only — keep each line at its original position via line_bboxes.
         return (block.bbox[1], block.bbox[0])
 
     ordered = sorted(members, key=sort_key)
@@ -344,7 +496,6 @@ def _merge_members(
     confidence = sum(block.confidence for block in ordered) / max(len(ordered), 1)
     image_boxes = [block.image_bbox for block in ordered if block.image_bbox is not None]
     merged_image_bbox = union_bbox(image_boxes) if image_boxes else base.image_bbox
-    # Preserve each line's original geometry (no restacking into a single column).
     line_bboxes = [block.bbox for block in ordered]
 
     existing_fonts = [block.font_family for block in ordered if is_known_font_family(block.font_family)]
@@ -386,7 +537,8 @@ def _merge_members(
         paragraphs=paragraphs,
         line_bboxes=line_bboxes,
         use_title_placeholder=role in TITLE_ROLES,
-        pin_font_size=True,  # Prevent fit_text from growing glyphs after merge.
+        # Do not pin: shrink-to-fit must remain available (flowchart "Start", etc.).
+        pin_font_size=False,
     )
 
 
@@ -441,4 +593,4 @@ def _copy_block(block: TextBlock) -> TextBlock:
     )
 
 
-__all__ = ["apply_layout_plan"]
+__all__ = ["annotate_grouped_blocks_with_plan", "apply_layout_plan"]

@@ -15,6 +15,7 @@ from .base import LayoutPlanner, LayoutPlannerError, blocks_to_evidence
 from .budget import (
     DEFAULT_ESTIMATED_COST_USD,
     DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    DEFAULT_WORST_CASE_CALL_COST_USD,
     LayoutPlannerBudget,
     LayoutPlannerCallRecord,
     Timer,
@@ -209,8 +210,12 @@ class LayoutPlannerService:
             )
             return None
 
-        # Atomic reserve before any network I/O (counts failures against the cap).
-        if not self._budget.try_reserve(estimated_cost_usd=DEFAULT_ESTIMATED_COST_USD):
+        # Atomic reserve before any network I/O. Use worst-case next-call cost
+        # so the dollar cap cannot be overshot when usage exceeds the average.
+        worst_case = float(
+            getattr(self._budget, "worst_case_call_cost_usd", DEFAULT_WORST_CASE_CALL_COST_USD)
+        )
+        if not self._budget.try_reserve(estimated_cost_usd=worst_case):
             self._budget.record_fallback(
                 LayoutPlannerCallRecord(
                     model=self.model,
@@ -237,7 +242,7 @@ class LayoutPlannerService:
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=DEFAULT_ESTIMATED_COST_USD,
+                    estimated_cost_usd=worst_case,
                     note="concurrency slot timeout",
                     fallback_kind="timeout",
                 )
@@ -260,7 +265,7 @@ class LayoutPlannerService:
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=DEFAULT_ESTIMATED_COST_USD,
+                    estimated_cost_usd=worst_case,
                     note=str(error),
                     fallback_kind="timeout",
                 )
@@ -270,7 +275,7 @@ class LayoutPlannerService:
             kind = getattr(error, "kind", "validation")
             if isinstance(error, LayoutPlanValidationError):
                 kind = "validation"
-            cost = float(getattr(error, "estimated_cost_usd", 0.0) or DEFAULT_ESTIMATED_COST_USD)
+            cost = float(getattr(error, "estimated_cost_usd", 0.0) or worst_case)
             self._budget.commit_failure(
                 LayoutPlannerCallRecord(
                     model=self.model,
@@ -293,7 +298,7 @@ class LayoutPlannerService:
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=DEFAULT_ESTIMATED_COST_USD,
+                    estimated_cost_usd=worst_case,
                     note=str(error),
                     fallback_kind="api_error",
                 )
@@ -319,6 +324,8 @@ class LayoutPlannerService:
                 estimated_cost_usd=plan.estimated_cost_usd or DEFAULT_ESTIMATED_COST_USD,
                 note=None,
                 fallback_kind=None,
+                prompt_tokens=getattr(plan, "prompt_tokens", None),
+                output_tokens=getattr(plan, "output_tokens", None),
             )
         )
         return self._apply(

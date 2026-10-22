@@ -12,14 +12,19 @@ When ``--compare-heuristic`` is set, also reports editability / text F1 (and
 SSIM when LibreOffice is available) vs the planner-off baseline for the same
 fixture.
 
-Recorded responses are **not** treated as a ground-truth oracle for acceptance
-summaries: auto-generated GT payloads are marked ``oracle_response`` and
-excluded from mean acceptance. Prefer committed ``layout_planner_recorded/``.
+Recorded mode requires committed **live** Gemini captures under
+``layout_planner_recorded/*.response.json`` (real block ids). Missing or
+GT-copied files are marked ``oracle_response`` / skipped and **excluded** from
+acceptance means — never reported as planner metrics.
+
+Capture with::
+
+    python scripts/bench_layout_planner.py --mode live --record-responses --max-calls 8
 
 Examples:
 
     python scripts/bench_layout_planner.py --mode recorded --compare-heuristic
-    python scripts/bench_layout_planner.py --mode live --max-calls 8
+    python scripts/bench_layout_planner.py --mode live --max-calls 8 --record-responses
     PDF2PPT_RUN_LAYOUT_PLANNER=1 python scripts/bench_layout_planner.py --mode live
 """
 
@@ -37,8 +42,6 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from PIL import Image  # noqa: E402
-
 from pdf2ppt.core import ConversionOptions  # noqa: E402
 from pdf2ppt.layout_metrics import (  # noqa: E402
     evaluate_page_layout,
@@ -47,12 +50,7 @@ from pdf2ppt.layout_metrics import (  # noqa: E402
     load_layout_ground_truth,
     load_planner_ground_truth,
 )
-from pdf2ppt.layout_planner import (  # noqa: E402
-    LayoutPlannerBudget,
-    LayoutPlannerService,
-    create_layout_planner,
-)
-from pdf2ppt.models import TextBlock  # noqa: E402
+from pdf2ppt.layout_planner import LayoutPlannerBudget  # noqa: E402
 from pdf2ppt.pipeline import analyze_pdf, render_pages_to_pptx  # noqa: E402
 from pdf2ppt.refine import (  # noqa: E402
     extract_pptx_slide_text,
@@ -77,7 +75,30 @@ def _load_recorded_response(recorded_dir: Path, fixture_stem: str) -> dict[str, 
     path = recorded_dir / f"{fixture_stem}.response.json"
     if not path.is_file():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return None
+    # Ignore empty placeholders / markers.
+    if not payload.get("blocks") and not payload.get("groups"):
+        return None
+    if payload.get("_comment") and not payload.get("blocks"):
+        return None
+    return payload
+
+
+def _looks_like_ground_truth_oracle(
+    recorded: dict[str, Any],
+    ground_truth: dict[str, Any] | None,
+) -> bool:
+    """True when recorded ids match planner.json GT ids (not live native_* ids)."""
+
+    if ground_truth is None:
+        return False
+    gt_ids = {str(item.get("id")) for item in (ground_truth.get("paragraphs") or []) if item.get("id")}
+    recorded_ids = {str(item.get("id")) for item in (recorded.get("blocks") or []) if item.get("id")}
+    if not recorded_ids or not gt_ids:
+        return False
+    return recorded_ids <= gt_ids
 
 
 def _make_recorded_transport(payload: dict[str, Any], *, ground_truth: dict[str, Any] | None = None):
@@ -112,200 +133,52 @@ def _adapt_plan_to_request_blocks(
     *,
     ground_truth: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Remap recorded member ids onto the block ids present in the live request."""
+    """Remap recorded member ids onto the block ids present in the live request.
 
+    Never rebuilds roles from ground truth — that would score an oracle.
+    When ids already match the request, return the payload unchanged. Otherwise
+    remap by reading-order index from the recorded plan onto request blocks.
+    """
+
+    del ground_truth  # Explicitly unused: do not GT-oracle remap.
     request_blocks = _extract_request_blocks(body)
     if not request_blocks:
         return payload
 
-    gt_paragraphs = list((ground_truth or {}).get("paragraphs") or [])
-    id_map: dict[str, str] = {}
-    used_gt: set[int] = set()
-    for req in request_blocks:
-        req_id = str(req.get("id"))
-        req_bbox = [float(v) for v in (req.get("bbox") or [0, 0, 0, 0])[:4]]
-        best_i = None
-        best_score = 0.0
-        for gi, gt in enumerate(gt_paragraphs):
-            if gi in used_gt:
-                continue
-            gb = [float(v) for v in (gt.get("bbox") or [0, 0, 0, 0])[:4]]
-            inter_w = max(0.0, min(req_bbox[2], gb[2]) - max(req_bbox[0], gb[0]))
-            inter_h = max(0.0, min(req_bbox[3], gb[3]) - max(req_bbox[1], gb[1]))
-            inter = inter_w * inter_h
-            area_a = max(1.0, (req_bbox[2] - req_bbox[0]) * (req_bbox[3] - req_bbox[1]))
-            area_b = max(1.0, (gb[2] - gb[0]) * (gb[3] - gb[1]))
-            score = inter / max(area_a + area_b - inter, 1.0)
-            if score > best_score:
-                best_score = score
-                best_i = gi
-        if best_i is not None and best_score >= 0.05:
-            used_gt.add(best_i)
-            id_map[str(gt_paragraphs[best_i].get("id"))] = req_id
-
     known_req = {str(item.get("id")) for item in request_blocks}
-    recorded_ids = {str(item.get("id")) for item in (payload.get("blocks") or [])}
+    recorded_blocks = list(payload.get("blocks") or [])
+    recorded_ids = {str(item.get("id")) for item in recorded_blocks}
     if recorded_ids and recorded_ids <= known_req:
         return payload
 
+    # Index-align recorded annotations onto live request blocks (plumbing only).
     blocks_out: list[dict[str, Any]] = []
     for index, req in enumerate(request_blocks):
-        req_id = str(req.get("id"))
-        role = "body"
-        font_class = "sans"
-        for gt_id, mapped in id_map.items():
-            if mapped != req_id:
-                continue
-            gt = next((item for item in gt_paragraphs if str(item.get("id")) == gt_id), None)
-            if gt is None:
-                break
-            role = str(gt.get("role") or "body")
-            if role == "list":
-                role = "list_item"
-            font_class = str(gt.get("font_family_class") or "sans")
-            break
-        blocks_out.append(
-            {
-                "id": req_id,
-                "role": role,
-                "reading_order": index,
-                "font_family_class": font_class,
-                "confidence": 0.92,
-            }
-        )
-
-    groups_out: list[dict[str, Any]] = []
-    pending: list[str] = []
-    pending_order = 0
-    for block in blocks_out:
-        if block["role"] == "list_item":
-            if not pending:
-                pending_order = int(block["reading_order"])
-            pending.append(str(block["id"]))
-            continue
-        if pending:
-            groups_out.append(
-                {
-                    "id": "g_list",
-                    "member_ids": list(pending),
-                    "role": "list_item",
-                    "reading_order": pending_order,
-                    "confidence": 0.92,
-                    "kind": "paragraph",
-                }
-            )
-            pending = []
-        groups_out.append(
-            {
-                "id": f"g_{block['id']}",
-                "member_ids": [str(block["id"])],
-                "role": str(block["role"]),
-                "reading_order": int(block["reading_order"]),
-                "confidence": 0.92,
-                "kind": "text_frame",
-            }
-        )
-    if pending:
-        groups_out.append(
-            {
-                "id": "g_list",
-                "member_ids": list(pending),
-                "role": "list_item",
-                "reading_order": pending_order,
-                "confidence": 0.92,
-                "kind": "paragraph",
-            }
-        )
-    return {"blocks": blocks_out, "groups": groups_out}
-
-
-def _synthetic_blocks_from_gt(gt: dict[str, Any]) -> list[TextBlock]:
-    blocks: list[TextBlock] = []
-    for index, item in enumerate(gt.get("paragraphs") or []):
-        bbox = item.get("bbox") or [0, 0, 1, 1]
-        blocks.append(
-            TextBlock(
-                id=str(item.get("id") or f"b{index}"),
-                source="ocr",
-                bbox=(float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
-                text=str(item.get("text") or ""),
-                confidence=0.95,
-                font_size=16.0,
-                reading_order=index,
-            )
-        )
-    return blocks
-
-
-def _plan_payload_from_gt(gt: dict[str, Any]) -> dict[str, Any]:
-    """Build a schema-valid recorded response from planner ground truth.
-
-    Used only as a plumbing fallback when no committed ``*.response.json``
-    exists. Results are tagged ``oracle_response`` and excluded from mean
-    acceptance so recorded mode cannot score GT against itself unnoticed.
-    """
-
-    blocks: list[dict[str, Any]] = []
-    groups: list[dict[str, Any]] = []
-    for index, item in enumerate(gt.get("paragraphs") or []):
-        block_id = str(item.get("id") or f"b{index}")
-        role = str(item.get("role") or "body")
+        src = recorded_blocks[index] if index < len(recorded_blocks) else {}
+        role = str(src.get("role") or "body")
         if role == "list":
             role = "list_item"
-        font_class = str(item.get("font_family_class") or "sans")
-        blocks.append(
+        blocks_out.append(
             {
-                "id": block_id,
+                "id": str(req.get("id")),
                 "role": role,
                 "reading_order": index,
-                "font_family_class": font_class,
-                "confidence": 0.92,
+                "font_family_class": str(src.get("font_family_class") or "sans"),
+                "confidence": float(src.get("confidence") or 0.9),
             }
         )
-        groups.append(
-            {
-                "id": f"g_{block_id}",
-                "member_ids": [block_id],
-                "role": role,
-                "reading_order": index,
-                "confidence": 0.92,
-                "kind": "text_frame",
-            }
-        )
-    merged_groups: list[dict[str, Any]] = []
-    pending: list[str] = []
-    pending_order = 0
-    for group in groups:
-        if str(group["role"]) == "list_item":
-            if not pending:
-                pending_order = int(group["reading_order"])
-            pending.extend(str(member_id) for member_id in list(group["member_ids"]))
-            continue
-        if pending:
-            merged_groups.append(
-                {
-                    "id": "g_list",
-                    "member_ids": list(pending),
-                    "role": "list_item",
-                    "reading_order": pending_order,
-                    "confidence": 0.92,
-                    "kind": "paragraph",
-                }
-            )
-            pending = []
-        merged_groups.append(group)
-    if pending:
-        merged_groups.append(
-            {
-                "id": "g_list",
-                "member_ids": list(pending),
-                "role": "list_item",
-                "reading_order": pending_order,
-                "confidence": 0.92,
-                "kind": "paragraph",
-            }
-        )
-    return {"blocks": blocks, "groups": merged_groups}
+    groups_out = [
+        {
+            "id": f"g_{block['id']}",
+            "member_ids": [str(block["id"])],
+            "role": str(block["role"]),
+            "reading_order": int(block["reading_order"]),
+            "confidence": float(block["confidence"]),
+            "kind": "text_frame",
+        }
+        for block in blocks_out
+    ]
+    return {"blocks": blocks_out, "groups": groups_out}
 
 
 def _score_pages(
@@ -376,6 +249,26 @@ def _delta(planned: float | None, baseline: float | None) -> float | None:
     return round(float(planned) - float(baseline), 6)
 
 
+def _save_recorded_plan(recorded_dir: Path, stem: str, page: Any) -> Path | None:
+    """Persist the live plan (with real block ids) for later --mode recorded."""
+
+    meta = getattr(page, "plan_metadata", None) or {}
+    plan = meta.get("plan")
+    if not isinstance(plan, dict) or not plan.get("blocks"):
+        return None
+    recorded_dir.mkdir(parents=True, exist_ok=True)
+    out = recorded_dir / f"{stem}.response.json"
+    payload = {
+        "blocks": plan.get("blocks") or [],
+        "groups": plan.get("groups") or [],
+        "model": plan.get("model"),
+        "prompt_version": plan.get("prompt_version"),
+        "recorded_from": "live",
+    }
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return out
+
+
 def run_fixture(
     stem: str,
     *,
@@ -388,6 +281,7 @@ def run_fixture(
     apply_grouping: bool,
     apply_fonts: bool,
     convert: bool,
+    record_responses: bool = False,
 ) -> dict[str, Any]:
     pdf_path = fixtures_dir / f"{stem}.pdf"
     if not pdf_path.is_file():
@@ -415,13 +309,33 @@ def run_fixture(
         gt_path = fixtures_dir / f"{stem}.planner.json"
         gt = load_planner_ground_truth(gt_path) if gt_path.is_file() else None
         recorded = _load_recorded_response(recorded_dir, stem)
-        if recorded is None and gt is not None:
-            recorded = _plan_payload_from_gt(gt)
-            oracle_response = True
         if recorded is None:
-            return {"fixture": stem, "error": "no recorded response"}
+            return {
+                "fixture": stem,
+                "mode": mode,
+                "oracle_response": True,
+                "skipped": True,
+                "error": (
+                    "no real recorded response "
+                    f"(expected {recorded_dir / (stem + '.response.json')}); "
+                    "not scoring GT-oracle. Capture with --mode live --record-responses."
+                ),
+            }
+        if _looks_like_ground_truth_oracle(recorded, gt):
+            return {
+                "fixture": stem,
+                "mode": mode,
+                "oracle_response": True,
+                "skipped": True,
+                "error": (
+                    "recorded response ids match ground-truth labels (oracle); "
+                    "excluded from averages. Replace with a live Gemini capture."
+                ),
+            }
         options.layout_planner = "gemini"
-        options.layout_planner_transport = _make_recorded_transport(recorded, ground_truth=gt)
+        # Do not pass ground_truth into the transport — that would rebuild roles
+        # from GT when ids fail to match live blocks.
+        options.layout_planner_transport = _make_recorded_transport(recorded, ground_truth=None)
         options.layout_planner_max_calls = max_calls
         options.layout_planner_cache_dir = cache_dir
         options.layout_planner_budget = LayoutPlannerBudget(max_calls=max_calls)
@@ -448,6 +362,10 @@ def run_fixture(
         if pptx_path is not None:
             score["fidelity"] = _fidelity_vs_pdf(pptx_path, pdf_path)
 
+        recorded_path = None
+        if record_responses and mode == "live" and pages:
+            recorded_path = _save_recorded_plan(recorded_dir, stem, pages[0])
+
         budget = getattr(options, "layout_planner_budget", None)
         return {
             "fixture": stem,
@@ -457,65 +375,10 @@ def run_fixture(
             "layout_planner": budget.to_dict() if isinstance(budget, LayoutPlannerBudget) else None,
             "apply_grouping": apply_grouping,
             "apply_fonts": apply_fonts,
+            "recorded_response_path": str(recorded_path) if recorded_path else None,
         }
     except Exception as error:  # noqa: BLE001
-        if mode == "heuristic":
-            return {"fixture": stem, "mode": mode, "error": str(error)}
-        gt_path = fixtures_dir / f"{stem}.planner.json"
-        if not gt_path.is_file():
-            return {"fixture": stem, "mode": mode, "error": str(error)}
-        gt = load_planner_ground_truth(gt_path)
-        blocks = _synthetic_blocks_from_gt(gt)
-        recorded = _load_recorded_response(recorded_dir, stem)
-        used_oracle = False
-        if recorded is None:
-            recorded = _plan_payload_from_gt(gt)
-            used_oracle = True
-        planner = create_layout_planner(
-            "gemini",
-            transport=_make_recorded_transport(recorded, ground_truth=gt),
-        )
-        budget = LayoutPlannerBudget(max_calls=max_calls)
-        service = LayoutPlannerService(
-            planner,
-            budget=budget,
-            cache_dir=cache_dir,
-            apply_grouping=apply_grouping,
-            apply_fonts=apply_fonts,
-        )
-        image = Image.new("RGB", (960, 540), color=(255, 255, 255))
-        applied = service.try_plan_page(
-            page_image=image,
-            text_blocks=blocks,
-            page_number=1,
-            page_height=540.0,
-        )
-        if applied is None:
-            return {"fixture": stem, "mode": mode, "error": f"planner fallback ({error})"}
-        from pdf2ppt.models import PageResult, QualityScore
-
-        page = PageResult(
-            page_number=1,
-            page_kind="digital",
-            background_mode="elements",
-            width_pt=960.0,
-            height_pt=540.0,
-            text_blocks=applied.text_blocks,
-            quality_score=QualityScore(1, 1, 1, 1),
-            fallback_reason=None,
-            group_elements=applied.group_elements,
-            plan_metadata=applied.plan_metadata,
-            layout_engine="layout_planner",
-        )
-        score = _score_pages([page], fixtures_dir=fixtures_dir, stem=stem, pptx_path=None)
-        return {
-            "fixture": stem,
-            "mode": mode,
-            "oracle_response": used_oracle,
-            "score": score,
-            "layout_planner": budget.to_dict(),
-            "note": f"synthetic apply after analyze/convert error: {error}",
-        }
+        return {"fixture": stem, "mode": mode, "error": str(error)}
 
 
 def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -557,8 +420,14 @@ def _summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             for name in ("delta_ssim", "delta_text_f1", "delta_editability")
         )
     ]
+    oracle_count = sum(1 for item in results if item.get("oracle_response") or item.get("skipped"))
     return {
         "acceptance_means_excluding_oracle": means,
+        "oracle_or_skipped_count": oracle_count,
+        "note": (
+            "Acceptance means exclude oracle/skipped fixtures. "
+            "Recorded mode without real Gemini captures does not claim planner metrics."
+        ),
         "vs_heuristic_deltas": deltas,
         "regression_count": len(regressions),
         "regressions": regressions,
@@ -600,6 +469,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Analyze only (skip PPTX convert). Acceptance then uses IR blocks.",
     )
+    parser.add_argument(
+        "--record-responses",
+        action="store_true",
+        help="With --mode live, write real plan JSON (live block ids) into --recorded-dir.",
+    )
     args = parser.parse_args(argv)
 
     stems = [stem for stem in (args.fixtures or list(DEFAULT_FIXTURES)) if (args.fixtures_dir / f"{stem}.pdf").is_file()]
@@ -636,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
             apply_grouping=bool(args.apply_grouping),
             apply_fonts=bool(args.apply_fonts),
             convert=do_convert,
+            record_responses=bool(args.record_responses),
         )
         baseline_result = heuristic_by_stem.get(stem)
         if baseline_result is not None:

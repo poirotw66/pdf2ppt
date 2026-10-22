@@ -14,6 +14,12 @@ from typing import Any
 from PIL import Image
 
 from .base import LayoutPlannerError
+from .budget import (
+    DEFAULT_ESTIMATED_COST_USD,
+    DEFAULT_INPUT_USD_PER_MTOK,
+    DEFAULT_OUTPUT_USD_PER_MTOK,
+    cost_from_usage_metadata,
+)
 from .schema import LAYOUT_PLAN_RESPONSE_SCHEMA, LAYOUT_PLANNER_SYSTEM_PROMPT
 from .types import PROMPT_VERSION, BlockEvidence, LayoutPlan
 from .validate import parse_and_validate_layout_plan
@@ -28,10 +34,8 @@ GEMINI_GENERATE_CONTENT_URL = (
 GEMINI_ENV_API_KEY = "GEMINI_API_KEY"
 GEMINI_ENV_API_KEY_ALT = "GOOGLE_API_KEY"
 GEMINI_ENV_LAYOUT_MODEL = "PDF2PPT_LAYOUT_PLANNER_MODEL"
-
-# Cheap upper-bound estimate for a single page (image + small JSON). Live
-# callers can refine later from usage metadata when present.
-DEFAULT_ESTIMATED_COST_USD = 0.002
+GEMINI_ENV_INPUT_USD_PER_MTOK = "PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK"
+GEMINI_ENV_OUTPUT_USD_PER_MTOK = "PDF2PPT_LAYOUT_PLANNER_OUTPUT_USD_PER_MTOK"
 
 
 def _image_to_jpeg_b64(image: Image.Image, *, quality: int = 85) -> str:
@@ -65,18 +69,37 @@ def _extract_json_text(payload: dict[str, Any]) -> str:
     raise LayoutPlannerError("Gemini layout response did not include JSON text.", kind="api_error")
 
 
-def _usage_cost_usd(payload: dict[str, Any]) -> float | None:
+def _usage_tokens(payload: dict[str, Any]) -> tuple[int | None, int | None]:
+    usage = payload.get("usageMetadata") or payload.get("usage_metadata")
+    if not isinstance(usage, dict):
+        return None, None
+    prompt = usage.get("promptTokenCount") or usage.get("prompt_token_count")
+    output = usage.get("candidatesTokenCount") or usage.get("candidates_token_count")
+    try:
+        prompt_tokens = int(prompt) if prompt is not None else None
+    except (TypeError, ValueError):
+        prompt_tokens = None
+    try:
+        output_tokens = int(output) if output is not None else None
+    except (TypeError, ValueError):
+        output_tokens = None
+    return prompt_tokens, output_tokens
+
+
+def _usage_cost_usd(
+    payload: dict[str, Any],
+    *,
+    input_usd_per_mtok: float,
+    output_usd_per_mtok: float,
+) -> float | None:
     usage = payload.get("usageMetadata") or payload.get("usage_metadata")
     if not isinstance(usage, dict):
         return None
-    # Flash-Lite list prices (approx): $0.25 / 1M input, $1.50 / 1M output.
-    prompt_tokens = float(usage.get("promptTokenCount") or usage.get("prompt_token_count") or 0)
-    output_tokens = float(
-        usage.get("candidatesTokenCount") or usage.get("candidates_token_count") or 0
+    return cost_from_usage_metadata(
+        usage,
+        input_usd_per_mtok=input_usd_per_mtok,
+        output_usd_per_mtok=output_usd_per_mtok,
     )
-    if prompt_tokens <= 0 and output_tokens <= 0:
-        return None
-    return (prompt_tokens / 1_000_000.0) * 0.25 + (output_tokens / 1_000_000.0) * 1.50
 
 
 class GeminiLayoutPlanner:
@@ -93,6 +116,8 @@ class GeminiLayoutPlanner:
         transport: Any | None = None,
         min_confidence: float = 0.55,
         estimated_cost_usd: float = DEFAULT_ESTIMATED_COST_USD,
+        input_usd_per_mtok: float | None = None,
+        output_usd_per_mtok: float | None = None,
     ) -> None:
         resolved_key = api_key
         if resolved_key is None:
@@ -104,6 +129,16 @@ class GeminiLayoutPlanner:
         self._transport = transport
         self._min_confidence = min_confidence
         self._estimated_cost_usd = estimated_cost_usd
+        self._input_usd_per_mtok = (
+            float(input_usd_per_mtok)
+            if input_usd_per_mtok is not None
+            else float(os.environ.get(GEMINI_ENV_INPUT_USD_PER_MTOK) or DEFAULT_INPUT_USD_PER_MTOK)
+        )
+        self._output_usd_per_mtok = (
+            float(output_usd_per_mtok)
+            if output_usd_per_mtok is not None
+            else float(os.environ.get(GEMINI_ENV_OUTPUT_USD_PER_MTOK) or DEFAULT_OUTPUT_USD_PER_MTOK)
+        )
 
     @property
     def configured_model(self) -> str:
@@ -172,8 +207,13 @@ class GeminiLayoutPlanner:
         except (json.JSONDecodeError, LayoutPlannerError) as error:
             raise LayoutPlannerError(f"Malformed layout JSON: {error}", kind="validation") from error
 
-        cost = _usage_cost_usd(raw)
-        return parse_and_validate_layout_plan(
+        cost = _usage_cost_usd(
+            raw,
+            input_usd_per_mtok=self._input_usd_per_mtok,
+            output_usd_per_mtok=self._output_usd_per_mtok,
+        )
+        prompt_tokens, output_tokens = _usage_tokens(raw)
+        plan = parse_and_validate_layout_plan(
             parsed,
             known_block_ids=known_ids,
             model=self._model,
@@ -181,6 +221,9 @@ class GeminiLayoutPlanner:
             min_confidence=self._min_confidence,
             estimated_cost_usd=cost if cost is not None else self._estimated_cost_usd,
         )
+        plan.prompt_tokens = prompt_tokens
+        plan.output_tokens = output_tokens
+        return plan
 
     def _post_generate_content(self, body: dict[str, Any]) -> dict[str, Any]:
         if self._transport is not None:

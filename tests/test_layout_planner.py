@@ -194,14 +194,15 @@ class LayoutPlanValidationTests(unittest.TestCase):
 
 
 class LayoutPlanApplyTests(unittest.TestCase):
-    def test_default_apply_is_low_risk_no_merge_no_font(self) -> None:
+    def test_default_apply_defers_grouping_to_heuristic(self) -> None:
         plan = parse_and_validate_layout_plan(
             _valid_plan_payload(),
             known_block_ids={"b1", "b2", "b3", "b4"},
             model="test",
         )
+        source = _blocks()
         result = apply_layout_plan(
-            _blocks(),
+            source,
             plan,
             page_number=1,
             page_height=540.0,
@@ -210,13 +211,11 @@ class LayoutPlanApplyTests(unittest.TestCase):
             apply_fonts=False,
         )
         self.assertTrue(result.used_planner)
-        # Footer filtered; no merges → 3 blocks (title + 2 list lines).
-        self.assertEqual(len(result.text_blocks), 3)
+        self.assertFalse(result.frames_applied)
+        # Default mode does not rewrite frames — heuristic grouping stays intact.
+        self.assertEqual([block.id for block in result.text_blocks], [block.id for block in source])
         self.assertEqual(result.group_elements, [])
-        title = next(block for block in result.text_blocks if block.block_role == "title")
-        self.assertTrue(title.use_title_placeholder)
-        # OCR fonts stay None when apply_fonts is off.
-        self.assertIsNone(title.font_family)
+        self.assertIsNotNone(result.plan)
 
     def test_apply_grouping_merges_adjacent_list_lines(self) -> None:
         plan = parse_and_validate_layout_plan(
@@ -239,6 +238,10 @@ class LayoutPlanApplyTests(unittest.TestCase):
         self.assertIn("Ship layout analysis", merged.text)
         self.assertIn("Keep heuristic fallback", merged.text)
         self.assertEqual(merged.line_bboxes, [(50.0, 120.0, 500.0, 150.0), (50.0, 155.0, 500.0, 185.0)])
+        # Merged frames must not pin font size (disables shrink-to-fit).
+        self.assertFalse(merged.pin_font_size)
+        title = result.text_blocks[0]
+        self.assertFalse(title.pin_font_size)
 
     def test_rejects_table_cell_and_wide_horizontal_merge(self) -> None:
         blocks = [
@@ -303,9 +306,12 @@ class LayoutPlanApplyTests(unittest.TestCase):
             ),
             "Arial",
         )
-        self.assertIn(
-            "JhengHei",
-            resolve_font_family("sans", text="財務摘要", existing_font_family=None, apply_font_class=True) or "",
+        cjk_font = resolve_font_family(
+            "sans", text="財務摘要", existing_font_family=None, apply_font_class=True
+        ) or ""
+        self.assertTrue(
+            any(token in cjk_font for token in ("Noto Sans CJK", "PingFang", "JhengHei")),
+            cjk_font,
         )
         self.assertTrue(is_known_font_family("Helvetica"))
         self.assertFalse(is_known_font_family(None))
@@ -420,6 +426,32 @@ class GeminiPlannerMockTests(unittest.TestCase):
         self.assertEqual(reserved, 3)
         self.assertEqual(budget.calls, 3)
 
+    def test_cost_reconciles_usage_and_worst_case_cap(self) -> None:
+        from pdf2ppt.layout_planner.budget import LayoutPlannerCallRecord
+
+        budget = LayoutPlannerBudget(
+            max_calls=10,
+            max_cost_usd=0.008,
+            worst_case_call_cost_usd=0.005,
+        )
+        self.assertTrue(budget.try_reserve())
+        budget.commit_success(
+            LayoutPlannerCallRecord(
+                model="t",
+                page_number=1,
+                cache_hit=False,
+                success=True,
+                latency_ms=1.0,
+                estimated_cost_usd=0.00327,
+                prompt_tokens=1793,
+                output_tokens=672,
+            )
+        )
+        self.assertAlmostEqual(budget.estimated_cost_usd, 0.00327, places=5)
+        # Next worst-case 0.005 would exceed 0.008 → refuse.
+        self.assertFalse(budget.try_reserve())
+        self.assertEqual(budget.calls, 1)
+
 
 class LayoutPlannerServiceConfigTests(unittest.TestCase):
     def test_unconfigured_returns_none_and_records_skip_reason(self) -> None:
@@ -524,6 +556,171 @@ class LayoutPlannerOffByteIdenticalTests(unittest.TestCase):
                     layout_planner_api_key=None,
                 )
             self.assertEqual(_pptx_member_digests(out_default), _pptx_member_digests(out_flag))
+
+
+def _pptx_text_frame_count(path: Path) -> int:
+    from pptx import Presentation
+
+    presentation = Presentation(str(path))
+    count = 0
+    for slide in presentation.slides:
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+                if (shape.text_frame.text or "").strip():
+                    count += 1
+    return count
+
+
+def _pptx_list_autonumber_starts(path: Path) -> list[int | None]:
+    """Return startAt (or None=default 1) for each buAutoNum paragraph on slide 0."""
+
+    from pptx import Presentation
+    from pptx.oxml.ns import qn
+
+    presentation = Presentation(str(path))
+    starts: list[int | None] = []
+    if not presentation.slides:
+        return starts
+    slide = presentation.slides[0]
+    for shape in slide.shapes:
+        if not getattr(shape, "has_text_frame", False):
+            continue
+        for paragraph in shape.text_frame.paragraphs:
+            try:
+                p_pr = paragraph._p.pPr  # noqa: SLF001
+            except Exception:  # noqa: BLE001
+                continue
+            if p_pr is None:
+                continue
+            for child in p_pr:
+                if child.tag == qn("a:buAutoNum"):
+                    raw = child.get("startAt")
+                    starts.append(int(raw) if raw is not None else None)
+    return starts
+
+
+@unittest.skipUnless((FIXTURES_DIR / "agenda_numbered_list.pdf").is_file(), "fixture missing")
+class LayoutPlannerDefaultKeepsHeuristicGroupingTests(unittest.TestCase):
+    """Default planner mode must not split lines vs planner-off (e02/e05 regressions)."""
+
+    def _convert_with_transport(self, fixture: Path, out: Path, report: Path, transport) -> None:
+        options = ConversionOptions(
+            input_path=fixture,
+            output_path=out,
+            report_path=report,
+            mode="editable",
+            ocr_model_root=None,
+            layout_engine="heuristic",
+            vector_mode="off",
+            inpaint_engine="white-box",
+            layout_planner="gemini",
+            layout_planner_transport=transport,
+            layout_planner_apply_grouping=False,
+            layout_planner_apply_fonts=False,
+            layout_planner_budget=LayoutPlannerBudget(max_calls=5),
+        )
+        convert_pdf(options)
+
+    def _off_convert(self, fixture: Path, out: Path, report: Path) -> None:
+        options = ConversionOptions(
+            input_path=fixture,
+            output_path=out,
+            report_path=report,
+            mode="editable",
+            ocr_model_root=None,
+            layout_engine="heuristic",
+            vector_mode="off",
+            inpaint_engine="white-box",
+            layout_planner=None,
+        )
+        convert_pdf(options)
+
+    @staticmethod
+    def _role_transport(role_by_substr: dict[str, str]):
+        def transport(body: dict) -> dict:
+            # Extract live block ids from the request and assign roles by text.
+            text = ""
+            try:
+                parts = body["contents"][0]["parts"]
+                text = next(part["text"] for part in parts if isinstance(part, dict) and "text" in part)
+            except Exception:  # noqa: BLE001
+                text = ""
+            blocks_json = text.split("BLOCKS:\n", 1)[-1] if "BLOCKS:\n" in text else "[]"
+            try:
+                req_blocks = json.loads(blocks_json)
+            except Exception:  # noqa: BLE001
+                req_blocks = []
+            out_blocks = []
+            out_groups = []
+            for index, item in enumerate(req_blocks if isinstance(req_blocks, list) else []):
+                bid = str(item.get("id"))
+                item_text = str(item.get("text") or "")
+                role = "body"
+                for needle, mapped in role_by_substr.items():
+                    if needle in item_text:
+                        role = mapped
+                        break
+                out_blocks.append(
+                    {
+                        "id": bid,
+                        "role": role,
+                        "reading_order": index,
+                        "font_family_class": "sans",
+                        "confidence": 0.9,
+                    }
+                )
+                out_groups.append(
+                    {
+                        "id": f"g_{bid}",
+                        "member_ids": [bid],
+                        "role": role,
+                        "reading_order": index,
+                        "confidence": 0.9,
+                        "kind": "text_frame",
+                    }
+                )
+            payload = {"blocks": out_blocks, "groups": out_groups}
+            return {"candidates": [{"content": {"parts": [{"text": json.dumps(payload)}]}}]}
+
+        return transport
+
+    def test_agenda_frame_count_and_numbering_match_planner_off(self) -> None:
+        fixture = FIXTURES_DIR / "agenda_numbered_list.pdf"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            off = tmp_path / "off.pptx"
+            on = tmp_path / "on.pptx"
+            self._off_convert(fixture, off, tmp_path / "off.report.json")
+            self._convert_with_transport(
+                fixture,
+                on,
+                tmp_path / "on.report.json",
+                self._role_transport({"Agenda": "title", "Financial": "list_item", "Regional": "list_item"}),
+            )
+            self.assertEqual(_pptx_text_frame_count(off), _pptx_text_frame_count(on))
+            off_starts = _pptx_list_autonumber_starts(off)
+            on_starts = _pptx_list_autonumber_starts(on)
+            # Split boxes restart at 1 each (None); a single list frame has one
+            # sequence. Counts must match planner-off.
+            self.assertEqual(len(off_starts), len(on_starts))
+            self.assertEqual(off_starts, on_starts)
+
+    def test_cjk_paragraph_frame_count_matches_planner_off(self) -> None:
+        fixture = FIXTURES_DIR / "cjk_paragraph.pdf"
+        if not fixture.is_file():
+            self.skipTest("cjk_paragraph.pdf missing")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            off = tmp_path / "off.pptx"
+            on = tmp_path / "on.pptx"
+            self._off_convert(fixture, off, tmp_path / "off.report.json")
+            self._convert_with_transport(
+                fixture,
+                on,
+                tmp_path / "on.report.json",
+                self._role_transport({"品牌": "title", "我們": "body", "創辦人": "body"}),
+            )
+            self.assertEqual(_pptx_text_frame_count(off), _pptx_text_frame_count(on))
 
 
 @unittest.skipUnless(

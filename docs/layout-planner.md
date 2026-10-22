@@ -32,11 +32,15 @@ low confidence are rejected.
 
 ### Default application (low-risk)
 
-By default the planner applies only:
+By default the planner **keeps heuristic paragraph/list grouping exactly as
+planner-off**, then layers only:
 
 - roles / title placeholders
 - reading order
 - header / footer / page_number filtering (OCR sources, when `--keep-header-footer` is off)
+
+It does **not** replace frames with one-box-per-line. That regression split
+numbered lists into separate auto-numbered boxes (`1. 1. 1. …`).
 
 **Grouping merges** and **font-class remaps** are **opt-in**
 (`--layout-planner-apply-grouping`, `--layout-planner-apply-fonts`). Live
@@ -47,14 +51,17 @@ When fonts are enabled:
 
 - Keep the PDF/OCR `font_family` when it is a real name (never replace Helvetica → DejaVu).
 - Apply the VLM class only when the source font is unknown (typical scanned/OCR pages).
-- Map to widely available desktop fonts (Arial / Times New Roman / Microsoft JhengHei / PMingLiU).
+- Map Latin to Arial / Times New Roman / Courier New; CJK to **Noto Sans CJK TC**
+  (fallback list also documents PingFang TC / Microsoft JhengHei / PMingLiU —
+  PowerPoint’s east-asian slot substitutes when a face is missing).
 - Use a CJK font only when the text contains CJK characters (Latin+digit lines stay Latin).
 - Never change font size or bbox (no reflow from planner fonts).
 
-Grouping (when enabled) only merges lines that are vertically adjacent,
-left/indent-aligned, similar font size, within one column; rejects
-`table_cell` / table-or-chart obstacles; keeps each line’s original geometry
-via `line_bboxes` (union bbox, no restacking).
+Grouping (when enabled) only merges **multi-member** groups that pass safety
+rules (vertically adjacent, left/indent-aligned, similar font size, one column);
+rejects `table_cell` / table-or-chart obstacles; keeps each line’s original
+geometry via `line_bboxes`. Single-member groups use the normal per-block path
+and **never** pin font size (so shrink-to-fit still works).
 
 ## CLI / API
 
@@ -107,6 +114,11 @@ server environment and are **never** logged or printed.
   concurrent workers cannot overshoot `max_calls`.
 - Failed requests (bad JSON, timeouts, API/auth errors) still count toward
   `calls` / `http_attempts` / estimated cost.
+- Cost uses Gemini `usageMetadata` token counts with configurable `$/1M`
+  input/output prices (`PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK` /
+  `…_OUTPUT_…`, defaults $0.25 / $1.50). The dollar cap checks a **worst-case
+  next-call** reservation (default $0.005) and reconciles to actual usage after
+  each response.
 - After `max_consecutive_failures` consecutive failures, or any auth error,
   the **circuit opens** and remaining pages fall back without waiting on the
   full timeout.
@@ -129,12 +141,13 @@ Annotated fixtures: `tests/fixtures/*.planner.json` (English lists/columns,
 table, chart, scanned list, mixed CJK+English).
 
 ```bash
-# CI-safe recorded responses (no API key). Acceptance is measured from PPTX.
-# GT-derived fallback responses are tagged oracle_response and excluded from means.
+# Recorded mode needs committed *live* captures (real block ids). Missing /
+# GT-copied files are skipped as oracle and excluded from averages.
 python scripts/bench_layout_planner.py --mode recorded --compare-heuristic
 
-# Live (cheap): requires GEMINI_API_KEY; uses cache + call cap
-python scripts/bench_layout_planner.py --mode live --max-calls 8 --compare-heuristic
+# Live (cheap): requires GEMINI_API_KEY; optionally write captures to commit later
+python scripts/bench_layout_planner.py --mode live --max-calls 8 --compare-heuristic \
+  --record-responses --recorded-dir tests/fixtures/layout_planner_recorded
 ```
 
 Acceptance metrics (from the **output PPTX**, not GT-vs-GT):
@@ -145,7 +158,8 @@ Acceptance metrics (from the **output PPTX**, not GT-vs-GT):
 
 `--compare-heuristic` adds per-page **SSIM** (when LibreOffice is available),
 **text F1**, and **editability** deltas vs planner-off. Default apply flags
-should show no regressions beyond noise.
+should show no regressions beyond noise. Do not treat recorded/oracle scores
+as Gemini quality claims until real captures are committed.
 
 Live tests are gated:
 

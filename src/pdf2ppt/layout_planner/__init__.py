@@ -8,11 +8,12 @@ is unchanged (byte-identical PPTX).
 
 from __future__ import annotations
 
-from .apply import apply_layout_plan
+from .apply import annotate_grouped_blocks_with_plan, apply_layout_plan
 from .base import LayoutPlanner, LayoutPlannerError, blocks_to_evidence
 from .budget import LayoutPlannerBudget, LayoutPlannerCallRecord
 from .cache import LayoutPlannerCache, compute_layout_planner_cache_key
 from .fonts import (
+    CJK_FONT_FALLBACKS,
     DEFAULT_FONT_MAP,
     font_script_for_text,
     is_known_font_family,
@@ -51,9 +52,11 @@ from .validate import DEFAULT_MIN_CONFIDENCE, LayoutPlanValidationError, parse_a
 
 __all__ = [
     "BLOCK_ROLES",
+    "CJK_FONT_FALLBACKS",
     "DEFAULT_FONT_MAP",
     "DEFAULT_MIN_CONFIDENCE",
     "FONT_FAMILY_CLASSES",
+    "annotate_grouped_blocks_with_plan",
     "font_script_for_text",
     "is_known_font_family",
     "text_has_cjk",

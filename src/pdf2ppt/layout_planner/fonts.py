@@ -16,15 +16,27 @@ from collections.abc import Mapping
 from ..text_style import is_cjk
 from .types import FontFamilyClass
 
-# Cross-platform defaults: Windows / Office themes ship these; macOS maps them
-# reasonably. Avoid DejaVu (absent on typical Windows/Mac installs).
+# Cross-platform defaults. Latin faces are ubiquitous Office fonts.
+# CJK: prefer Noto Sans CJK TC (Linux packages + many CI images) / PingFang TC
+# (macOS). Windows installs often substitute Microsoft JhengHei / PMingLiU via
+# Office font fallback when the named face is missing — PowerPoint's east-asian
+# slot still renders. Override via layout_planner_font_map if needed.
 DEFAULT_FONT_MAP: dict[str, dict[str, str]] = {
-    "sans": {"latin": "Arial", "cjk": "Microsoft JhengHei"},
-    "serif": {"latin": "Times New Roman", "cjk": "PMingLiU"},
-    "rounded": {"latin": "Arial", "cjk": "Microsoft JhengHei"},
-    "mono": {"latin": "Courier New", "cjk": "Microsoft JhengHei"},
-    "handwriting": {"latin": "Arial", "cjk": "Microsoft JhengHei"},
+    "sans": {"latin": "Arial", "cjk": "Noto Sans CJK TC"},
+    "serif": {"latin": "Times New Roman", "cjk": "Noto Serif CJK TC"},
+    "rounded": {"latin": "Arial", "cjk": "Noto Sans CJK TC"},
+    "mono": {"latin": "Courier New", "cjk": "Noto Sans CJK TC"},
+    "handwriting": {"latin": "Arial", "cjk": "Noto Sans CJK TC"},
 }
+
+# Documented fallbacks (not auto-probed at runtime; PPT resolves missing faces).
+CJK_FONT_FALLBACKS: tuple[str, ...] = (
+    "Noto Sans CJK TC",
+    "PingFang TC",
+    "Microsoft JhengHei",
+    "PMingLiU",
+    "Noto Sans CJK",
+)
 
 # Generic / placeholder names that should be replaced by the VLM class map.
 _UNKNOWN_FONT_NAMES: frozenset[str] = frozenset(
@@ -88,7 +100,7 @@ def resolve_font_family(
     mapping = font_map or DEFAULT_FONT_MAP
     entry = mapping.get(str(font_class)) or DEFAULT_FONT_MAP.get("sans") or {}
     if text_has_cjk(text):
-        return str(entry.get("cjk") or entry.get("latin") or "Microsoft JhengHei")
+        return str(entry.get("cjk") or entry.get("latin") or CJK_FONT_FALLBACKS[0])
     return str(entry.get("latin") or entry.get("cjk") or "Arial")
 
 
@@ -123,6 +135,7 @@ def normalize_font_map(
 
 
 __all__ = [
+    "CJK_FONT_FALLBACKS",
     "DEFAULT_FONT_MAP",
     "font_script_for_text",
     "is_known_font_family",
