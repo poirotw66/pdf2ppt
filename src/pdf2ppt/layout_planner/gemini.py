@@ -18,6 +18,7 @@ from .budget import (
     DEFAULT_ESTIMATED_COST_USD,
     DEFAULT_INPUT_USD_PER_MTOK,
     DEFAULT_OUTPUT_USD_PER_MTOK,
+    DEFAULT_WORST_CASE_OUTPUT_TOKENS,
     cost_from_usage_metadata,
 )
 from .schema import LAYOUT_PLAN_RESPONSE_SCHEMA, LAYOUT_PLANNER_SYSTEM_PROMPT
@@ -36,6 +37,8 @@ GEMINI_ENV_API_KEY_ALT = "GOOGLE_API_KEY"
 GEMINI_ENV_LAYOUT_MODEL = "PDF2PPT_LAYOUT_PLANNER_MODEL"
 GEMINI_ENV_INPUT_USD_PER_MTOK = "PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK"
 GEMINI_ENV_OUTPUT_USD_PER_MTOK = "PDF2PPT_LAYOUT_PLANNER_OUTPUT_USD_PER_MTOK"
+# Keep in sync with budget.DEFAULT_WORST_CASE_OUTPUT_TOKENS (USD reserve).
+GEMINI_LAYOUT_MAX_OUTPUT_TOKENS = DEFAULT_WORST_CASE_OUTPUT_TOKENS
 
 
 def _image_to_jpeg_b64(image: Image.Image, *, quality: int = 85) -> str:
@@ -189,6 +192,7 @@ class GeminiLayoutPlanner:
                 "temperature": 0.1,
                 "responseMimeType": "application/json",
                 "responseSchema": LAYOUT_PLAN_RESPONSE_SCHEMA,
+                "maxOutputTokens": GEMINI_LAYOUT_MAX_OUTPUT_TOKENS,
             },
         }
 

@@ -116,9 +116,10 @@ server environment and are **never** logged or printed.
   `calls` / `http_attempts` / estimated cost.
 - Cost uses Gemini `usageMetadata` token counts with configurable `$/1M`
   input/output prices (`PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK` /
-  `…_OUTPUT_…`, defaults $0.25 / $1.50). The dollar cap checks a **worst-case
-  next-call** reservation (default $0.005) and reconciles to actual usage after
-  each response.
+  `…_OUTPUT_…`, defaults $0.25 / $1.50). The dollar cap reserves a **worst-case
+  next-call** cost from generous prompt tokens + `maxOutputTokens` (default
+  8k in + 8192 out ≈ $0.0143) and reconciles to actual usage after each
+  response, so a single expensive call cannot silently overshoot the cap.
 - After `max_consecutive_failures` consecutive failures, or any auth error,
   the **circuit opens** and remaining pages fall back without waiting on the
   full timeout.
@@ -156,10 +157,16 @@ Acceptance metrics (from the **output PPTX**, not GT-vs-GT):
 - header/footer filtering rate (HF strings absent from editable text)
 - reading-order correctness
 
+Committed real captures under `tests/fixtures/layout_planner_recorded/`
+(replay of live `gemini-3.1-flash-lite` responses) currently score
+**title 0.964**, **HF 0.75**, **reading order 0.944**. Quote recorded
+metrics only from these live-origin files.
+
 `--compare-heuristic` adds per-page **SSIM** (when LibreOffice is available),
 **text F1**, and **editability** deltas vs planner-off. Default apply flags
-should show no regressions beyond noise. Do not treat recorded/oracle scores
-as Gemini quality claims until real captures are committed.
+should show no regressions beyond noise. Mixed title+body heuristic frames
+must not use the title-only placeholder (that would drop body lines); pages
+that still lose non-HF text vs planner-off fall back for that page.
 
 Live tests are gated:
 
@@ -179,3 +186,6 @@ CI has no API key and no paddlepaddle requirement for these unit tests
 5. **Byte-identical when off / unconfigured** — missing flag or missing API key
    leaves the P0–P5 / refine pipelines unchanged.
 6. **Low-risk apply by default** — grouping and fonts behind explicit flags.
+7. **No silent text loss** — title placeholder / title role only when every
+   source line in the frame is a title; renderer never drops placeholder text;
+   IR text-regression vs planner-off triggers a per-page fallback.

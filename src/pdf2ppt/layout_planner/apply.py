@@ -222,6 +222,10 @@ def apply_layout_plan(
     for index, block in enumerate(output_blocks):
         block.reading_order = index
     _assign_title_placeholder(output_blocks, page_height=page_height)
+    for block in output_blocks:
+        lines = [line for line in (block.text or "").splitlines() if line.strip()]
+        if block.use_title_placeholder and len(lines) > 1:
+            block.use_title_placeholder = False
 
     plan_metadata = {
         "engine": "layout_planner",
@@ -250,6 +254,57 @@ def apply_layout_plan(
         plan=plan,
         frames_applied=True,
     )
+
+
+def _normalize_text_chars(text: str) -> str:
+    return "".join(ch for ch in text if not ch.isspace())
+
+
+def planner_text_regression(
+    before_blocks: Sequence[TextBlock],
+    after_blocks: Sequence[TextBlock],
+    plan: LayoutPlan,
+) -> str | None:
+    """Return a reason if planner annotations dropped non-HF body text; else None.
+
+    Intended HF / page_number removals (OCR sources annotated as skippable) are
+    allowed. Any other character-multiset loss is a regression.
+    """
+
+    annotations = {item.id: item for item in plan.blocks}
+    allowed_drop = {
+        _normalize_text_chars(block.text)
+        for block in before_blocks
+        if block.source == "ocr"
+        and (ann := annotations.get(block.id)) is not None
+        and ann.role in SKIPPABLE_ROLES
+    }
+    allowed_drop.discard("")
+
+    before_chars: list[str] = []
+    for block in before_blocks:
+        norm = _normalize_text_chars(block.text)
+        if not norm:
+            continue
+        if norm in allowed_drop:
+            continue
+        before_chars.extend(norm)
+
+    after_chars: list[str] = []
+    for block in after_blocks:
+        norm = _normalize_text_chars(block.text)
+        if norm:
+            after_chars.extend(norm)
+
+    from collections import Counter
+
+    before_counts = Counter(before_chars)
+    after_counts = Counter(after_chars)
+    missing = before_counts - after_counts
+    if missing:
+        sample = "".join(list(missing.elements())[:40])
+        return f"dropped {sum(missing.values())} non-HF chars (e.g. {sample!r})"
+    return None
 
 
 def annotate_grouped_blocks_with_plan(
@@ -288,19 +343,42 @@ def annotate_grouped_blocks_with_plan(
 
         annotated = _copy_block(block)
         if matched_annotations:
-            chosen = max(
-                matched_annotations,
-                key=lambda item: (_ROLE_PRIORITY.get(item.role, 0), item.confidence),
-            )
-            annotated.block_role = _ROLE_TO_BLOCK_ROLE.get(chosen.role, annotated.block_role)
-            annotated.layout_label = _ROLE_TO_LAYOUT_LABEL.get(chosen.role, annotated.layout_label)
             annotated.reading_order = min(item.reading_order for item in matched_annotations)
-            annotated.use_title_placeholder = chosen.role in TITLE_ROLES
-            if chosen.role == "list_item" and annotated.block_role != "list":
-                annotated = _force_list_paragraphs(annotated)
+            all_title = all(item.role in TITLE_ROLES for item in matched_annotations)
+            # Only promote to title placeholder when *every* source line is a title.
+            # Mixed title+body frames must keep heuristic body structure — otherwise
+            # ppt_render's title placeholder writes only the first line and drops body.
+            if all_title:
+                chosen = max(
+                    matched_annotations,
+                    key=lambda item: (_ROLE_PRIORITY.get(item.role, 0), item.confidence),
+                )
+                annotated.block_role = "title"
+                annotated.layout_label = "title"
+                annotated.use_title_placeholder = True
+                font_class = chosen.font_family_class
+            else:
+                annotated.use_title_placeholder = False
+                non_title = [item for item in matched_annotations if item.role not in TITLE_ROLES]
+                role_pool = non_title or matched_annotations
+                chosen = max(
+                    role_pool,
+                    key=lambda item: (_ROLE_PRIORITY.get(item.role, 0), item.confidence),
+                )
+                # Never assign the title role to a mixed frame.
+                if chosen.role in TITLE_ROLES:
+                    font_class = chosen.font_family_class
+                else:
+                    annotated.block_role = _ROLE_TO_BLOCK_ROLE.get(chosen.role, annotated.block_role)
+                    annotated.layout_label = _ROLE_TO_LAYOUT_LABEL.get(
+                        chosen.role, annotated.layout_label
+                    )
+                    font_class = chosen.font_family_class
+                    if chosen.role == "list_item" and annotated.block_role != "list":
+                        annotated = _force_list_paragraphs(annotated)
             if apply_fonts:
                 annotated.font_family = resolve_font_family(
-                    chosen.font_family_class,
+                    font_class,
                     text=annotated.text,
                     existing_font_family=annotated.font_family,
                     font_map=resolved_font_map,
@@ -312,6 +390,11 @@ def annotate_grouped_blocks_with_plan(
     for index, block in enumerate(output):
         block.reading_order = index
     _assign_title_placeholder(output, page_height=page_height)
+    # Defense: never leave a multi-line frame on the title-only placeholder.
+    for block in output:
+        lines = [line for line in (block.text or "").splitlines() if line.strip()]
+        if block.use_title_placeholder and len(lines) > 1:
+            block.use_title_placeholder = False
     return output
 
 
@@ -447,7 +530,9 @@ def _annotate_singleton(
     enriched.block_role = _ROLE_TO_BLOCK_ROLE.get(role, "body")
     enriched.layout_label = _ROLE_TO_LAYOUT_LABEL.get(role, "other")
     enriched.reading_order = annotation.reading_order
-    enriched.use_title_placeholder = role in TITLE_ROLES
+    # Multi-line blocks must not use the title-only placeholder (drops body lines).
+    line_count = len([line for line in (enriched.text or "").splitlines() if line.strip()])
+    enriched.use_title_placeholder = role in TITLE_ROLES and line_count <= 1
     if role == "list_item" and not enriched.paragraphs:
         enriched = _force_list_paragraphs(enriched)
     enriched.font_family = resolve_font_family(
@@ -517,6 +602,7 @@ def _merge_members(
             apply_font_class=apply_fonts,
         )
 
+    line_count = len([line for line in text.splitlines() if line.strip()])
     return TextBlock(
         id=f"plan_text_{page_number}_{group_id}",
         source=base.source,
@@ -536,7 +622,8 @@ def _merge_members(
         layout_label=layout_label,
         paragraphs=paragraphs,
         line_bboxes=line_bboxes,
-        use_title_placeholder=role in TITLE_ROLES,
+        # Multi-line merges must not use the title-only placeholder (drops body).
+        use_title_placeholder=role in TITLE_ROLES and line_count <= 1,
         # Do not pin: shrink-to-fit must remain available (flowchart "Start", etc.).
         pin_font_size=False,
     )
@@ -593,4 +680,8 @@ def _copy_block(block: TextBlock) -> TextBlock:
     )
 
 
-__all__ = ["annotate_grouped_blocks_with_plan", "apply_layout_plan"]
+__all__ = [
+    "annotate_grouped_blocks_with_plan",
+    "apply_layout_plan",
+    "planner_text_regression",
+]

@@ -215,13 +215,30 @@ def _find_title_only_layout(presentation: Any) -> Any | None:
 
 def _select_title_placeholder_block(text_blocks: list[TextBlock]) -> TextBlock | None:
     for block in text_blocks:
-        if getattr(block, "use_title_placeholder", False):
-            return block
+        if not getattr(block, "use_title_placeholder", False):
+            continue
+        # Title Only placeholder must never swallow multi-line body text.
+        lines = [line for line in (block.text or "").splitlines() if line.strip()]
+        if len(lines) > 1:
+            block.use_title_placeholder = False
+            continue
+        return block
     return None
 
 
 def _apply_title_placeholder(title_shape: Any, block: TextBlock, *, scale_x: float, scale_y: float) -> None:
-    """Fill the title placeholder and move it onto the PDF title bbox (keeps SSIM stable)."""
+    """Fill the title placeholder and move it onto the PDF title bbox (keeps SSIM stable).
+
+    Never drops text: every non-empty line of ``block.text`` is written. Callers
+    must only select single-line title blocks (see ``_select_title_placeholder_block``).
+    """
+
+    source_text = block.text or ""
+    lines = [line for line in source_text.splitlines() if line.strip()]
+    if not lines and source_text.strip():
+        lines = [source_text]
+    if not lines:
+        lines = [""]
 
     left, top, width, height = bbox_to_shape_geometry(block.bbox, scale_x, scale_y)
     # Widen so a single-line title does not wrap. LibreOffice ignores wrap=none on
@@ -243,26 +260,37 @@ def _apply_title_placeholder(title_shape: Any, block: TextBlock, *, scale_x: flo
     text_frame.margin_right = 0
     text_frame.margin_top = 0
     text_frame.margin_bottom = 0
-    paragraph = text_frame.paragraphs[0]
-    paragraph.alignment = PP_ALIGN.LEFT
-    run = paragraph.add_run()
-    run.text = block.text.splitlines()[0] if block.text else ""
-    script = classify_text_script(block.text)
+    script = classify_text_script(source_text)
     font_family = block.font_family or default_font_family(script)
-    run.font.name = font_family
-    _set_run_typefaces(
-        run,
+    typefaces = (
         default_ppt_typefaces(script)
         if not block.font_family
-        else {"latin": font_family, "ea": font_family, "cs": font_family},
+        else {"latin": font_family, "ea": font_family, "cs": font_family}
     )
-    if block.font_size:
-        run.font.size = Pt(max(6.0, block.font_size * min(scale_x, scale_y)))
-    if block.font_color:
-        run.font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
-    # Preserve PDF boldness — do not force title runs to bold.
-    run.font.bold = block.bold
-    run.font.italic = block.italic
+    written: list[str] = []
+    for index, line in enumerate(lines):
+        paragraph = text_frame.paragraphs[0] if index == 0 else text_frame.add_paragraph()
+        paragraph.alignment = PP_ALIGN.LEFT
+        run = paragraph.add_run()
+        run.text = line
+        written.append(line)
+        run.font.name = font_family
+        _set_run_typefaces(run, typefaces)
+        if block.font_size:
+            run.font.size = Pt(max(6.0, block.font_size * min(scale_x, scale_y)))
+        if block.font_color:
+            run.font.color.rgb = RGBColor.from_string(block.font_color.lstrip("#"))
+        # Preserve PDF boldness — do not force title runs to bold.
+        run.font.bold = block.bold
+        run.font.italic = block.italic
+
+    # Guard: placeholder content must equal source (line-normalized).
+    written_norm = "\n".join(written)
+    source_norm = "\n".join(lines)
+    if written_norm != source_norm:
+        raise AssertionError(
+            f"title placeholder dropped text: wrote {written_norm!r} from {source_norm!r}"
+        )
 
 
 def add_shape_element(slide: Any, shape: ShapeElement, *, scale_x: float, scale_y: float) -> Any | None:

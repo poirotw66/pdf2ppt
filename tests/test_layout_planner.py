@@ -427,12 +427,20 @@ class GeminiPlannerMockTests(unittest.TestCase):
         self.assertEqual(budget.calls, 3)
 
     def test_cost_reconciles_usage_and_worst_case_cap(self) -> None:
-        from pdf2ppt.layout_planner.budget import LayoutPlannerCallRecord
+        from pdf2ppt.layout_planner.budget import (
+            DEFAULT_WORST_CASE_CALL_COST_USD,
+            LayoutPlannerCallRecord,
+            worst_case_call_cost_usd,
+        )
 
+        # Reserve from max_output_tokens worst case (~8k in + 8192 out).
+        self.assertAlmostEqual(
+            worst_case_call_cost_usd(), DEFAULT_WORST_CASE_CALL_COST_USD, places=6
+        )
         budget = LayoutPlannerBudget(
             max_calls=10,
-            max_cost_usd=0.008,
-            worst_case_call_cost_usd=0.005,
+            max_cost_usd=0.020,
+            worst_case_call_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD,
         )
         self.assertTrue(budget.try_reserve())
         budget.commit_success(
@@ -448,9 +456,21 @@ class GeminiPlannerMockTests(unittest.TestCase):
             )
         )
         self.assertAlmostEqual(budget.estimated_cost_usd, 0.00327, places=5)
-        # Next worst-case 0.005 would exceed 0.008 → refuse.
+        # Next worst-case 0.014 fits under 0.020.
+        self.assertTrue(budget.try_reserve())
+        # After a second 0.00327, remaining room is ~0.013 < 0.014 → refuse.
+        budget.commit_success(
+            LayoutPlannerCallRecord(
+                model="t",
+                page_number=2,
+                cache_hit=False,
+                success=True,
+                latency_ms=1.0,
+                estimated_cost_usd=0.00327,
+            )
+        )
         self.assertFalse(budget.try_reserve())
-        self.assertEqual(budget.calls, 1)
+        self.assertEqual(budget.calls, 2)
 
 
 class LayoutPlannerServiceConfigTests(unittest.TestCase):
@@ -721,6 +741,324 @@ class LayoutPlannerDefaultKeepsHeuristicGroupingTests(unittest.TestCase):
                 self._role_transport({"品牌": "title", "我們": "body", "創辦人": "body"}),
             )
             self.assertEqual(_pptx_text_frame_count(off), _pptx_text_frame_count(on))
+
+
+def _pptx_slide_text(path: Path) -> str:
+    from pdf2ppt.refine import extract_pptx_slide_text
+
+    return extract_pptx_slide_text(path)
+
+
+def _normalize_pptx_chars(text: str) -> str:
+    return "".join(ch for ch in text if not ch.isspace())
+
+
+class AnnotateGroupedBlocksTitlePlaceholderTests(unittest.TestCase):
+    """Mixed title+body frames must not use the title-only placeholder."""
+
+    def test_mixed_title_body_frame_keeps_all_text_and_no_placeholder(self) -> None:
+        from pdf2ppt.layout_planner.apply import (
+            annotate_grouped_blocks_with_plan,
+            planner_text_regression,
+        )
+        from pdf2ppt.layout_planner.types import LayoutPlan, PlannedBlock
+
+        merged = TextBlock(
+            id="merged",
+            source="native",
+            bbox=(80.0, 67.0, 512.0, 209.0),
+            text=(
+                "Card at 93% of the page\n"
+                "This body paragraph sits on a large colored card. It wraps\n"
+                "across several lines in the PDF so we can check line spacing\n"
+                "and z-order together on one slide."
+            ),
+            confidence=0.9,
+            font_size=28.0,
+            reading_order=0,
+            block_role="body",
+            layout_label="text",
+        )
+        sources = [
+            TextBlock(
+                id="native_1_1_0",
+                source="native",
+                bbox=(80.0, 67.0, 405.0, 109.0),
+                text="Card at 93% of the page",
+                confidence=0.9,
+                font_size=30.0,
+            ),
+            TextBlock(
+                id="native_1_2_0",
+                source="native",
+                bbox=(80.0, 140.0, 512.0, 209.0),
+                text=(
+                    "This body paragraph sits on a large colored card. It wraps\n"
+                    "across several lines in the PDF so we can check line spacing\n"
+                    "and z-order together on one slide."
+                ),
+                confidence=0.9,
+                font_size=16.0,
+            ),
+        ]
+        plan = LayoutPlan(
+            blocks=[
+                PlannedBlock(
+                    id="native_1_1_0",
+                    role="title",
+                    reading_order=0,
+                    font_family_class="sans",
+                    confidence=0.95,
+                ),
+                PlannedBlock(
+                    id="native_1_2_0",
+                    role="body",
+                    reading_order=1,
+                    font_family_class="sans",
+                    confidence=0.9,
+                ),
+            ],
+            groups=[],
+            model="test",
+        )
+        out = annotate_grouped_blocks_with_plan(
+            [merged], plan, source_blocks=sources, page_height=540.0
+        )
+        self.assertEqual(len(out), 1)
+        self.assertFalse(out[0].use_title_placeholder)
+        self.assertNotEqual(out[0].block_role, "title")
+        self.assertEqual(
+            _normalize_pptx_chars(out[0].text), _normalize_pptx_chars(merged.text)
+        )
+        self.assertIsNone(planner_text_regression([merged], out, plan))
+
+    def test_planner_text_regression_detects_dropped_body(self) -> None:
+        from pdf2ppt.layout_planner.apply import planner_text_regression
+        from pdf2ppt.layout_planner.types import LayoutPlan, PlannedBlock
+
+        before = [
+            TextBlock(
+                id="merged",
+                source="native",
+                bbox=(0, 0, 100, 100),
+                text="Title\nBody paragraph that must stay",
+                confidence=0.9,
+            )
+        ]
+        after = [
+            TextBlock(
+                id="merged",
+                source="native",
+                bbox=(0, 0, 100, 100),
+                text="Title",
+                confidence=0.9,
+            )
+        ]
+        plan = LayoutPlan(
+            blocks=[
+                PlannedBlock(
+                    id="t",
+                    role="title",
+                    reading_order=0,
+                    font_family_class="sans",
+                    confidence=0.9,
+                )
+            ],
+            groups=[],
+            model="test",
+        )
+        reason = planner_text_regression(before, after, plan)
+        self.assertIsNotNone(reason)
+        self.assertIn("dropped", reason or "")
+
+
+@unittest.skipUnless((FIXTURES_DIR / "card_93pct.pdf").is_file(), "fixture missing")
+class LayoutPlannerTitleBodyNoDropTests(unittest.TestCase):
+    """card_93pct / dark_97pct: default + fonts PPTX text must equal planner-off."""
+
+    def _role_transport(self, title_needles: tuple[str, ...]):
+        def transport(body: dict) -> dict:
+            text = ""
+            try:
+                parts = body["contents"][0]["parts"]
+                text = next(
+                    part["text"] for part in parts if isinstance(part, dict) and "text" in part
+                )
+            except Exception:  # noqa: BLE001
+                text = ""
+            blocks_json = text.split("BLOCKS:\n", 1)[-1] if "BLOCKS:\n" in text else "[]"
+            try:
+                req_blocks = json.loads(blocks_json)
+            except Exception:  # noqa: BLE001
+                req_blocks = []
+            out_blocks = []
+            out_groups = []
+            for index, item in enumerate(req_blocks if isinstance(req_blocks, list) else []):
+                bid = str(item.get("id"))
+                item_text = str(item.get("text") or "")
+                role = (
+                    "title"
+                    if any(needle in item_text for needle in title_needles)
+                    else "body"
+                )
+                out_blocks.append(
+                    {
+                        "id": bid,
+                        "role": role,
+                        "reading_order": index,
+                        "font_family_class": "sans",
+                        "confidence": 0.95,
+                    }
+                )
+                out_groups.append(
+                    {
+                        "id": f"g_{bid}",
+                        "member_ids": [bid],
+                        "role": role,
+                        "reading_order": index,
+                        "confidence": 0.95,
+                        "kind": "text_frame",
+                    }
+                )
+            payload = {"blocks": out_blocks, "groups": out_groups}
+            return {"candidates": [{"content": {"parts": [{"text": json.dumps(payload)}]}}]}
+
+        return transport
+
+    def _convert(
+        self,
+        fixture: Path,
+        out: Path,
+        report: Path,
+        *,
+        planner: bool,
+        apply_fonts: bool = False,
+        transport=None,
+    ) -> None:
+        kwargs: dict = {
+            "input_path": fixture,
+            "output_path": out,
+            "report_path": report,
+            "mode": "editable",
+            "ocr_model_root": None,
+            "layout_engine": "heuristic",
+            "vector_mode": "off",
+            "inpaint_engine": "white-box",
+        }
+        if planner:
+            kwargs.update(
+                {
+                    "layout_planner": "gemini",
+                    "layout_planner_transport": transport,
+                    "layout_planner_apply_grouping": False,
+                    "layout_planner_apply_fonts": apply_fonts,
+                    "layout_planner_budget": LayoutPlannerBudget(max_calls=5),
+                }
+            )
+        else:
+            kwargs["layout_planner"] = None
+        convert_pdf(ConversionOptions(**kwargs))  # type: ignore[arg-type]
+
+    def _assert_text_equals_off(
+        self, fixture: Path, title_needles: tuple[str, ...], *, apply_fonts: bool
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            off = tmp_path / "off.pptx"
+            on = tmp_path / "on.pptx"
+            self._convert(fixture, off, tmp_path / "off.json", planner=False)
+            self._convert(
+                fixture,
+                on,
+                tmp_path / "on.json",
+                planner=True,
+                apply_fonts=apply_fonts,
+                transport=self._role_transport(title_needles),
+            )
+            off_text = _pptx_slide_text(off)
+            on_text = _pptx_slide_text(on)
+            self.assertEqual(
+                _normalize_pptx_chars(off_text),
+                _normalize_pptx_chars(on_text),
+                msg=f"fonts={apply_fonts}\nOFF:\n{off_text}\nON:\n{on_text}",
+            )
+            # Body content must survive (not only the title line).
+            self.assertGreater(len(_normalize_pptx_chars(on_text)), 40)
+
+    def test_card_93pct_default_text_equals_planner_off(self) -> None:
+        self._assert_text_equals_off(
+            FIXTURES_DIR / "card_93pct.pdf", ("Card at 93%",), apply_fonts=False
+        )
+
+    def test_card_93pct_fonts_text_equals_planner_off(self) -> None:
+        self._assert_text_equals_off(
+            FIXTURES_DIR / "card_93pct.pdf", ("Card at 93%",), apply_fonts=True
+        )
+
+    def test_dark_97pct_default_text_equals_planner_off(self) -> None:
+        fixture = FIXTURES_DIR / "dark_97pct.pdf"
+        if not fixture.is_file():
+            self.skipTest("dark_97pct.pdf missing")
+        self._assert_text_equals_off(fixture, ("Dark 97%",), apply_fonts=False)
+
+    def test_dark_97pct_fonts_text_equals_planner_off(self) -> None:
+        fixture = FIXTURES_DIR / "dark_97pct.pdf"
+        if not fixture.is_file():
+            self.skipTest("dark_97pct.pdf missing")
+        self._assert_text_equals_off(fixture, ("Dark 97%",), apply_fonts=True)
+
+
+class RecordedOracleDetectionTests(unittest.TestCase):
+    def _oracle_fn(self):
+        import importlib.util
+
+        path = REPO_ROOT / "scripts" / "bench_layout_planner.py"
+        spec = importlib.util.spec_from_file_location("bench_layout_planner_mod", path)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod._looks_like_ground_truth_oracle
+
+    def test_rejects_missing_live_metadata(self) -> None:
+        fn = self._oracle_fn()
+        self.assertTrue(fn({"blocks": [{"id": "native_1_0_0", "role": "title"}]}, None))
+
+    def test_rejects_gt_copy_plus_extra_id(self) -> None:
+        fn = self._oracle_fn()
+        gt = {
+            "paragraphs": [
+                {"id": "title", "role": "title", "confidence": 0.92},
+                {"id": "body1", "role": "body", "confidence": 0.92},
+            ]
+        }
+        recorded = {
+            "recorded_from": "live",
+            "model": "gemini-3.1-flash-lite",
+            "blocks": [
+                {"id": "title", "role": "title", "confidence": 0.92},
+                {"id": "body1", "role": "body", "confidence": 0.92},
+                {"id": "decoy_extra", "role": "other", "confidence": 0.5},
+            ],
+        }
+        self.assertTrue(fn(recorded, gt))
+
+    def test_accepts_real_native_ids(self) -> None:
+        fn = self._oracle_fn()
+        gt = {
+            "paragraphs": [
+                {"id": "title", "role": "title"},
+                {"id": "body1", "role": "body"},
+            ]
+        }
+        recorded = {
+            "recorded_from": "live",
+            "model": "gemini-3.1-flash-lite",
+            "blocks": [
+                {"id": "native_1_0_0", "role": "title", "confidence": 1.0},
+                {"id": "native_1_1_0", "role": "body", "confidence": 1.0},
+            ],
+        }
+        self.assertFalse(fn(recorded, gt))
 
 
 @unittest.skipUnless(

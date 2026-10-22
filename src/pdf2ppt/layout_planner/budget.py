@@ -17,17 +17,37 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
-# Conservative reservation when usageMetadata is not yet known. Live Gemini
-# Flash-Lite pages observed ~$0.0014–$0.0033; 0.005 leaves headroom so the
-# dollar cap cannot be exceeded by a single call.
+# Fallback flat estimate when usageMetadata is absent.
 DEFAULT_ESTIMATED_COST_USD = 0.002
-DEFAULT_WORST_CASE_CALL_COST_USD = 0.005
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 2
 AUTH_FALLBACK_KINDS = frozenset({"auth_error", "unauthorized"})
 
 # Published Gemini Flash-Lite list prices (USD per 1M tokens).
 DEFAULT_INPUT_USD_PER_MTOK = 0.25
 DEFAULT_OUTPUT_USD_PER_MTOK = 1.50
+# Worst-case reservation from max_output_tokens (generationConfig) so one call
+# cannot blow past the USD cap after reconcile. Typical pages are ~2–4k in /
+# ~0.7–1.6k out; reserve for 8k in + 8192 out ≈ $0.0143.
+DEFAULT_WORST_CASE_PROMPT_TOKENS = 8_000
+DEFAULT_WORST_CASE_OUTPUT_TOKENS = 8_192
+DEFAULT_WORST_CASE_CALL_COST_USD = (
+    (DEFAULT_WORST_CASE_PROMPT_TOKENS / 1_000_000.0) * DEFAULT_INPUT_USD_PER_MTOK
+    + (DEFAULT_WORST_CASE_OUTPUT_TOKENS / 1_000_000.0) * DEFAULT_OUTPUT_USD_PER_MTOK
+)
+
+
+def worst_case_call_cost_usd(
+    *,
+    prompt_tokens: int = DEFAULT_WORST_CASE_PROMPT_TOKENS,
+    max_output_tokens: int = DEFAULT_WORST_CASE_OUTPUT_TOKENS,
+    input_usd_per_mtok: float = DEFAULT_INPUT_USD_PER_MTOK,
+    output_usd_per_mtok: float = DEFAULT_OUTPUT_USD_PER_MTOK,
+) -> float:
+    """USD ceiling for one call from prompt + maxOutputTokens worst case."""
+
+    return (max(0, int(prompt_tokens)) / 1_000_000.0) * float(input_usd_per_mtok) + (
+        max(0, int(max_output_tokens)) / 1_000_000.0
+    ) * float(output_usd_per_mtok)
 
 
 def cost_from_usage_metadata(
@@ -271,8 +291,11 @@ __all__ = [
     "DEFAULT_MAX_CONSECUTIVE_FAILURES",
     "DEFAULT_OUTPUT_USD_PER_MTOK",
     "DEFAULT_WORST_CASE_CALL_COST_USD",
+    "DEFAULT_WORST_CASE_OUTPUT_TOKENS",
+    "DEFAULT_WORST_CASE_PROMPT_TOKENS",
     "LayoutPlannerBudget",
     "LayoutPlannerCallRecord",
     "Timer",
     "cost_from_usage_metadata",
+    "worst_case_call_cost_usd",
 ]

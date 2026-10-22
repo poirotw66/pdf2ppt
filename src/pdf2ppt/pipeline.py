@@ -603,10 +603,14 @@ def analyze_page(
         )
         text_blocks = layout_applied.text_blocks
         if pending_planner_plan is not None:
-            from .layout_planner.apply import annotate_grouped_blocks_with_plan
+            from .layout_planner.apply import (
+                annotate_grouped_blocks_with_plan,
+                planner_text_regression,
+            )
 
-            text_blocks = annotate_grouped_blocks_with_plan(
-                text_blocks,
+            heuristic_blocks = list(text_blocks)
+            planned_blocks = annotate_grouped_blocks_with_plan(
+                heuristic_blocks,
                 pending_planner_plan,
                 source_blocks=layout_input_blocks,
                 page_height=float(page.rect.height),
@@ -614,9 +618,26 @@ def analyze_page(
                 font_map=getattr(options, "layout_planner_font_map", None),
                 apply_fonts=bool(getattr(options, "layout_planner_apply_fonts", False)),
             )
-            plan_metadata["frames_applied"] = False
-            plan_metadata["heuristic_grouping"] = True
-            layout_applied_engine = "layout_planner"
+            regression = planner_text_regression(
+                heuristic_blocks, planned_blocks, pending_planner_plan
+            )
+            if regression:
+                # Fall back to planner-off frames for this page (keep HF filter off).
+                text_blocks = heuristic_blocks
+                plan_metadata["frames_applied"] = False
+                plan_metadata["heuristic_grouping"] = True
+                plan_metadata["text_regression_fallback"] = regression
+                layout_applied_engine = layout_applied.engine
+                logger.info(
+                    "Layout planner text regression on page %s; falling back: %s",
+                    page_number,
+                    regression,
+                )
+            else:
+                text_blocks = planned_blocks
+                plan_metadata["frames_applied"] = False
+                plan_metadata["heuristic_grouping"] = True
+                layout_applied_engine = "layout_planner"
         else:
             layout_applied_engine = layout_applied.engine
         layout_figure_images = list(layout_applied.figure_images)

@@ -90,15 +90,59 @@ def _looks_like_ground_truth_oracle(
     recorded: dict[str, Any],
     ground_truth: dict[str, Any] | None,
 ) -> bool:
-    """True when recorded ids match planner.json GT ids (not live native_* ids)."""
+    """True for GT-oracle recordings that must not enter acceptance means.
 
+    Reject when:
+    - missing ``recorded_from: live`` / model metadata, or
+    - recorded ids are a subset of GT label ids, or
+    - every overlapping id has the same role and identical confidence as GT
+      (catches GT copies that add one extra decoy id).
+    """
+
+    if recorded.get("recorded_from") != "live" or not recorded.get("model"):
+        return True
     if ground_truth is None:
         return False
-    gt_ids = {str(item.get("id")) for item in (ground_truth.get("paragraphs") or []) if item.get("id")}
-    recorded_ids = {str(item.get("id")) for item in (recorded.get("blocks") or []) if item.get("id")}
-    if not recorded_ids or not gt_ids:
+    gt_paras = list(ground_truth.get("paragraphs") or [])
+    gt_by_id = {str(item.get("id")): item for item in gt_paras if item.get("id")}
+    gt_ids = set(gt_by_id)
+    recorded_blocks = list(recorded.get("blocks") or [])
+    recorded_ids = {str(item.get("id")) for item in recorded_blocks if item.get("id")}
+    if not recorded_ids:
+        return True
+    if recorded_ids <= gt_ids:
+        return True
+    overlap = recorded_ids & gt_ids
+    if not overlap:
         return False
-    return recorded_ids <= gt_ids
+    matches = 0
+    for block in recorded_blocks:
+        bid = str(block.get("id"))
+        if bid not in overlap:
+            continue
+        gt = gt_by_id[bid]
+        gt_role = str(gt.get("role") or "body")
+        if gt_role == "list":
+            gt_role = "list_item"
+        rec_role = str(block.get("role") or "body")
+        if rec_role == "list":
+            rec_role = "list_item"
+        gt_conf = gt.get("confidence")
+        rec_conf = block.get("confidence")
+        same_conf = (
+            gt_conf is None
+            or rec_conf is None
+            or abs(float(gt_conf) - float(rec_conf)) < 1e-9
+            or (float(rec_conf) == 0.92 and gt_conf is None)
+        )
+        # GT planner.json rarely stores confidence; oracle fixtures used 0.92.
+        if rec_role == gt_role and (
+            same_conf or (gt_conf is None and float(rec_conf or 0) in {0.92, 1.0})
+        ):
+            matches += 1
+    # Reject when every overlapping id mirrors GT roles/confidences (catches a
+    # GT copy plus one decoy id that would otherwise score as perfect).
+    return matches == len(overlap)
 
 
 def _make_recorded_transport(payload: dict[str, Any], *, ground_truth: dict[str, Any] | None = None):
