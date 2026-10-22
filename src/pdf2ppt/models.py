@@ -162,6 +162,7 @@ class TableCell:
     text_block_ids: list[str] = field(default_factory=list)
     # Measured source insets (pt). None → leave PowerPoint cell margin defaults.
     margin_left: float | None = None
+    margin_right: float | None = None
     margin_top: float | None = None
 
     def to_dict(self) -> dict[str, object]:

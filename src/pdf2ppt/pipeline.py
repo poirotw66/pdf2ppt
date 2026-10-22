@@ -721,15 +721,17 @@ def analyze_page(
             background_render_started_at = perf_counter()
             background_image = render_page_image(page, dpi=effective_background_render_dpi)
             background_render_seconds += perf_counter() - background_render_started_at
-        if background_mode == "overlay" and (text_blocks or vector_result.tables):
+        # Transparent tables over photos keep the raster underlay; still inpaint
+        # absorbed cell glyphs. Compute masks first so pages whose text was fully
+        # absorbed into opaque tables do not enter overlay solely for watermark
+        # fallback (grey smudge on otherwise clean whites).
+        table_word_masks = transparent_table_text_mask_blocks(
+            vector_result.tables,
+            page,
+            image_boxes,
+        )
+        if background_mode == "overlay" and (text_blocks or table_word_masks):
             mask_blocks = [block for block in text_blocks if block.source == "ocr"] or list(text_blocks)
-            # Transparent tables over photos keep the raster underlay; still
-            # inpaint absorbed cell glyphs so they do not ghost under native text.
-            table_word_masks = transparent_table_text_mask_blocks(
-                vector_result.tables,
-                page,
-                image_boxes,
-            )
             if table_word_masks:
                 mask_blocks = [*mask_blocks, *table_word_masks]
             mask_blocks = append_notebooklm_watermark_mask_blocks(

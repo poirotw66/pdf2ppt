@@ -603,6 +603,7 @@ def _deserialize_table(payload: Any, *, page_index: int, table_index: int) -> Ta
                 vertical_anchor=str(cell.get("vertical_anchor") or "middle"),
                 text_block_ids=[str(item) for item in (cell.get("text_block_ids") or [])],
                 margin_left=_optional_float(cell.get("margin_left")),
+                margin_right=_optional_float(cell.get("margin_right")),
                 margin_top=_optional_float(cell.get("margin_top")),
             )
             for cell in (payload.get("cells") or [])

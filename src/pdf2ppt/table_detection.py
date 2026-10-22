@@ -147,6 +147,9 @@ def detect_inferred_tables(
             continue
         if not _passes_text_grid_guards(grid, words=words, page=page):
             continue
+        # Header-band / rule fills wider than text: expand bbox without scaling
+        # inner column boundaries (same first/last absorption as zebra).
+        grid = _expand_grid_to_supporting_fills(page, dict(grid))
         element = _grid_to_table_element(
             grid,
             text_blocks=text_blocks,
@@ -161,6 +164,45 @@ def detect_inferred_tables(
             existing.append(element.bbox)
 
     return candidates
+
+
+def _expand_grid_to_supporting_fills(page: fitz.Page, grid: dict[str, Any]) -> dict[str, Any]:
+    """Widen an inferred grid to overlapping header-band / row-fill / rule extents."""
+
+    bbox: BBox = grid["bbox"]
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001
+        return grid
+    x0, x1 = bbox[0], bbox[2]
+    expanded = False
+    for path in drawings:
+        rect = path.get("rect")
+        if rect is None:
+            continue
+        fill = path.get("fill")
+        stroke = path.get("color")
+        band = (float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1))
+        width = band[2] - band[0]
+        height = band[3] - band[1]
+        # Wide short fills (header band / zebra stripe) or long hairline rules.
+        is_band = fill is not None and height >= 8.0 and height <= 72.0 and width >= (bbox[2] - bbox[0]) * 0.85
+        is_rule = stroke is not None and height <= 3.0 and width >= (bbox[2] - bbox[0]) * 0.85
+        if not (is_band or is_rule):
+            continue
+        # Vertically overlap the table (header band sits on the first row).
+        if band[3] < bbox[1] - 2.0 or band[1] > bbox[3] + 2.0:
+            continue
+        if intersection_ratio(band, bbox) < 0.15 and not (
+            bbox[1] - 2.0 <= band[1] <= bbox[1] + (grid["row_heights"][0] if grid.get("row_heights") else 40.0)
+        ):
+            continue
+        x0 = min(x0, band[0])
+        x1 = max(x1, band[2])
+        expanded = True
+    if not expanded or (x0 >= bbox[0] - 0.5 and x1 <= bbox[2] + 0.5):
+        return grid
+    return _snap_column_widths_to_bbox(grid, (x0, bbox[1], x1, bbox[3]))
 
 
 def _collect_words(page: fitz.Page) -> list[_Word]:
@@ -352,7 +394,21 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
             edges.append(max(col_x1[col_index], next_left_inset))
         else:
             edges.append(gap_mid)
-    edges.append(bbox[2])
+    # Last column must fit the widest glyph run with left inset + slack.
+    # Right inset is 0 for inferred tables (marR=0) so "Score" does not wrap.
+    last_left = edges[-1] if edges else bbox[0]
+    last_left_inset = max(pad, col_x0[-1] - last_left) if col_x0 else pad
+    last_text_widths = [
+        max(word.x1 for word in buckets[-1]) - min(word.x0 for word in buckets[-1])
+        for buckets in cell_words
+        if buckets[-1]
+    ]
+    max_last_text = max(last_text_widths) if last_text_widths else max(0.0, col_x1[-1] - col_x0[-1])
+    # Extra slack beyond source metrics: PPT/LO fonts are often wider than PDF Helvetica.
+    needed_right = last_left + max_last_text + last_left_inset + 8.0
+    edges.append(max(bbox[2], needed_right, col_x1[-1] + last_left_inset + 8.0))
+    if edges[-1] > bbox[2]:
+        bbox = (bbox[0], bbox[1], edges[-1], bbox[3])
     column_widths = [max(1.0, edges[index + 1] - edges[index]) for index in range(col_count)]
 
     # Majority horizontal alignment per column (avoids single-cell center/right).
@@ -504,8 +560,7 @@ def _iter_zebra_grid_candidates(
             for grid in sub_grids:
                 # Snap bbox / row heights to zebra bands when row counts match.
                 if grid["row_count"] == len(group):
-                    grid = dict(grid)
-                    grid["bbox"] = bbox
+                    grid = _snap_column_widths_to_bbox(dict(grid), bbox)
                     grid["row_heights"] = [max(1.0, band.bbox[3] - band.bbox[1]) for band in group]
                     grid["zebra_fills"] = [band.fill_color for band in group]
                 grids.append(grid)
@@ -521,13 +576,53 @@ def _iter_zebra_grid_candidates(
         built = _try_build_grid(synthetic_rows)
         if built is None:
             continue
-        built["bbox"] = bbox
+        built = _snap_column_widths_to_bbox(built, bbox)
         built["row_heights"] = [
             max(1.0, band.bbox[3] - band.bbox[1]) for band in group[: int(built["row_count"])]
         ]
         built["zebra_fills"] = [band.fill_color for band in group[: int(built["row_count"])]]
         grids.append(built)
     return _dedupe_grids(grids)
+
+
+def _snap_column_widths_to_bbox(grid: dict[str, Any], target_bbox: BBox) -> dict[str, Any]:
+    """Widen table to ``target_bbox`` without proportionally scaling columns.
+
+    Inner column boundaries stay at their measured absolute x positions; extra
+    width is absorbed by the first and last columns only (zebra / header-band).
+    """
+
+    widths = [float(width) for width in grid["column_widths"]]
+    if not widths:
+        grid["bbox"] = target_bbox
+        return grid
+    old_bbox: BBox = grid["bbox"]
+    edges = [float(old_bbox[0])]
+    for width in widths:
+        edges.append(edges[-1] + width)
+    new_edges = [float(target_bbox[0])]
+    for edge in edges[1:-1]:
+        clamped = min(max(edge, target_bbox[0] + 1.0), target_bbox[2] - 1.0)
+        new_edges.append(clamped)
+    new_edges.append(float(target_bbox[2]))
+    for index in range(1, len(new_edges)):
+        if new_edges[index] <= new_edges[index - 1]:
+            new_edges[index] = new_edges[index - 1] + 1.0
+    if new_edges[-1] < target_bbox[2]:
+        new_edges[-1] = float(target_bbox[2])
+    # If monotonic repair overran the right edge, compress from the right.
+    if new_edges[-1] > target_bbox[2]:
+        overflow = new_edges[-1] - target_bbox[2]
+        new_edges[-1] = float(target_bbox[2])
+        for index in range(len(new_edges) - 2, 0, -1):
+            new_edges[index] = max(new_edges[0] + index, new_edges[index] - overflow)
+            if new_edges[index] < new_edges[index + 1] - 1.0:
+                break
+    grid["bbox"] = target_bbox
+    grid["column_widths"] = [
+        max(1.0, new_edges[index + 1] - new_edges[index]) for index in range(len(widths))
+    ]
+    return grid
 
 
 def _passes_text_grid_guards(
@@ -726,7 +821,22 @@ def _grid_to_table_element(
                 span_index=span_index,
             )
             # Majority column alignment overrides per-cell guesses.
-            cell.horizontal_align = str(column_aligns[col_index])
+            align = str(column_aligns[col_index])
+            cell.horizontal_align = align
+            # Margins follow alignment; inferred tables use marR=0 so last-col
+            # headers fit without wrapping (C1).
+            if align == "left":
+                cell.margin_right = 0.0
+                if cell.margin_left is None:
+                    # Spans may have guessed center in a narrow cell; use inset pad.
+                    cell.margin_left = 4.0
+            elif align == "center":
+                cell.margin_left = None
+                cell.margin_right = None
+            elif align == "right":
+                cell.margin_left = None
+                if cell.margin_right is None:
+                    cell.margin_right = 4.0
             if zebra_fills is not None and row_index < len(zebra_fills):
                 cell.fill_color = zebra_fills[row_index]
             cells.append(cell)
@@ -736,6 +846,7 @@ def _grid_to_table_element(
     if not cells:
         return None
 
+    # No stroked rules on inferred borderless/zebra grids — clear PPT defaults.
     border_color = None if borderless else "#4D4D4D"
     border_width = 0.0 if borderless else 1.0
     return TableElement(

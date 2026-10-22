@@ -47,9 +47,12 @@ fill/stroke opacity, and drawing order (`seqno` → z-order).
   Absorbed cell word boxes are still added to the overlay inpaint mask
   (1–2pt pad) so baked-in glyphs do not ghost under editable PPTX text.
   Inferred column edges use the gap between adjacent columns' text extents
-  (not midpoints of left edges); horizontal alignment is majority-voted per
-  column. Cell margins are measured from source insets when available;
-  otherwise PowerPoint defaults are kept (margins are never zeroed globally).
+  (not midpoints of left edges); the last column is widened so headers do not
+  wrap; zebra/header-band snaps keep inner boundaries fixed and absorb extra
+  width in the first/last columns only. Horizontal alignment is majority-voted
+  per column. Cell margins are measured on the alignment side only (centred
+  cells keep Office defaults); margins are never zeroed globally. Borderless
+  inferred tables clear default PPTX cell borders.
   Candidates with ≤2 cells covering ≥80% of the page, or grids with neither
   stroked rules, hairline filled-rect rules, nor zebra row fills, are rejected.
   Bullet / numbered list columns and grids with no short/numeric column are

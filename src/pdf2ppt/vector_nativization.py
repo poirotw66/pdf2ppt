@@ -1066,6 +1066,7 @@ def _build_table_cell(
         vertical_anchor=str(style["vertical_anchor"]),
         text_block_ids=[block.id for block in overlapping],
         margin_left=style.get("margin_left"),
+        margin_right=style.get("margin_right"),
         margin_top=style.get("margin_top"),
     )
 
@@ -1151,6 +1152,7 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
             "horizontal_align": "left",
             "vertical_anchor": "middle",
             "margin_left": None,
+            "margin_right": None,
             "margin_top": None,
         }
 
@@ -1196,7 +1198,14 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
         vertical_anchor = "middle"
 
     # Source insets for PPTX cell margins (Office default ~7pt when unknown).
-    margin_left = max(0.0, min(12.0, left_gap))
+    # Only set the margin on the alignment side so centred cells are not pushed
+    # by a capped left_gap (12pt vs ~7.2pt default).
+    margin_left = None
+    margin_right = None
+    if horizontal_align == "left":
+        margin_left = max(0.0, min(12.0, left_gap))
+    elif horizontal_align == "right":
+        margin_right = max(0.0, min(12.0, right_gap))
     margin_top = max(0.0, min(12.0, top_gap))
 
     return {
@@ -1209,6 +1218,7 @@ def _style_from_spans(cell_bbox: BBox, span_index: list[dict[str, Any]]) -> dict
         "horizontal_align": horizontal_align,
         "vertical_anchor": vertical_anchor,
         "margin_left": margin_left,
+        "margin_right": margin_right,
         "margin_top": margin_top,
     }
 
