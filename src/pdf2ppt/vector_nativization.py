@@ -243,6 +243,10 @@ def extract_vector_content(
                 skipped_drawing_count=len(drawings),
             )
 
+    # Hairline row/column rules kept beside borderless inferred tables must paint
+    # above the table (white body fills otherwise hide them in spTree order).
+    _raise_hairlines_above_borderless_tables(shapes, tables)
+
     mask_regions = [shape.bbox for shape in shapes if not shape.is_page_background]
     mask_regions.extend(table.bbox for table in tables)
 
@@ -255,6 +259,32 @@ def extract_vector_content(
         fallback_reason=None if shapes or tables else reason,
         skipped_drawing_count=skipped,
     )
+
+
+def _raise_hairlines_above_borderless_tables(
+    shapes: list[ShapeElement],
+    tables: list[TableElement],
+) -> None:
+    borderless = [
+        table
+        for table in tables
+        if (table.border_width or 0) <= 0 and (table.inner_border_width or 0) <= 0
+    ]
+    if not borderless:
+        return
+    max_table_z = max((int(table.z_order) for table in borderless), default=0)
+    bump = 1
+    for shape in shapes:
+        height = abs(shape.bbox[3] - shape.bbox[1])
+        width = abs(shape.bbox[2] - shape.bbox[0])
+        if min(width, height) > HAIRLINE_RULE_MAX_SHORT_PT + 0.5:
+            continue
+        if max(width, height) < HAIRLINE_RULE_MIN_LONG_PT:
+            continue
+        if not any(_bbox_center_inside(shape.bbox, table.bbox, padding=2.0) for table in borderless):
+            continue
+        shape.z_order = max_table_z + bump
+        bump += 1
 
 
 def extract_tables(
@@ -1475,6 +1505,36 @@ def apply_cell_fills(
         )
         if raster_fill is not None:
             cell.fill_color = raster_fill
+
+    # Borderless inferred tables with a header band (≤1 non-white fill colour):
+    # drop near-white body fills so hairline row rules above the table stay
+    # visible. Keep white cells on true zebra stacks (2+ non-white fills).
+    if (
+        table.provenance == "inferred_alignment_table"
+        and (table.border_width or 0) <= 0
+    ):
+        non_white = {
+            cell.fill_color
+            for cell in table.cells
+            if cell.fill_color and not _hex_is_near_white(cell.fill_color)
+        }
+        if len(non_white) <= 1:
+            for cell in table.cells:
+                if cell.fill_color and _hex_is_near_white(cell.fill_color):
+                    cell.fill_color = None
+
+
+def _hex_is_near_white(color: str, *, threshold: int = 245) -> bool:
+    text = color.lstrip("#")
+    if len(text) != 6:
+        return False
+    try:
+        red = int(text[0:2], 16)
+        green = int(text[2:4], 16)
+        blue = int(text[4:6], 16)
+    except ValueError:
+        return False
+    return red >= threshold and green >= threshold and blue >= threshold
 
 
 def _collect_image_boxes(page: fitz.Page) -> list[BBox]:

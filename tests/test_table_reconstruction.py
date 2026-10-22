@@ -349,34 +349,59 @@ class BorderlessAndZebraDetectionTests(unittest.TestCase):
             and (shape.bbox[2] - shape.bbox[0]) > 400
         ]
         self.assertGreaterEqual(len(hairlines), 8)
+        # Must paint above the table so white body fills do not hide them.
+        self.assertTrue(all(shape.z_order > table.z_order for shape in hairlines))
+        prs = Presentation(str(pptx_path))
+        slide = prs.slides[0]
+        # spTree order: graphicFrame (table) before hairline rects.
+        tags = [child.tag.split("}")[-1] for child in slide.shapes._spTree]  # noqa: SLF001
+        table_pos = next(i for i, tag in enumerate(tags) if tag == "graphicFrame")
+        rect_positions = [i for i, tag in enumerate(tags) if tag == "sp"]
+        hairline_after = [pos for pos in rect_positions if pos > table_pos]
+        self.assertGreaterEqual(len(hairline_after), 8)
 
     def test_centred_columns_keep_centre_alignment(self) -> None:
-        """Columns with stable text centres and varying left edges stay centred (H2)."""
+        """Columns with stable text centres stay centred after band snap (H2)."""
 
         def build(page: fitz.Page) -> None:
-            # Four columns; ID/Status/Score are centred on fixed centres, Name left.
-            centres = [90.0, None, 430.0, 610.0]
-            lefts = [None, 170.0, None, None]
+            # Zebra band 100–780; ID/Status/Score centred, Name left at 295.5.
+            x0, band_w, y0, row_h = 100.0, 680.0, 80.0, 32.0
+            centres = [145.0, None, 530.0, 700.0]
+            name_x = 295.5
             rows = [
                 ["ID", "Name", "Status", "Score"],
                 ["1", "Alpha", "OK", "9"],
                 ["12", "BetaItem", "WAIT", "88"],
                 ["123", "Gamma", "OK", "100"],
                 ["7", "Delta", "HOLD", "42"],
+                ["42", "Epsilon", "OK", "55"],
             ]
-            y0, row_h = 80.0, 30.0
             for row_index, row in enumerate(rows):
+                if row_index == 0:
+                    fill = (0.15, 0.25, 0.55)
+                elif row_index % 2:
+                    fill = (0.9, 0.94, 1.0)
+                else:
+                    fill = (1.0, 1.0, 1.0)
+                page.draw_rect(
+                    fitz.Rect(x0, y0 + row_index * row_h, x0 + band_w, y0 + (row_index + 1) * row_h),
+                    color=None,
+                    fill=fill,
+                )
                 for col_index, value in enumerate(row):
                     width = fitz.get_text_length(value, fontsize=13, fontname="helv")
                     if centres[col_index] is not None:
                         x = float(centres[col_index]) - width / 2.0
+                        color = (1, 1, 1) if row_index == 0 else (0.1, 0.1, 0.12)
                     else:
-                        x = float(lefts[col_index])
+                        x = name_x
+                        color = (1, 1, 1) if row_index == 0 else (0.1, 0.1, 0.12)
                     page.insert_text(
-                        fitz.Point(x, y0 + row_index * row_h + 18),
+                        fitz.Point(x, y0 + row_index * row_h + 22),
                         value,
                         fontsize=13,
                         fontname="helv",
+                        color=color,
                     )
 
         path = _write_pdf(build)
@@ -387,19 +412,21 @@ class BorderlessAndZebraDetectionTests(unittest.TestCase):
         self.assertEqual(len(tables), 1)
         table = tables[0]
         self.assertEqual(table.col_count, 4)
-        by_col = {
-            cell.col: cell.horizontal_align
-            for cell in table.cells
-            if cell.row == 1
-        }
-        self.assertEqual(by_col[0], "center")
-        self.assertEqual(by_col[1], "left")
-        self.assertEqual(by_col[2], "center")
-        self.assertEqual(by_col[3], "center")
-        for col_index in (0, 2, 3):
+        expected_cx = [145.0, None, 530.0, 700.0]
+        name_x = 295.5
+        for col_index, expected in enumerate(expected_cx):
             cell = next(cell for cell in table.cells if cell.col == col_index and cell.row == 1)
-            self.assertIsNone(cell.margin_left)
-            self.assertIsNone(cell.margin_right)
+            geom = _cell_bbox_from_geometry(table, cell)
+            if expected is None:
+                self.assertEqual(cell.horizontal_align, "left")
+                text_x = geom[0] + float(cell.margin_left or 0.0)
+                self.assertLess(abs(text_x - name_x), 2.0)
+            else:
+                self.assertEqual(cell.horizontal_align, "center")
+                self.assertIsNone(cell.margin_left)
+                self.assertIsNone(cell.margin_right)
+                mid = (geom[0] + geom[2]) / 2.0
+                self.assertLess(abs(mid - expected), 2.0, msg=f"col {col_index}")
 
     @unittest.skipUnless((FIXTURES_DIR / "zebra_borderless_table.pdf").exists(), "fixture missing")
     def test_zebra_column_text_stays_near_source(self) -> None:

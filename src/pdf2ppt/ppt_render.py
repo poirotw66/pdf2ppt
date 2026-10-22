@@ -102,16 +102,22 @@ def render_page_to_slide(
         )
         background_elements.append(background_picture._element)  # noqa: SLF001
 
-    # Foreground shapes and cropped pictures follow PDF paint order via z_order.
+    # Foreground shapes, cropped pictures, and tables share z_order so hairline
+    # row rules can sit above a borderless inferred table (b_header_band_fillrules).
     layered_items: list[tuple[int, int, str, Any]] = []
     for index, shape in enumerate(foreground_shapes):
         layered_items.append((int(shape.z_order), index, "shape", shape))
     for index, image_element in enumerate(page_result.image_elements or []):
         image_z = int(getattr(image_element, "z_order", 0) or 0)
         layered_items.append((image_z, index, "image", image_element))
+    for index, table in enumerate(getattr(page_result, "table_elements", None) or []):
+        layered_items.append((int(table.z_order), index, "table", table))
     for _z_order, _index, kind, item in sorted(layered_items, key=lambda entry: (entry[0], entry[1], entry[2])):
         if kind == "shape":
             add_shape_element(slide, item, scale_x=scale_x, scale_y=scale_y)
+            continue
+        if kind == "table":
+            add_table_element(slide, item, scale_x=scale_x, scale_y=scale_y)
             continue
         left, top, width, height = bbox_to_shape_geometry(item.bbox, scale_x, scale_y)
         slide.shapes.add_picture(
@@ -121,9 +127,6 @@ def render_page_to_slide(
             width=width,
             height=height,
         )
-
-    for table in sorted(getattr(page_result, "table_elements", None) or [], key=lambda item: item.z_order):
-        add_table_element(slide, table, scale_x=scale_x, scale_y=scale_y)
 
     if title_block is not None and slide.shapes.title is not None:
         _apply_title_placeholder(
