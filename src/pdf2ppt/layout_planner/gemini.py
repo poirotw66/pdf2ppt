@@ -211,9 +211,18 @@ class GeminiLayoutPlanner:
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")[:500]
             # Never include request headers (API key) in the raised message.
+            kind = "api_error"
+            if error.code in {400, 401, 403}:
+                lowered = detail.lower()
+                if any(
+                    marker in lowered
+                    for marker in ("api key", "api_key", "permission", "unauthorized", "forbidden", "not valid")
+                ):
+                    kind = "auth_error"
             raise LayoutPlannerError(
                 f"Gemini layout HTTP {error.code}: {detail}",
-                kind="api_error",
+                kind=kind,
+                estimated_cost_usd=self._estimated_cost_usd,
             ) from error
         except urllib.error.URLError as error:
             reason = str(error.reason)

@@ -158,14 +158,14 @@ class ConvertRequest(BaseModel):
     layout_model_root: str | None = "model"
     layout_skip_header_footer: bool = True
     # Experimental Phase-3 VLM layout planner (opt-in; never default/auto).
+    # Model id, cache directory, and hard cost caps are server-side only
+    # (env / process defaults) — clients may only enable the planner and
+    # request low risk vs grouping/fonts.
     layout_planner: Literal["gemini"] | None = None
-    layout_planner_model: str | None = None
-    layout_planner_max_calls: int = Field(default=30, ge=0, le=10_000)
-    layout_planner_max_cost_usd: float = Field(default=1.0, ge=0.0, le=10_000.0)
-    layout_planner_timeout_s: float = Field(default=45.0, ge=1.0, le=600.0)
-    layout_planner_concurrency: int = Field(default=2, ge=1, le=16)
-    layout_planner_cache_dir: str | None = ".pdf2ppt_cache/layout_planner"
-    layout_planner_min_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+    layout_planner_max_calls: int = Field(default=30, ge=0, le=100)
+    layout_planner_timeout_s: float = Field(default=45.0, ge=1.0, le=120.0)
+    layout_planner_apply_grouping: bool = False
+    layout_planner_apply_fonts: bool = False
     write_debug_artifacts: bool = False
     # P5 SlideIR — opt-in; defaults preserve convert behaviour.
     emit_ir: bool = False

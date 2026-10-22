@@ -322,13 +322,40 @@ def load_planner_ground_truth(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _normalize_match_text(text: str) -> str:
+    return "".join(ch.lower() for ch in text if not ch.isspace())
+
+
+def _text_match_score(predicted: str, ground_truth: str) -> float:
+    pred = _normalize_match_text(predicted)
+    gt = _normalize_match_text(ground_truth)
+    if not gt:
+        return 0.0
+    if pred == gt:
+        return 1.0
+    if gt in pred or pred in gt:
+        return 0.85
+    # Cheap token overlap for short labels.
+    pred_tokens = set(pred.split()) if " " in predicted else {pred}
+    gt_tokens = set(gt.split()) if " " in ground_truth else {gt}
+    if not pred_tokens or not gt_tokens:
+        return 0.0
+    inter = len(pred_tokens & gt_tokens)
+    return inter / max(len(pred_tokens | gt_tokens), 1)
+
+
 def evaluate_planner_acceptance(
     predicted_blocks: list[TextBlock],
     ground_truth: dict[str, Any],
     *,
-    match_iou_threshold: float = 0.25,
+    match_iou_threshold: float = 0.15,
 ) -> PlannerAcceptanceMetrics:
-    """Score Phase-3 acceptance criteria against ``*.planner.json`` labels."""
+    """Score Phase-3 acceptance criteria against ``*.planner.json`` labels.
+
+    Matching prefers normalized text containment over strict IoU so synthetic
+    GT bboxes that only roughly cover real blocks still produce reading-order
+    and header/footer scores.
+    """
 
     paragraphs = list(ground_truth.get("paragraphs") or [])
     expect_title = bool(ground_truth.get("expect_title")) or any(
@@ -347,8 +374,9 @@ def evaluate_planner_acceptance(
     else:
         title_accuracy = 0.0
 
-    hf_ids = [str(item) for item in (ground_truth.get("expect_header_footer_ids") or [])]
-    if not hf_ids:
+    if "expect_header_footer_ids" in ground_truth:
+        hf_ids = [str(item) for item in (ground_truth.get("expect_header_footer_ids") or [])]
+    else:
         hf_ids = [
             str(item.get("id"))
             for item in paragraphs
@@ -357,33 +385,41 @@ def evaluate_planner_acceptance(
     hf_gts = [item for item in paragraphs if str(item.get("id")) in set(hf_ids)]
     filtered = 0
     for gt in hf_gts:
-        bbox = _as_bbox(gt["bbox"])
-        still_present = any(
-            iou(block.bbox, bbox) >= match_iou_threshold
-            or intersection_area(block.bbox, bbox) / max(bbox_area(bbox), 1.0) >= 0.5
-            for block in predicted_blocks
-        )
+        gt_text = str(gt.get("text") or "")
+        gt_bbox = _as_bbox(gt["bbox"])
+        still_present = False
+        for block in predicted_blocks:
+            text_score = _text_match_score(block.text, gt_text) if gt_text else 0.0
+            geom_score = max(
+                iou(block.bbox, gt_bbox),
+                intersection_area(block.bbox, gt_bbox) / max(bbox_area(gt_bbox), 1.0),
+            )
+            if text_score >= 0.85 or (text_score >= 0.5 and geom_score >= 0.15) or geom_score >= 0.5:
+                still_present = True
+                break
         if not still_present:
             filtered += 1
     filter_rate = (filtered / len(hf_gts)) if hf_gts else None
 
-    # Reading order: among GT paragraphs matched to predictions, pairwise order.
     matched: list[tuple[int, TextBlock]] = []
     used_pred: set[int] = set()
     for gt_index, gt in enumerate(paragraphs):
         if str(gt.get("role") or "") in {"header", "footer", "page_number"}:
             continue
+        gt_text = str(gt.get("text") or "")
+        gt_bbox = _as_bbox(gt["bbox"])
         best_pi = None
         best_score = 0.0
-        gt_bbox = _as_bbox(gt["bbox"])
         for pi, pred in enumerate(predicted_blocks):
             if pi in used_pred:
                 continue
-            score = iou(pred.bbox, gt_bbox)
+            text_score = _text_match_score(pred.text, gt_text) if gt_text else 0.0
+            geom_score = iou(pred.bbox, gt_bbox)
+            score = max(text_score, geom_score * 0.9)
             if score > best_score:
                 best_score = score
                 best_pi = pi
-        if best_pi is not None and best_score >= match_iou_threshold:
+        if best_pi is not None and best_score >= max(0.35, match_iou_threshold):
             used_pred.add(best_pi)
             matched.append((gt_index, predicted_blocks[best_pi]))
 
@@ -408,4 +444,115 @@ def evaluate_planner_acceptance(
         filtered_header_footer_count=filtered,
         reading_order_pairs_checked=pairs_checked,
         reading_order_pairs_correct=pairs_correct,
+    )
+
+
+def evaluate_planner_acceptance_from_pptx(
+    pptx_path: Path,
+    ground_truth: dict[str, Any],
+    *,
+    slide_index: int = 0,
+) -> PlannerAcceptanceMetrics:
+    """Score acceptance from the actual PPTX (not IR-only / GT-oracle).
+
+    Title: title placeholder text present when expected.
+    Header/footer: GT HF strings absent from editable PPTX text.
+    Reading order: consecutive non-HF GT strings appear in PPTX text order.
+    """
+
+    from pptx import Presentation
+
+    from .refine import extract_pptx_slide_text
+
+    presentation = Presentation(str(pptx_path))
+    if slide_index < 0 or slide_index >= len(presentation.slides):
+        return PlannerAcceptanceMetrics(
+            title_accuracy=None,
+            header_footer_filter_rate=None,
+            reading_order_correctness=None,
+            notes=["pptx slide missing"],
+        )
+
+    slide = presentation.slides[slide_index]
+    title_shape = slide.shapes.title
+    title_text = (title_shape.text or "").strip() if title_shape is not None else ""
+    slide_text = extract_pptx_slide_text(pptx_path, slide_index=slide_index)
+    normalized_slide = _normalize_match_text(slide_text)
+
+    paragraphs = list(ground_truth.get("paragraphs") or [])
+    expect_title = bool(ground_truth.get("expect_title")) or any(
+        str(item.get("role") or "") == "title" for item in paragraphs
+    )
+    title_detected = bool(title_text)
+    if expect_title:
+        # Prefer placeholder; also accept GT title text present as any shape.
+        gt_title = next(
+            (str(item.get("text") or "") for item in paragraphs if str(item.get("role") or "") == "title"),
+            "",
+        )
+        if title_detected:
+            title_accuracy: float | None = 1.0
+        elif gt_title and _normalize_match_text(gt_title) in normalized_slide:
+            title_accuracy = 0.5
+            title_detected = True
+        else:
+            title_accuracy = 0.0
+    else:
+        title_accuracy = 1.0 if not title_detected else 0.0
+
+    if "expect_header_footer_ids" in ground_truth:
+        hf_ids = [str(item) for item in (ground_truth.get("expect_header_footer_ids") or [])]
+    else:
+        hf_ids = [
+            str(item.get("id"))
+            for item in paragraphs
+            if str(item.get("role") or "") in {"header", "footer", "page_number"}
+        ]
+    hf_gts = [item for item in paragraphs if str(item.get("id")) in set(hf_ids)]
+    filtered = 0
+    for gt in hf_gts:
+        gt_text = str(gt.get("text") or "")
+        if not gt_text:
+            filtered += 1
+            continue
+        if _normalize_match_text(gt_text) not in normalized_slide:
+            filtered += 1
+    filter_rate = (filtered / len(hf_gts)) if hf_gts else None
+
+    # Reading order from PPTX concatenated text positions of non-HF GT strings.
+    body_gts = [
+        item
+        for item in paragraphs
+        if str(item.get("role") or "") not in {"header", "footer", "page_number"}
+    ]
+    positions: list[tuple[int, int]] = []
+    for gt_index, gt in enumerate(body_gts):
+        needle = _normalize_match_text(str(gt.get("text") or ""))
+        if not needle:
+            continue
+        pos = normalized_slide.find(needle)
+        if pos >= 0:
+            positions.append((gt_index, pos))
+    pairs_checked = 0
+    pairs_correct = 0
+    for left in range(len(positions)):
+        for right in range(left + 1, len(positions)):
+            gi, pi = positions[left]
+            gj, pj = positions[right]
+            pairs_checked += 1
+            if (gi < gj) == (pi <= pj):
+                pairs_correct += 1
+    order_score = (pairs_correct / pairs_checked) if pairs_checked else None
+
+    return PlannerAcceptanceMetrics(
+        title_accuracy=title_accuracy,
+        header_footer_filter_rate=None if filter_rate is None else round(filter_rate, 6),
+        reading_order_correctness=None if order_score is None else round(order_score, 6),
+        title_detected=title_detected,
+        title_expected=expect_title,
+        expected_header_footer_count=len(hf_gts),
+        filtered_header_footer_count=filtered,
+        reading_order_pairs_checked=pairs_checked,
+        reading_order_pairs_correct=pairs_correct,
+        notes=["measured_from_pptx"],
     )

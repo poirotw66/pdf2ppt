@@ -1,0 +1,19 @@
+{
+  "page_number": 1,
+  "fixture": "geometric_chart.pdf",
+  "expect_title": true,
+  "expect_header_footer_ids": [],
+  "reading_order": ["title", "v140", "v260", "v190", "v320", "v250", "v300", "v210", "months"],
+  "notes": "Bar value labels must stay at their x positions; never merge into one stacked frame.",
+  "paragraphs": [
+    {"id": "title", "bbox": [60, 40, 285, 73], "text": "Monthly Active Users", "role": "title", "font_family_class": "sans"},
+    {"id": "v140", "bbox": [153, 306, 175, 324], "text": "140", "role": "other", "font_family_class": "sans"},
+    {"id": "v260", "bbox": [263, 186, 285, 204], "text": "260", "role": "other", "font_family_class": "sans"},
+    {"id": "v190", "bbox": [373, 256, 395, 274], "text": "190", "role": "other", "font_family_class": "sans"},
+    {"id": "v320", "bbox": [483, 126, 505, 144], "text": "320", "role": "other", "font_family_class": "sans"},
+    {"id": "v250", "bbox": [593, 196, 615, 214], "text": "250", "role": "other", "font_family_class": "sans"},
+    {"id": "v300", "bbox": [703, 146, 725, 164], "text": "300", "role": "other", "font_family_class": "sans"},
+    {"id": "v210", "bbox": [813, 236, 835, 254], "text": "210", "role": "other", "font_family_class": "sans"},
+    {"id": "months", "bbox": [60, 480, 266, 499], "text": "Jan  Feb  Mar  Apr  May  Jun  Jul", "role": "other", "font_family_class": "sans"}
+  ]
+}

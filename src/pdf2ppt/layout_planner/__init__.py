@@ -12,7 +12,14 @@ from .apply import apply_layout_plan
 from .base import LayoutPlanner, LayoutPlannerError, blocks_to_evidence
 from .budget import LayoutPlannerBudget, LayoutPlannerCallRecord
 from .cache import LayoutPlannerCache, compute_layout_planner_cache_key
-from .fonts import DEFAULT_FONT_MAP, normalize_font_map, resolve_font_family
+from .fonts import (
+    DEFAULT_FONT_MAP,
+    font_script_for_text,
+    is_known_font_family,
+    normalize_font_map,
+    resolve_font_family,
+    text_has_cjk,
+)
 from .gemini import (
     GEMINI_ENV_API_KEY,
     GEMINI_ENV_API_KEY_ALT,
@@ -47,6 +54,9 @@ __all__ = [
     "DEFAULT_FONT_MAP",
     "DEFAULT_MIN_CONFIDENCE",
     "FONT_FAMILY_CLASSES",
+    "font_script_for_text",
+    "is_known_font_family",
+    "text_has_cjk",
     "GEMINI_ENV_API_KEY",
     "GEMINI_ENV_API_KEY_ALT",
     "GEMINI_ENV_LAYOUT_MODEL",

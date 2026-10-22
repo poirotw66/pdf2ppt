@@ -193,8 +193,10 @@ inpainting/
 > **實作狀態（實驗性 / 已落地）**：opt-in VLM layout planner 已落地於
 > `src/pdf2ppt/layout_planner/`（見 [`layout-planner.md`](./layout-planner.md)）。
 > 預設模型 `gemini-3.1-flash-lite`；輸出為 schema 驗證的結構化 JSON（角色、閱讀順序、
-> 段落合併、字體家族類別），經 SlideIR `groups` / `plan_metadata` 套用。未設
-> `--layout-planner` 或缺少 API key 時與 main **byte-identical**。本地方案
+> 段落合併、字體家族類別），經 SlideIR `groups` / `plan_metadata` 套用。預設只套用
+> 低風險變更（角色／閱讀順序／頁眉頁尾）；合併與字體 remap 需顯式 flag。未設
+> `--layout-planner` 或缺少 API key 時與 main **byte-identical**（並寫入
+> `skip_reason`）。HTTP 失敗計入 call/cost cap；連續失敗／auth 開 circuit。本地方案
 > （Paddle Layout）仍可於後續補強；現有 `--layout-engine heuristic|ppstructure` 不變。
 
 ### 3.1 技術選型：Paddle Layout vs VLM

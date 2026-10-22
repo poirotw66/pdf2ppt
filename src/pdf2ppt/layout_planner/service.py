@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
-from ..models import TextBlock
+from ..models import BBox, TextBlock
 from .apply import apply_layout_plan
 from .base import LayoutPlanner, LayoutPlannerError, blocks_to_evidence
-from .budget import LayoutPlannerBudget, LayoutPlannerCallRecord, Timer
+from .budget import (
+    DEFAULT_ESTIMATED_COST_USD,
+    DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    LayoutPlannerBudget,
+    LayoutPlannerCallRecord,
+    Timer,
+)
 from .cache import LayoutPlannerCache, compute_layout_planner_cache_key
 from .gemini import GEMINI_LAYOUT_DEFAULT_MODEL, GeminiLayoutPlanner
 from .types import PROMPT_VERSION, LayoutPlannerApplication
@@ -60,6 +66,8 @@ class LayoutPlannerService:
         min_confidence: float = 0.55,
         font_map: Mapping[str, Mapping[str, str]] | Mapping[str, str] | None = None,
         skip_header_footer: bool = True,
+        apply_grouping: bool = False,
+        apply_fonts: bool = False,
     ) -> None:
         self._planner = planner
         self._budget = budget or LayoutPlannerBudget()
@@ -67,6 +75,8 @@ class LayoutPlannerService:
         self._min_confidence = min_confidence
         self._font_map = font_map
         self._skip_header_footer = skip_header_footer
+        self._apply_grouping = apply_grouping
+        self._apply_fonts = apply_fonts
 
     @property
     def budget(self) -> LayoutPlannerBudget:
@@ -87,11 +97,11 @@ class LayoutPlannerService:
         text_blocks: list[TextBlock],
         page_number: int,
         page_height: float,
+        page_width: float = 960.0,
+        table_bboxes: Sequence[BBox] | None = None,
+        chart_bboxes: Sequence[BBox] | None = None,
     ) -> LayoutPlannerApplication | None:
-        """Return an applied plan, or ``None`` to signal heuristic fallback.
-
-        Never raises — all failures are recorded as budget fallbacks.
-        """
+        """Return an applied plan, or ``None`` to signal heuristic fallback."""
 
         if page_image is None or not text_blocks:
             self._budget.record_fallback(
@@ -159,14 +169,30 @@ class LayoutPlannerService:
                     fallback_kind=None,
                 )
             )
-            return apply_layout_plan(
+            return self._apply(
                 text_blocks,
                 plan,
                 page_number=page_number,
                 page_height=page_height,
-                skip_header_footer=self._skip_header_footer,
-                font_map=self._font_map,
+                page_width=page_width,
+                table_bboxes=table_bboxes,
+                chart_bboxes=chart_bboxes,
             )
+
+        if self._budget.is_circuit_open():
+            self._budget.record_fallback(
+                LayoutPlannerCallRecord(
+                    model=self.model,
+                    page_number=page_number,
+                    cache_hit=False,
+                    success=False,
+                    latency_ms=timer.elapsed_ms(),
+                    estimated_cost_usd=0.0,
+                    note=self._budget.circuit_reason or "circuit open",
+                    fallback_kind="circuit",
+                )
+            )
+            return None
 
         if not self._planner.is_configured():
             self._budget.record_fallback(
@@ -183,7 +209,8 @@ class LayoutPlannerService:
             )
             return None
 
-        if not self._budget.can_afford(0.002):
+        # Atomic reserve before any network I/O (counts failures against the cap).
+        if not self._budget.try_reserve(estimated_cost_usd=DEFAULT_ESTIMATED_COST_USD):
             self._budget.record_fallback(
                 LayoutPlannerCallRecord(
                     model=self.model,
@@ -198,16 +225,19 @@ class LayoutPlannerService:
             )
             return None
 
-        acquired = self._budget.acquire_slot(timeout_s=max(1.0, float(getattr(self._planner, "_timeout_s", 45.0))))
+        acquired = self._budget.acquire_slot(
+            timeout_s=max(1.0, float(getattr(self._planner, "_timeout_s", 45.0)))
+        )
         if not acquired:
-            self._budget.record_fallback(
+            # Reservation already counted; treat as a failed attempt.
+            self._budget.commit_failure(
                 LayoutPlannerCallRecord(
                     model=self.model,
                     page_number=page_number,
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=0.0,
+                    estimated_cost_usd=DEFAULT_ESTIMATED_COST_USD,
                     note="concurrency slot timeout",
                     fallback_kind="timeout",
                 )
@@ -223,14 +253,14 @@ class LayoutPlannerService:
             plan.latency_ms = timer.elapsed_ms()
             plan.cache_hit = False
         except TimeoutError as error:
-            self._budget.record_fallback(
+            self._budget.commit_failure(
                 LayoutPlannerCallRecord(
                     model=self.model,
                     page_number=page_number,
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=0.0,
+                    estimated_cost_usd=DEFAULT_ESTIMATED_COST_USD,
                     note=str(error),
                     fallback_kind="timeout",
                 )
@@ -240,14 +270,15 @@ class LayoutPlannerService:
             kind = getattr(error, "kind", "validation")
             if isinstance(error, LayoutPlanValidationError):
                 kind = "validation"
-            self._budget.record_fallback(
+            cost = float(getattr(error, "estimated_cost_usd", 0.0) or DEFAULT_ESTIMATED_COST_USD)
+            self._budget.commit_failure(
                 LayoutPlannerCallRecord(
                     model=self.model,
                     page_number=page_number,
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=float(getattr(error, "estimated_cost_usd", 0.0) or 0.0),
+                    estimated_cost_usd=cost,
                     note=str(error),
                     fallback_kind=str(kind),
                 )
@@ -255,14 +286,14 @@ class LayoutPlannerService:
             return None
         except Exception as error:  # noqa: BLE001 — page boundary
             logger.exception("Layout planner unexpected failure on page %s", page_number)
-            self._budget.record_fallback(
+            self._budget.commit_failure(
                 LayoutPlannerCallRecord(
                     model=self.model,
                     page_number=page_number,
                     cache_hit=False,
                     success=False,
                     latency_ms=timer.elapsed_ms(),
-                    estimated_cost_usd=0.0,
+                    estimated_cost_usd=DEFAULT_ESTIMATED_COST_USD,
                     note=str(error),
                     fallback_kind="api_error",
                 )
@@ -278,34 +309,60 @@ class LayoutPlannerService:
                 "groups": [group.to_dict() for group in plan.groups],
             },
         )
-        self._budget.record_call(
+        self._budget.commit_success(
             LayoutPlannerCallRecord(
                 model=self.model,
                 page_number=page_number,
                 cache_hit=False,
                 success=True,
                 latency_ms=plan.latency_ms,
-                estimated_cost_usd=plan.estimated_cost_usd,
+                estimated_cost_usd=plan.estimated_cost_usd or DEFAULT_ESTIMATED_COST_USD,
                 note=None,
                 fallback_kind=None,
             )
         )
+        return self._apply(
+            text_blocks,
+            plan,
+            page_number=page_number,
+            page_height=page_height,
+            page_width=page_width,
+            table_bboxes=table_bboxes,
+            chart_bboxes=chart_bboxes,
+        )
+
+    def _apply(
+        self,
+        text_blocks: list[TextBlock],
+        plan: Any,
+        *,
+        page_number: int,
+        page_height: float,
+        page_width: float,
+        table_bboxes: Sequence[BBox] | None,
+        chart_bboxes: Sequence[BBox] | None,
+    ) -> LayoutPlannerApplication:
         return apply_layout_plan(
             text_blocks,
             plan,
             page_number=page_number,
             page_height=page_height,
+            page_width=page_width,
             skip_header_footer=self._skip_header_footer,
             font_map=self._font_map,
+            apply_grouping=self._apply_grouping,
+            apply_fonts=self._apply_fonts,
+            table_bboxes=table_bboxes,
+            chart_bboxes=chart_bboxes,
         )
 
 
 def build_layout_planner_service(options: Any) -> LayoutPlannerService | None:
     """Construct a service from ``ConversionOptions`` when opt-in is set.
 
-    Returns ``None`` when the planner is off **or** not configured (no API key /
-    transport). That keeps PPTX output byte-identical to the default geometric
-    path when ``GEMINI_API_KEY`` is missing.
+    When the flag is set but no API key / transport is available, returns None
+    and records a note on ``options.layout_planner_skip_reason`` so the report
+    can surface it (byte-identical geometric path).
     """
 
     name = getattr(options, "layout_planner", None)
@@ -319,12 +376,39 @@ def build_layout_planner_service(options: Any) -> LayoutPlannerService | None:
         transport=getattr(options, "layout_planner_transport", None),
         min_confidence=float(getattr(options, "layout_planner_min_confidence", 0.55)),
     )
-    # Tests may inject a transport without a key; live runs need a key.
     if not planner.is_configured():
-        logger.info(
-            "Layout planner %s requested but not configured; using geometric heuristics.",
-            name,
-        )
+        reason = "layout_planner flag set but no API key / transport configured"
+        logger.info("%s; using geometric heuristics.", reason)
+        try:
+            options.layout_planner_skip_reason = reason
+            # Still attach an empty budget so the report can show the skip.
+            if getattr(options, "layout_planner_budget", None) is None:
+                options.layout_planner_budget = LayoutPlannerBudget(
+                    max_calls=int(getattr(options, "layout_planner_max_calls", 30)),
+                    max_cost_usd=float(getattr(options, "layout_planner_max_cost_usd", 1.0)),
+                    concurrency=int(getattr(options, "layout_planner_concurrency", 2)),
+                    max_consecutive_failures=int(
+                        getattr(
+                            options,
+                            "layout_planner_max_consecutive_failures",
+                            DEFAULT_MAX_CONSECUTIVE_FAILURES,
+                        )
+                    ),
+                )
+                options.layout_planner_budget.record_fallback(
+                    LayoutPlannerCallRecord(
+                        model=getattr(planner, "configured_model", GEMINI_LAYOUT_DEFAULT_MODEL),
+                        page_number=0,
+                        cache_hit=False,
+                        success=False,
+                        latency_ms=0.0,
+                        estimated_cost_usd=0.0,
+                        note=reason,
+                        fallback_kind="api_error",
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            pass
         return None
     budget = getattr(options, "layout_planner_budget", None)
     if budget is None:
@@ -332,6 +416,13 @@ def build_layout_planner_service(options: Any) -> LayoutPlannerService | None:
             max_calls=int(getattr(options, "layout_planner_max_calls", 30)),
             max_cost_usd=float(getattr(options, "layout_planner_max_cost_usd", 1.0)),
             concurrency=int(getattr(options, "layout_planner_concurrency", 2)),
+            max_consecutive_failures=int(
+                getattr(
+                    options,
+                    "layout_planner_max_consecutive_failures",
+                    DEFAULT_MAX_CONSECUTIVE_FAILURES,
+                )
+            ),
         )
         try:
             options.layout_planner_budget = budget
@@ -345,6 +436,8 @@ def build_layout_planner_service(options: Any) -> LayoutPlannerService | None:
         min_confidence=float(getattr(options, "layout_planner_min_confidence", 0.55)),
         font_map=getattr(options, "layout_planner_font_map", None),
         skip_header_footer=bool(getattr(options, "layout_skip_header_footer", True)),
+        apply_grouping=bool(getattr(options, "layout_planner_apply_grouping", False)),
+        apply_fonts=bool(getattr(options, "layout_planner_apply_fonts", False)),
     )
 
 

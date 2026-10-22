@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,8 +19,10 @@ from pdf2ppt.layout_planner import (
     LayoutPlannerService,
     apply_layout_plan,
     build_layout_planner_service,
+    is_known_font_family,
     parse_and_validate_layout_plan,
     resolve_font_family,
+    text_has_cjk,
 )
 from pdf2ppt.layout_planner.gemini import GeminiLayoutPlanner
 from pdf2ppt.layout_planner.validate import LayoutPlanValidationError
@@ -124,6 +127,13 @@ def _valid_plan_payload() -> dict:
     }
 
 
+def _pptx_member_digests(path: Path) -> dict[str, bytes]:
+    """Stable PPTX comparison: zip member contents, ignoring local header mtimes."""
+
+    with zipfile.ZipFile(path) as archive:
+        return {name: archive.read(name) for name in sorted(archive.namelist())}
+
+
 class LayoutPlanValidationTests(unittest.TestCase):
     def test_valid_plan_parses(self) -> None:
         plan = parse_and_validate_layout_plan(
@@ -184,7 +194,7 @@ class LayoutPlanValidationTests(unittest.TestCase):
 
 
 class LayoutPlanApplyTests(unittest.TestCase):
-    def test_apply_merges_groups_and_maps_fonts(self) -> None:
+    def test_default_apply_is_low_risk_no_merge_no_font(self) -> None:
         plan = parse_and_validate_layout_plan(
             _valid_plan_payload(),
             known_block_ids={"b1", "b2", "b3", "b4"},
@@ -196,23 +206,109 @@ class LayoutPlanApplyTests(unittest.TestCase):
             page_number=1,
             page_height=540.0,
             skip_header_footer=True,
+            apply_grouping=False,
+            apply_fonts=False,
         )
         self.assertTrue(result.used_planner)
-        # Footer filtered for OCR; title + merged list remain.
-        self.assertEqual(len(result.text_blocks), 2)
-        title = result.text_blocks[0]
-        self.assertEqual(title.block_role, "title")
+        # Footer filtered; no merges → 3 blocks (title + 2 list lines).
+        self.assertEqual(len(result.text_blocks), 3)
+        self.assertEqual(result.group_elements, [])
+        title = next(block for block in result.text_blocks if block.block_role == "title")
         self.assertTrue(title.use_title_placeholder)
-        self.assertIsNotNone(title.font_family)
+        # OCR fonts stay None when apply_fonts is off.
+        self.assertIsNone(title.font_family)
+
+    def test_apply_grouping_merges_adjacent_list_lines(self) -> None:
+        plan = parse_and_validate_layout_plan(
+            _valid_plan_payload(),
+            known_block_ids={"b1", "b2", "b3", "b4"},
+            model="test",
+        )
+        result = apply_layout_plan(
+            _blocks(),
+            plan,
+            page_number=1,
+            page_height=540.0,
+            page_width=960.0,
+            skip_header_footer=True,
+            apply_grouping=True,
+            apply_fonts=False,
+        )
+        self.assertEqual(len(result.text_blocks), 2)
         merged = result.text_blocks[1]
         self.assertIn("Ship layout analysis", merged.text)
         self.assertIn("Keep heuristic fallback", merged.text)
-        self.assertEqual(len(result.group_elements), 2)
-        self.assertIn("plan", result.plan_metadata)
+        self.assertEqual(merged.line_bboxes, [(50.0, 120.0, 500.0, 150.0), (50.0, 155.0, 500.0, 185.0)])
+
+    def test_rejects_table_cell_and_wide_horizontal_merge(self) -> None:
+        blocks = [
+            TextBlock(id="c1", source="ocr", bbox=(40, 100, 120, 130), text="A", confidence=0.9, font_size=12),
+            TextBlock(id="c2", source="ocr", bbox=(200, 100, 280, 130), text="B", confidence=0.9, font_size=12),
+            TextBlock(id="c3", source="ocr", bbox=(360, 100, 440, 130), text="C", confidence=0.9, font_size=12),
+        ]
+        payload = {
+            "blocks": [
+                {"id": "c1", "role": "table_cell", "reading_order": 0, "font_family_class": "sans", "confidence": 0.9},
+                {"id": "c2", "role": "table_cell", "reading_order": 1, "font_family_class": "sans", "confidence": 0.9},
+                {"id": "c3", "role": "table_cell", "reading_order": 2, "font_family_class": "sans", "confidence": 0.9},
+            ],
+            "groups": [
+                {
+                    "id": "g_all",
+                    "member_ids": ["c1", "c2", "c3"],
+                    "role": "table_cell",
+                    "reading_order": 0,
+                    "confidence": 0.9,
+                }
+            ],
+        }
+        plan = parse_and_validate_layout_plan(payload, known_block_ids={"c1", "c2", "c3"}, model="t")
+        result = apply_layout_plan(
+            blocks,
+            plan,
+            apply_grouping=True,
+            page_width=960.0,
+            table_bboxes=[(30.0, 90.0, 450.0, 140.0)],
+        )
+        self.assertEqual(len(result.text_blocks), 3)
+        self.assertEqual(result.group_elements, [])
+
+    def test_keeps_known_pdf_font_even_when_fonts_enabled(self) -> None:
+        blocks = _blocks()
+        blocks[0].font_family = "Helvetica"
+        blocks[0].source = "native"
+        plan = parse_and_validate_layout_plan(
+            _valid_plan_payload(),
+            known_block_ids={"b1", "b2", "b3", "b4"},
+            model="test",
+        )
+        result = apply_layout_plan(blocks, plan, apply_fonts=True, apply_grouping=False)
+        title = next(block for block in result.text_blocks if block.id == "b1" or block.block_role == "title")
+        self.assertEqual(title.font_family, "Helvetica")
 
     def test_font_family_class_mapping(self) -> None:
-        self.assertEqual(resolve_font_family("serif", script="latin"), "DejaVu Serif")
-        self.assertIn("Serif", resolve_font_family("serif", script="cjk"))
+        self.assertEqual(
+            resolve_font_family("serif", text="Hello", existing_font_family=None, apply_font_class=True),
+            "Times New Roman",
+        )
+        self.assertTrue(text_has_cjk("中文標題"))
+        self.assertFalse(text_has_cjk("Q3 2026 - Finance Team"))
+        # Latin+digits must NOT get a CJK font.
+        self.assertEqual(
+            resolve_font_family(
+                "sans",
+                text="Q3 2026 - Finance Team",
+                existing_font_family=None,
+                apply_font_class=True,
+            ),
+            "Arial",
+        )
+        self.assertIn(
+            "JhengHei",
+            resolve_font_family("sans", text="財務摘要", existing_font_family=None, apply_font_class=True) or "",
+        )
+        self.assertTrue(is_known_font_family("Helvetica"))
+        self.assertFalse(is_known_font_family(None))
 
 
 class GeminiPlannerMockTests(unittest.TestCase):
@@ -246,62 +342,98 @@ class GeminiPlannerMockTests(unittest.TestCase):
         with self.assertRaises(LayoutPlannerError):
             planner.plan_page(page_image=image, blocks=blocks_to_evidence(_blocks())[:1])
 
-    def test_timeout_recorded_as_fallback(self) -> None:
+    def test_timeout_counts_against_budget(self) -> None:
         def transport(_body: dict) -> dict:
             raise TimeoutError("timed out")
 
-        budget = LayoutPlannerBudget(max_calls=5)
+        budget = LayoutPlannerBudget(max_calls=5, max_consecutive_failures=10)
         service = LayoutPlannerService(
             GeminiLayoutPlanner(transport=transport),
             budget=budget,
             cache_dir=None,
         )
-        image = Image.new("RGB", (32, 32), color=(128, 128, 128))
         result = service.try_plan_page(
-            page_image=image,
+            page_image=Image.new("RGB", (32, 32), color=(128, 128, 128)),
             text_blocks=_blocks(),
             page_number=1,
             page_height=540.0,
         )
         self.assertIsNone(result)
         self.assertEqual(budget.fallbacks, 1)
+        self.assertEqual(budget.calls, 1)
+        self.assertEqual(budget.http_attempts, 1)
         self.assertEqual(budget.records[0].fallback_kind, "timeout")
+        self.assertTrue(budget.records[0].http_attempted)
 
-    def test_invalid_ids_fall_back(self) -> None:
+    def test_failed_requests_count_toward_cap(self) -> None:
+        calls = {"n": 0}
+
         def transport(_body: dict) -> dict:
-            bad = _valid_plan_payload()
-            bad["blocks"][0]["id"] = "nope"
-            return {"candidates": [{"content": {"parts": [{"text": json.dumps(bad)}]}}]}
+            calls["n"] += 1
+            return {"candidates": [{"content": {"parts": [{"text": "{bad"}]}}]}
 
-        budget = LayoutPlannerBudget()
+        budget = LayoutPlannerBudget(max_calls=2, max_consecutive_failures=99)
         service = LayoutPlannerService(
             GeminiLayoutPlanner(transport=transport),
             budget=budget,
             cache_dir=None,
         )
-        result = service.try_plan_page(
-            page_image=Image.new("RGB", (16, 16)),
-            text_blocks=_blocks(),
-            page_number=1,
-            page_height=540.0,
+        image = Image.new("RGB", (16, 16))
+        for page in range(1, 6):
+            service.try_plan_page(
+                page_image=image,
+                text_blocks=_blocks(),
+                page_number=page,
+                page_height=540.0,
+            )
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(budget.calls, 2)
+        self.assertEqual(budget.http_attempts, 2)
+
+    def test_circuit_breaker_stops_after_consecutive_failures(self) -> None:
+        calls = {"n": 0}
+
+        def transport(_body: dict) -> dict:
+            calls["n"] += 1
+            raise TimeoutError("down")
+
+        budget = LayoutPlannerBudget(max_calls=50, max_consecutive_failures=2)
+        service = LayoutPlannerService(
+            GeminiLayoutPlanner(transport=transport),
+            budget=budget,
+            cache_dir=None,
         )
-        self.assertIsNone(result)
-        self.assertGreaterEqual(budget.fallbacks, 1)
+        image = Image.new("RGB", (16, 16))
+        for page in range(1, 6):
+            service.try_plan_page(
+                page_image=image,
+                text_blocks=_blocks(),
+                page_number=page,
+                page_height=540.0,
+            )
+        self.assertEqual(calls["n"], 2)
+        self.assertTrue(budget.circuit_open)
+
+    def test_atomic_reserve_prevents_overshoot(self) -> None:
+        budget = LayoutPlannerBudget(max_calls=3, concurrency=8)
+        reserved = sum(1 for _ in range(8) if budget.try_reserve())
+        self.assertEqual(reserved, 3)
+        self.assertEqual(budget.calls, 3)
 
 
 class LayoutPlannerServiceConfigTests(unittest.TestCase):
-    def test_unconfigured_returns_none(self) -> None:
-        with patch.dict("os.environ", {}, clear=False):
-            # Ensure no gemini key leaks from the environment.
-            env = {key: value for key, value in __import__("os").environ.items() if "API_KEY" not in key}
-            with patch.dict("os.environ", env, clear=True):
-                options = ConversionOptions(
-                    input_path=Path("in.pdf"),
-                    output_path=Path("out.pptx"),
-                    report_path=Path("out.report.json"),
-                    layout_planner="gemini",
-                )
-                self.assertIsNone(build_layout_planner_service(options))
+    def test_unconfigured_returns_none_and_records_skip_reason(self) -> None:
+        env = {key: value for key, value in __import__("os").environ.items() if "API_KEY" not in key}
+        with patch.dict("os.environ", env, clear=True):
+            options = ConversionOptions(
+                input_path=Path("in.pdf"),
+                output_path=Path("out.pptx"),
+                report_path=Path("out.report.json"),
+                layout_planner="gemini",
+            )
+            self.assertIsNone(build_layout_planner_service(options))
+            self.assertIsNotNone(options.layout_planner_skip_reason)
+            self.assertIsInstance(options.layout_planner_budget, LayoutPlannerBudget)
 
 
 class SlideIrGroupsRoundTripTests(unittest.TestCase):
@@ -345,81 +477,53 @@ class SlideIrGroupsRoundTripTests(unittest.TestCase):
 
 @unittest.skipUnless((FIXTURES_DIR / "bullet_list.pdf").is_file(), "fixture missing")
 class LayoutPlannerOffByteIdenticalTests(unittest.TestCase):
-    def test_planner_off_matches_default_bytes(self) -> None:
+    def _convert(self, fixture: Path, out: Path, report: Path, **kwargs: object) -> None:
+        options = ConversionOptions(
+            input_path=fixture,
+            output_path=out,
+            report_path=report,
+            mode="editable",
+            ocr_model_root=None,
+            layout_engine="heuristic",
+            vector_mode="off",
+            inpaint_engine="white-box",
+            **kwargs,  # type: ignore[arg-type]
+        )
+        with patch("pdf2ppt.pipeline.OcrEngine") as ocr_cls:
+            ocr_cls.return_value.extract_text_blocks_batch.return_value = []
+            convert_pdf(options)
+
+    def test_planner_off_matches_default_pipeline_parts(self) -> None:
         fixture = FIXTURES_DIR / "bullet_list.pdf"
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            out_a = tmp_path / "a.pptx"
-            out_b = tmp_path / "b.pptx"
-            report_a = tmp_path / "a.report.json"
-            report_b = tmp_path / "b.report.json"
-            options_a = ConversionOptions(
-                input_path=fixture,
-                output_path=out_a,
-                report_path=report_a,
-                mode="editable",
-                ocr_model_root=None,
-                layout_engine="heuristic",
-                vector_mode="off",
-                inpaint_engine="white-box",
-                layout_planner=None,
-            )
-            options_b = ConversionOptions(
-                input_path=fixture,
-                output_path=out_b,
-                report_path=report_b,
-                mode="editable",
-                ocr_model_root=None,
-                layout_engine="heuristic",
-                vector_mode="off",
-                inpaint_engine="white-box",
-                layout_planner=None,
-            )
-            # Avoid OCR / paddle in CI: digital fixture with vector off still runs native path.
-            with patch("pdf2ppt.pipeline.OcrEngine") as ocr_cls:
-                ocr_cls.return_value.extract_text_blocks_batch.return_value = []
-                convert_pdf(options_a)
-                convert_pdf(options_b)
-            self.assertEqual(out_a.read_bytes(), out_b.read_bytes())
+            out_default = tmp_path / "default.pptx"
+            out_explicit = tmp_path / "explicit.pptx"
+            self._convert(fixture, out_default, tmp_path / "d.report.json", layout_planner=None)
+            self._convert(fixture, out_explicit, tmp_path / "e.report.json", layout_planner=None)
+            self.assertEqual(_pptx_member_digests(out_default), _pptx_member_digests(out_explicit))
 
-    def test_planner_without_api_key_matches_default(self) -> None:
+    def test_planner_without_api_key_matches_default_parts(self) -> None:
         fixture = FIXTURES_DIR / "bullet_list.pdf"
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             out_default = tmp_path / "default.pptx"
             out_flag = tmp_path / "flag.pptx"
-            options_default = ConversionOptions(
-                input_path=fixture,
-                output_path=out_default,
-                report_path=tmp_path / "default.report.json",
-                layout_engine="heuristic",
-                vector_mode="off",
-                inpaint_engine="white-box",
-                ocr_model_root=None,
-                layout_planner=None,
-            )
-            options_flag = ConversionOptions(
-                input_path=fixture,
-                output_path=out_flag,
-                report_path=tmp_path / "flag.report.json",
-                layout_engine="heuristic",
-                vector_mode="off",
-                inpaint_engine="white-box",
-                ocr_model_root=None,
-                layout_planner="gemini",
-                layout_planner_api_key=None,
-            )
             env = {
                 key: value
                 for key, value in __import__("os").environ.items()
                 if key not in {"GEMINI_API_KEY", "GOOGLE_API_KEY"}
             }
             with patch.dict("os.environ", env, clear=True):
-                with patch("pdf2ppt.pipeline.OcrEngine") as ocr_cls:
-                    ocr_cls.return_value.extract_text_blocks_batch.return_value = []
-                    convert_pdf(options_default)
-                    convert_pdf(options_flag)
-            self.assertEqual(out_default.read_bytes(), out_flag.read_bytes())
+                self._convert(fixture, out_default, tmp_path / "d.report.json", layout_planner=None)
+                self._convert(
+                    fixture,
+                    out_flag,
+                    tmp_path / "f.report.json",
+                    layout_planner="gemini",
+                    layout_planner_api_key=None,
+                )
+            self.assertEqual(_pptx_member_digests(out_default), _pptx_member_digests(out_flag))
 
 
 @unittest.skipUnless(

@@ -12,7 +12,8 @@ This closes the gap noted in [`spec.md`](./spec.md) §1 (“Paddle Layout Analys
 
 Status: **experimental**. Not selected by `auto` or any default. Without
 `--layout-planner` **or** without an API key, conversion output is
-**byte-identical** to main.
+**byte-identical** to main (PPTX zip member contents). A flag-without-key run
+records `layout_planner.skip_reason` in the report.
 
 ## What it does
 
@@ -29,14 +30,31 @@ The VLM **must not invent text**. Merged frames concatenate OCR/native strings
 from the referenced ids. Unknown ids, overlapping groups, malformed JSON, and
 low confidence are rejected.
 
-Results are applied through SlideIR:
+### Default application (low-risk)
 
-- `pages[].groups` / `pages[].plan_metadata` (and optional deck-level `plan_metadata`)
-- reading order → shape order
-- title role → title styling / placeholder
-- header / footer / page_number → filtered or kept per `--keep-header-footer`
-- paragraph groups → fewer, correctly merged text frames
-- font class → configurable PowerPoint font (replaces the OCR `font_family=None` path when the planner succeeds)
+By default the planner applies only:
+
+- roles / title placeholders
+- reading order
+- header / footer / page_number filtering (OCR sources, when `--keep-header-footer` is off)
+
+**Grouping merges** and **font-class remaps** are **opt-in**
+(`--layout-planner-apply-grouping`, `--layout-planner-apply-fonts`). Live
+verification showed unrestricted merges collapsing tables/charts and font
+remaps reflowing digital Helvetica/Times pages.
+
+When fonts are enabled:
+
+- Keep the PDF/OCR `font_family` when it is a real name (never replace Helvetica → DejaVu).
+- Apply the VLM class only when the source font is unknown (typical scanned/OCR pages).
+- Map to widely available desktop fonts (Arial / Times New Roman / Microsoft JhengHei / PMingLiU).
+- Use a CJK font only when the text contains CJK characters (Latin+digit lines stay Latin).
+- Never change font size or bbox (no reflow from planner fonts).
+
+Grouping (when enabled) only merges lines that are vertically adjacent,
+left/indent-aligned, similar font size, within one column; rejects
+`table_cell` / table-or-chart obstacles; keeps each line’s original geometry
+via `line_bboxes` (union bbox, no restacking).
 
 ## CLI / API
 
@@ -44,9 +62,14 @@ Results are applied through SlideIR:
 # Default — geometric heuristics only (byte-identical to main)
 pdf2ppt input.pdf output.pptx
 
-# Experimental opt-in Gemini layout planner
+# Experimental opt-in Gemini layout planner (low-risk apply)
 export GEMINI_API_KEY=...   # or GOOGLE_API_KEY
 pdf2ppt input.pdf output.pptx --layout-planner gemini
+
+# Opt into grouping / fonts (higher risk for SSIM on tables & digital pages)
+pdf2ppt input.pdf output.pptx --layout-planner gemini \
+  --layout-planner-apply-grouping \
+  --layout-planner-apply-fonts
 
 # Cost / latency brakes
 pdf2ppt input.pdf output.pptx --layout-planner gemini \
@@ -54,6 +77,7 @@ pdf2ppt input.pdf output.pptx --layout-planner gemini \
   --layout-planner-max-cost-usd 1.0 \
   --layout-planner-timeout-s 45 \
   --layout-planner-concurrency 2 \
+  --layout-planner-max-consecutive-failures 2 \
   --layout-planner-cache-dir .pdf2ppt_cache/layout_planner
 ```
 
@@ -61,46 +85,67 @@ pdf2ppt input.pdf output.pptx --layout-planner gemini \
 |--------|---------|---------|
 | `--layout-planner {gemini}` | off | Master switch (not in auto/default) |
 | `--layout-planner-model` | `gemini-3.1-flash-lite` | Override via flag or `PDF2PPT_LAYOUT_PLANNER_MODEL` |
-| `--layout-planner-max-calls` | `30` | Per-document paid call cap |
+| `--layout-planner-max-calls` | `30` | Per-document paid call cap (**every HTTP attempt** counts, including failures/retries) |
 | `--layout-planner-max-cost-usd` | `1.0` | Estimated USD budget |
 | `--layout-planner-timeout-s` | `45` | Per-call HTTP timeout |
 | `--layout-planner-concurrency` | `2` | Concurrent API calls |
 | `--layout-planner-cache-dir` | `.pdf2ppt_cache/layout_planner` | Disk cache (image hash + prompt version + model) |
 | `--layout-planner-min-confidence` | `0.55` | Reject low-confidence annotations / groups |
+| `--layout-planner-apply-grouping` | off | Opt into paragraph merges |
+| `--layout-planner-apply-fonts` | off | Opt into VLM font class when PDF font unknown |
+| `--layout-planner-max-consecutive-failures` | `2` | Open circuit after N consecutive failures; auth errors open immediately |
 
-HTTP `POST /jobs/{id}/convert` accepts the same fields (`layout_planner`,
-`layout_planner_model`, …). The review UI exposes an experimental
-“Layout Planner” select. API keys are read from the server environment and are
-**never** logged or printed.
+HTTP `POST /jobs/{id}/convert` accepts `layout_planner`, clamped
+`layout_planner_max_calls` / `layout_planner_timeout_s`, and the apply flags.
+**Model id, cache directory, and USD cost caps are server-side only** (env /
+process defaults) — clients cannot choose them. API keys are read from the
+server environment and are **never** logged or printed.
+
+## Budget, circuit breaker, concurrency
+
+- Slots are **reserved atomically** before the HTTP call (`try_reserve`) so
+  concurrent workers cannot overshoot `max_calls`.
+- Failed requests (bad JSON, timeouts, API/auth errors) still count toward
+  `calls` / `http_attempts` / estimated cost.
+- After `max_consecutive_failures` consecutive failures, or any auth error,
+  the **circuit opens** and remaining pages fall back without waiting on the
+  full timeout.
 
 ## Report fields
 
-When the planner runs, `*.report.json` includes a `layout_planner` object:
+When the planner runs (or is requested), `*.report.json` includes a
+`layout_planner` object:
 
-- `calls`, `cache_hits`, `fallbacks`
+- `calls`, `http_attempts`, `cache_hits`, `fallbacks`
 - `estimated_cost_usd`, `total_latency_ms`
-- per-page records (`success`, `fallback_kind`, …)
+- `circuit_open`, `circuit_reason`
+- `apply_grouping`, `apply_fonts`
+- `skip_reason` when the flag is set but no API key / transport is configured
+- per-page records (`success`, `fallback_kind`, `http_attempted`, …)
 
 ## Evaluation
 
-Annotated Phase-0 fixtures: `tests/fixtures/*.planner.json`.
+Annotated fixtures: `tests/fixtures/*.planner.json` (English lists/columns,
+table, chart, scanned list, mixed CJK+English).
 
 ```bash
-# CI-safe recorded responses (no API key)
+# CI-safe recorded responses (no API key). Acceptance is measured from PPTX.
+# GT-derived fallback responses are tagged oracle_response and excluded from means.
 python scripts/bench_layout_planner.py --mode recorded --compare-heuristic
 
 # Live (cheap): requires GEMINI_API_KEY; uses cache + call cap
-python scripts/bench_layout_planner.py --mode live --max-calls 6
+python scripts/bench_layout_planner.py --mode live --max-calls 8 --compare-heuristic
 ```
 
-Acceptance metrics (roadmap Phase 3):
+Acceptance metrics (from the **output PPTX**, not GT-vs-GT):
 
 - title detection accuracy
-- header/footer filtering rate
+- header/footer filtering rate (HF strings absent from editable text)
 - reading-order correctness
 
-The script also surfaces grouping metrics (and can be paired with
-`scripts/bench_slide.py` for editability / text F1 / SSIM regression checks).
+`--compare-heuristic` adds per-page **SSIM** (when LibreOffice is available),
+**text F1**, and **editability** deltas vs planner-off. Default apply flags
+should show no regressions beyond noise.
 
 Live tests are gated:
 
@@ -119,3 +164,4 @@ CI has no API key and no paddlepaddle requirement for these unit tests
 4. **No text invention** — planner may only reference existing block ids.
 5. **Byte-identical when off / unconfigured** — missing flag or missing API key
    leaves the P0–P5 / refine pipelines unchanged.
+6. **Low-risk apply by default** — grouping and fonts behind explicit flags.

@@ -10,8 +10,9 @@
 - `--vector-complexity-threshold`: max drawings considered in `auto` mode (default `80`)
 - `--layout-engine`: `heuristic` (default, CI-safe) or `ppstructure` (opt-in PP-StructureV3 / LayoutDetection; soft-falls back to heuristic). See [`layout-analysis.md`](layout-analysis.md)
 - `--layout-model-root`: DocLayout / Structure model directory, default `./model`
-- `--layout-planner gemini`: **experimental** opt-in VLM layout planner (Phase 3). Structured JSON only; falls back to heuristics per page on error. Requires `GEMINI_API_KEY`. Not in auto/default. See [`layout-planner.md`](layout-planner.md)
-- `--layout-planner-model` / `--layout-planner-max-calls` / `--layout-planner-max-cost-usd` / `--layout-planner-timeout-s` / `--layout-planner-concurrency` / `--layout-planner-cache-dir` / `--layout-planner-min-confidence`: cost/latency brakes and cache for the planner
+- `--layout-planner gemini`: **experimental** opt-in VLM layout planner (Phase 3). Structured JSON only; falls back to heuristics per page on error. Requires `GEMINI_API_KEY`. Not in auto/default. Default apply is low-risk (roles / reading order / HF filter); see [`layout-planner.md`](layout-planner.md)
+- `--layout-planner-model` / `--layout-planner-max-calls` / `--layout-planner-max-cost-usd` / `--layout-planner-timeout-s` / `--layout-planner-concurrency` / `--layout-planner-cache-dir` / `--layout-planner-min-confidence` / `--layout-planner-max-consecutive-failures`: cost/latency brakes, cache, and circuit breaker
+- `--layout-planner-apply-grouping` / `--layout-planner-apply-fonts`: opt into paragraph merges / VLM font remaps (off by default; can hurt SSIM on tables and digital pages)
 - `--emit-ir PATH` / `--ir-only` / `--from-ir PATH` / `-o`: SlideIR export and render ([`slideir.md`](slideir.md)). Subcommands: `pdf2ppt emit-ir …`, `pdf2ppt from-ir …`. Assets live in `{ir_filename}.assets/` next to the IR JSON.
 - `--keep-header-footer`: keep header/footer/page-number regions (skipped by default)
 - `--refine`: **experimental** opt-in P4 render-compare-refine after PPTX build (LibreOffice → PNG, page SSIM, rule-based SlideIR fixes; strict SSIM improvement + editability/text guards). Skipped with a warning if `soffice` is missing or fails. Default off.

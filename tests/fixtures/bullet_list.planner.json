@@ -2,17 +2,18 @@
   "page_number": 1,
   "fixture": "bullet_list.pdf",
   "expect_title": true,
-  "expect_header_footer_ids": ["footer", "page_number"],
+  "expect_header_footer_ids": [],
+  "notes": "Digital native header/footer are kept by design; only OCR HF are filtered.",
   "reading_order": ["title", "li1", "li2", "li3", "li4", "li5", "li6", "footer", "page_number"],
   "paragraphs": [
-    {"id": "title", "bbox": [48, 36, 800, 90], "text": "Sprint Goals", "role": "title", "font_family_class": "sans"},
-    {"id": "li1", "bbox": [72, 130, 880, 164], "text": "Ship layout analysis for scanned decks", "role": "list_item", "font_family_class": "sans"},
-    {"id": "li2", "bbox": [96, 170, 880, 204], "text": "Detect multi-level bullets", "role": "list_item", "font_family_class": "sans"},
-    {"id": "li3", "bbox": [96, 205, 880, 239], "text": "Map titles to placeholders", "role": "list_item", "font_family_class": "sans"},
-    {"id": "li4", "bbox": [72, 250, 880, 284], "text": "Keep heuristic fallback for CI", "role": "list_item", "font_family_class": "sans"},
-    {"id": "li5", "bbox": [96, 290, 880, 324], "text": "No model download required", "role": "list_item", "font_family_class": "sans"},
-    {"id": "li6", "bbox": [72, 340, 880, 374], "text": "Report grouping metrics in the PR", "role": "list_item", "font_family_class": "sans"},
-    {"id": "footer", "bbox": [48, 500, 400, 530], "text": "Confidential", "role": "footer", "font_family_class": "sans"},
-    {"id": "page_number", "bbox": [880, 500, 940, 530], "text": "3", "role": "page_number", "font_family_class": "sans"}
+    {"id": "title", "bbox": [48, 36, 202, 74], "text": "Sprint Goals", "role": "title", "font_family_class": "sans"},
+    {"id": "li1", "bbox": [72, 130, 357, 152], "text": "Ship layout analysis for scanned decks", "role": "list_item", "font_family_class": "sans"},
+    {"id": "li2", "bbox": [96, 170, 279, 192], "text": "Detect multi-level bullets", "role": "list_item", "font_family_class": "sans"},
+    {"id": "li3", "bbox": [96, 205, 287, 227], "text": "Map titles to placeholders", "role": "list_item", "font_family_class": "sans"},
+    {"id": "li4", "bbox": [72, 250, 285, 272], "text": "Keep heuristic fallback for CI", "role": "list_item", "font_family_class": "sans"},
+    {"id": "li5", "bbox": [96, 290, 310, 312], "text": "No model download required", "role": "list_item", "font_family_class": "sans"},
+    {"id": "li6", "bbox": [72, 340, 323, 362], "text": "Report grouping metrics in the PR", "role": "list_item", "font_family_class": "sans"},
+    {"id": "footer", "bbox": [48, 500, 200, 514], "text": "Confidential", "role": "footer", "font_family_class": "sans"},
+    {"id": "page_number", "bbox": [880, 500, 886, 514], "text": "3", "role": "page_number", "font_family_class": "sans"}
   ]
 }

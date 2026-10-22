@@ -52,7 +52,7 @@ jobs:
         run: python -m ruff check .
 
       - name: mypy
-        run: python -m mypy src/pdf2ppt scripts/bench_inpaint.py scripts/bench_slide.py
+        run: python -m mypy src/pdf2ppt scripts/bench_inpaint.py scripts/bench_slide.py scripts/bench_layout_planner.py
 
   # Phase 0 / P0 slide-quality evaluator: report-only, never blocks merge.
   # Pure metric unit tests also run (and must pass) under the backend job;

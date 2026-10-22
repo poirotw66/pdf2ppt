@@ -1,0 +1,114 @@
+{
+  "blocks": [
+    {
+      "id": "title",
+      "role": "title",
+      "reading_order": 0,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "li1",
+      "role": "list_item",
+      "reading_order": 1,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "li2",
+      "role": "list_item",
+      "reading_order": 2,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "li3",
+      "role": "list_item",
+      "reading_order": 3,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "li4",
+      "role": "list_item",
+      "reading_order": 4,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "li5",
+      "role": "list_item",
+      "reading_order": 5,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "li6",
+      "role": "list_item",
+      "reading_order": 6,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "footer",
+      "role": "footer",
+      "reading_order": 7,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "page_number",
+      "role": "page_number",
+      "reading_order": 8,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_title",
+      "member_ids": [
+        "title"
+      ],
+      "role": "title",
+      "reading_order": 0,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_list",
+      "member_ids": [
+        "li1",
+        "li2",
+        "li3",
+        "li4",
+        "li5",
+        "li6"
+      ],
+      "role": "list_item",
+      "reading_order": 1,
+      "confidence": 0.92,
+      "kind": "paragraph"
+    },
+    {
+      "id": "g_footer",
+      "member_ids": [
+        "footer"
+      ],
+      "role": "footer",
+      "reading_order": 7,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_page_number",
+      "member_ids": [
+        "page_number"
+      ],
+      "role": "page_number",
+      "reading_order": 8,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    }
+  ]
+}

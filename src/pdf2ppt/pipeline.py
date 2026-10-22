@@ -213,13 +213,34 @@ def convert_pdf(
     layout_planner_budget = getattr(options, "layout_planner_budget", None)
     if isinstance(layout_planner_budget, LayoutPlannerBudget):
         layout_planner_report = layout_planner_budget.to_dict()
+        skip_reason = getattr(options, "layout_planner_skip_reason", None)
+        if skip_reason:
+            layout_planner_report["skip_reason"] = skip_reason
+        layout_planner_report["apply_grouping"] = bool(
+            getattr(options, "layout_planner_apply_grouping", False)
+        )
+        layout_planner_report["apply_fonts"] = bool(
+            getattr(options, "layout_planner_apply_fonts", False)
+        )
         logger.info(
-            "Layout planner run stats: calls=%s cache_hits=%s fallbacks=%s est_cost_usd=%.4f",
+            "Layout planner run stats: calls=%s http_attempts=%s cache_hits=%s fallbacks=%s "
+            "circuit_open=%s est_cost_usd=%.4f",
             layout_planner_budget.calls,
+            layout_planner_budget.http_attempts,
             layout_planner_budget.cache_hits,
             layout_planner_budget.fallbacks,
+            layout_planner_budget.circuit_open,
             layout_planner_budget.estimated_cost_usd,
         )
+    elif getattr(options, "layout_planner_skip_reason", None):
+        layout_planner_report = {
+            "skip_reason": options.layout_planner_skip_reason,
+            "calls": 0,
+            "http_attempts": 0,
+            "cache_hits": 0,
+            "fallbacks": 0,
+            "estimated_cost_usd": 0.0,
+        }
 
     if emit_ir_path is not None:
         from .ir_io import write_slide_ir
@@ -521,11 +542,16 @@ def analyze_page(
     used_layout_planner = False
     layout_input_blocks = text_blocks
     if layout_planner_service is not None:
+        # Chart-like figure regions from a quick heuristic pass are not available
+        # yet; pass native tables as hard obstacles so cells are never merged.
         planned = layout_planner_service.try_plan_page(
             page_image=layout_image,
             text_blocks=text_blocks,
             page_number=page_number,
             page_height=float(page.rect.height),
+            page_width=float(page.rect.width),
+            table_bboxes=[table.bbox for table in vector_result.tables],
+            chart_bboxes=[],
         )
         if planned is not None and planned.used_planner:
             text_blocks = planned.text_blocks

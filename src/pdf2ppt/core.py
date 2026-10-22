@@ -68,8 +68,15 @@ class ConversionOptions:
     layout_planner_cache_dir: Path | None = Path(".pdf2ppt_cache/layout_planner")
     layout_planner_min_confidence: float = 0.55
     layout_planner_font_map: dict[str, dict[str, str]] | None = None
+    # Low-risk by default: roles / reading order / HF filter only.
+    # Grouping merges and font-class remaps caused SSIM regressions on tables
+    # and digital pages — opt in explicitly.
+    layout_planner_apply_grouping: bool = False
+    layout_planner_apply_fonts: bool = False
+    layout_planner_max_consecutive_failures: int = 2
     layout_planner_budget: Any | None = field(default=None, repr=False)
     layout_planner_transport: Any | None = field(default=None, repr=False)
+    layout_planner_skip_reason: str | None = None
     lang: str = "ch"
     ocr_model_root: Path | None = Path("model")
     ocr_use_doc_orientation: bool = False

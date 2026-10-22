@@ -1,0 +1,159 @@
+{
+  "blocks": [
+    {
+      "id": "title",
+      "role": "title",
+      "reading_order": 0,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "v140",
+      "role": "other",
+      "reading_order": 1,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "v260",
+      "role": "other",
+      "reading_order": 2,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "v190",
+      "role": "other",
+      "reading_order": 3,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "v320",
+      "role": "other",
+      "reading_order": 4,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "v250",
+      "role": "other",
+      "reading_order": 5,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "v300",
+      "role": "other",
+      "reading_order": 6,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "v210",
+      "role": "other",
+      "reading_order": 7,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "months",
+      "role": "other",
+      "reading_order": 8,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_title",
+      "member_ids": [
+        "title"
+      ],
+      "role": "title",
+      "reading_order": 0,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_v140",
+      "member_ids": [
+        "v140"
+      ],
+      "role": "other",
+      "reading_order": 1,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_v260",
+      "member_ids": [
+        "v260"
+      ],
+      "role": "other",
+      "reading_order": 2,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_v190",
+      "member_ids": [
+        "v190"
+      ],
+      "role": "other",
+      "reading_order": 3,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_v320",
+      "member_ids": [
+        "v320"
+      ],
+      "role": "other",
+      "reading_order": 4,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_v250",
+      "member_ids": [
+        "v250"
+      ],
+      "role": "other",
+      "reading_order": 5,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_v300",
+      "member_ids": [
+        "v300"
+      ],
+      "role": "other",
+      "reading_order": 6,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_v210",
+      "member_ids": [
+        "v210"
+      ],
+      "role": "other",
+      "reading_order": 7,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_months",
+      "member_ids": [
+        "months"
+      ],
+      "role": "other",
+      "reading_order": 8,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    }
+  ]
+}

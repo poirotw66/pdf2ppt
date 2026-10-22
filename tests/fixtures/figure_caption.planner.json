@@ -5,7 +5,7 @@
   "expect_header_footer_ids": [],
   "reading_order": ["title", "caption"],
   "paragraphs": [
-    {"id": "title", "bbox": [48, 36, 800, 90], "text": "Figure", "role": "title", "font_family_class": "sans"},
-    {"id": "caption", "bbox": [48, 420, 800, 460], "text": "Caption", "role": "caption", "font_family_class": "serif"}
+    {"id": "title", "bbox": [60, 30, 285, 66], "text": "Architecture Sketch", "role": "title", "font_family_class": "sans"},
+    {"id": "caption", "bbox": [341, 395, 619, 413], "text": "Figure 1. Ingest", "role": "caption", "font_family_class": "sans"}
   ]
 }

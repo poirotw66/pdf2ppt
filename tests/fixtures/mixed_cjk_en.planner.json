@@ -1,0 +1,15 @@
+{
+  "page_number": 1,
+  "fixture": "mixed_cjk_en.pdf",
+  "expect_title": true,
+  "expect_header_footer_ids": [],
+  "reading_order": ["title", "subtitle", "body_cjk", "body_en", "footer"],
+  "notes": "Latin+digit subtitle must not receive a CJK font; CJK body may. Digital native HF kept.",
+  "paragraphs": [
+    {"id": "title", "bbox": [48, 40, 360, 90], "text": "財務摘要 Q3 2026", "role": "title", "font_family_class": "sans"},
+    {"id": "subtitle", "bbox": [48, 120, 320, 150], "text": "Q3 2026 - Finance Team", "role": "subtitle", "font_family_class": "sans"},
+    {"id": "body_cjk", "bbox": [48, 190, 700, 260], "text": "營收較上季成長 12%，毛利率維持在目標區間。", "role": "body", "font_family_class": "sans"},
+    {"id": "body_en", "bbox": [48, 300, 520, 350], "text": "Revenue grew 12% quarter over quarter.", "role": "body", "font_family_class": "sans"},
+    {"id": "footer", "bbox": [48, 500, 120, 520], "text": "機密", "role": "footer", "font_family_class": "sans"}
+  ]
+}

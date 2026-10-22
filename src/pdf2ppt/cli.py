@@ -545,6 +545,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reject planner annotations / groups below this confidence (0–1).",
     )
     parser.add_argument(
+        "--layout-planner-apply-grouping",
+        action="store_true",
+        help=(
+            "Opt into VLM paragraph/text-frame merges. Default off (low-risk): only roles, "
+            "reading order, title placeholder, and header/footer filtering are applied. "
+            "Merges still require vertical adjacency / column alignment and never merge "
+            "table cells or chart labels."
+        ),
+    )
+    parser.add_argument(
+        "--layout-planner-apply-fonts",
+        action="store_true",
+        help=(
+            "Opt into VLM font_family_class remapping. Default off. Even when enabled, "
+            "known PDF font names are kept; only unknown/OCR fonts are mapped, and CJK "
+            "fonts are used only when the text contains CJK characters."
+        ),
+    )
+    parser.add_argument(
+        "--layout-planner-max-consecutive-failures",
+        type=positive_int,
+        default=2,
+        help=(
+            "Open the planner circuit after this many consecutive HTTP failures "
+            "(timeout/api_error/validation). Auth errors open the circuit immediately."
+        ),
+    )
+    parser.add_argument(
         "--refine",
         action="store_true",
         help=(
@@ -714,6 +742,9 @@ def _build_conversion_options(
         layout_planner_concurrency=args.layout_planner_concurrency,
         layout_planner_cache_dir=args.layout_planner_cache_dir,
         layout_planner_min_confidence=args.layout_planner_min_confidence,
+        layout_planner_apply_grouping=bool(args.layout_planner_apply_grouping),
+        layout_planner_apply_fonts=bool(args.layout_planner_apply_fonts),
+        layout_planner_max_consecutive_failures=args.layout_planner_max_consecutive_failures,
         refine=bool(args.refine),
         refine_iters=args.refine_iters,
         refine_max_fixes_per_slide=args.refine_max_fixes,

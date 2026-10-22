@@ -1,0 +1,176 @@
+{
+  "blocks": [
+    {
+      "id": "title",
+      "role": "title",
+      "reading_order": 0,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "dept",
+      "role": "table_cell",
+      "reading_order": 1,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "q1",
+      "role": "table_cell",
+      "reading_order": 2,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "q2",
+      "role": "table_cell",
+      "reading_order": 3,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "q3",
+      "role": "table_cell",
+      "reading_order": 4,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "eng",
+      "role": "table_cell",
+      "reading_order": 5,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "sales",
+      "role": "table_cell",
+      "reading_order": 6,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "mkt",
+      "role": "table_cell",
+      "reading_order": 7,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "sup",
+      "role": "table_cell",
+      "reading_order": 8,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    },
+    {
+      "id": "ops",
+      "role": "table_cell",
+      "reading_order": 9,
+      "font_family_class": "sans",
+      "confidence": 0.92
+    }
+  ],
+  "groups": [
+    {
+      "id": "g_title",
+      "member_ids": [
+        "title"
+      ],
+      "role": "title",
+      "reading_order": 0,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_dept",
+      "member_ids": [
+        "dept"
+      ],
+      "role": "table_cell",
+      "reading_order": 1,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_q1",
+      "member_ids": [
+        "q1"
+      ],
+      "role": "table_cell",
+      "reading_order": 2,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_q2",
+      "member_ids": [
+        "q2"
+      ],
+      "role": "table_cell",
+      "reading_order": 3,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_q3",
+      "member_ids": [
+        "q3"
+      ],
+      "role": "table_cell",
+      "reading_order": 4,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_eng",
+      "member_ids": [
+        "eng"
+      ],
+      "role": "table_cell",
+      "reading_order": 5,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_sales",
+      "member_ids": [
+        "sales"
+      ],
+      "role": "table_cell",
+      "reading_order": 6,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_mkt",
+      "member_ids": [
+        "mkt"
+      ],
+      "role": "table_cell",
+      "reading_order": 7,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_sup",
+      "member_ids": [
+        "sup"
+      ],
+      "role": "table_cell",
+      "reading_order": 8,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    },
+    {
+      "id": "g_ops",
+      "member_ids": [
+        "ops"
+      ],
+      "role": "table_cell",
+      "reading_order": 9,
+      "confidence": 0.92,
+      "kind": "text_frame"
+    }
+  ]
+}
