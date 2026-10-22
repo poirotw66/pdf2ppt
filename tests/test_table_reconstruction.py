@@ -17,10 +17,10 @@ from pdf2ppt.native_extraction import extract_native_text_blocks
 from pdf2ppt.pipeline import convert_pdf
 from pdf2ppt.render_compare import inspect_pptx_editability
 from pdf2ppt.vector_nativization import (
+    _cell_bbox_from_geometry,
     apply_cell_fills,
     extract_tables,
     table_should_erase_background,
-    _cell_bbox_from_geometry,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

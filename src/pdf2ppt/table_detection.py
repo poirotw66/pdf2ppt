@@ -300,19 +300,17 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
 
     # Column edges: midpoints between centers, clamped to bbox.
     edges = [bbox[0]]
-    for left, right in zip(col_centers, col_centers[1:]):
-        edges.append((left + right) / 2.0)
+    for col_left, col_right in zip(col_centers, col_centers[1:]):
+        edges.append((col_left + col_right) / 2.0)
     edges.append(bbox[2])
     column_widths = [max(1.0, edges[index + 1] - edges[index]) for index in range(col_count)]
 
-    row_ys = [min(word.y0 for word in row) for row in rows]
-    row_ys.append(max(word.y1 for word in rows[-1]))
     # Use midpoints between successive row tops for interior boundaries.
     boundaries = [bbox[1]]
     for index in range(len(rows) - 1):
-        bottom = max(word.y1 for word in rows[index])
-        top = min(word.y0 for word in rows[index + 1])
-        boundaries.append((bottom + top) / 2.0)
+        row_bottom = max(word.y1 for word in rows[index])
+        next_top = min(word.y0 for word in rows[index + 1])
+        boundaries.append((row_bottom + next_top) / 2.0)
     boundaries.append(bbox[3])
     row_heights = [max(1.0, boundaries[index + 1] - boundaries[index]) for index in range(row_count)]
 
@@ -437,13 +435,15 @@ def _iter_zebra_grid_candidates(
                     synthetic_rows[index].append(word)
                     break
         synthetic_rows = [row for row in synthetic_rows if row]
-        grid = _try_build_grid(synthetic_rows)
-        if grid is None:
+        built = _try_build_grid(synthetic_rows)
+        if built is None:
             continue
-        grid["bbox"] = bbox
-        grid["row_heights"] = [max(1.0, band.bbox[3] - band.bbox[1]) for band in group[: grid["row_count"]]]
-        grid["zebra_fills"] = [band.fill_color for band in group[: grid["row_count"]]]
-        grids.append(grid)
+        built["bbox"] = bbox
+        built["row_heights"] = [
+            max(1.0, band.bbox[3] - band.bbox[1]) for band in group[: int(built["row_count"])]
+        ]
+        built["zebra_fills"] = [band.fill_color for band in group[: int(built["row_count"])]]
+        grids.append(built)
     return _dedupe_grids(grids)
 
 
