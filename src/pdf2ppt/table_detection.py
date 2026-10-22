@@ -112,25 +112,8 @@ def detect_inferred_tables(
     zebra_bands = _detect_zebra_bands(page)
     candidates: list[TableElement] = []
 
-    for index, grid in enumerate(_iter_text_grid_candidates(words)):
-        if _overlaps_existing(grid["bbox"], existing):
-            continue
-        if not _passes_text_grid_guards(grid, words=words, page=page):
-            continue
-        element = _grid_to_table_element(
-            grid,
-            text_blocks=text_blocks,
-            page=page,
-            page_number=page_number,
-            table_index=10_000 + index,
-            zebra_bands=zebra_bands,
-            borderless=True,
-        )
-        if element is not None:
-            candidates.append(element)
-            existing.append(element.bbox)
-
-    # Zebra-only: filled row bands even when text clustering was rejected/missed.
+    # Prefer zebra-backed grids first so title/caption text cannot claim the
+    # same region as a looser alignment-only candidate.
     for index, zebra_grid in enumerate(_iter_zebra_grid_candidates(zebra_bands, words)):
         if _overlaps_existing(zebra_grid["bbox"], existing):
             continue
@@ -142,6 +125,24 @@ def detect_inferred_tables(
             page=page,
             page_number=page_number,
             table_index=20_000 + index,
+            zebra_bands=zebra_bands,
+            borderless=True,
+        )
+        if element is not None:
+            candidates.append(element)
+            existing.append(element.bbox)
+
+    for index, grid in enumerate(_iter_text_grid_candidates(words)):
+        if _overlaps_existing(grid["bbox"], existing):
+            continue
+        if not _passes_text_grid_guards(grid, words=words, page=page):
+            continue
+        element = _grid_to_table_element(
+            grid,
+            text_blocks=text_blocks,
+            page=page,
+            page_number=page_number,
+            table_index=10_000 + index,
             zebra_bands=zebra_bands,
             borderless=True,
         )
@@ -198,6 +199,23 @@ def _assign_cluster(value: float, centers: list[float], *, tol: float) -> int | 
     return best_index
 
 
+def _assign_column_index(x0: float, col_centers: list[float], *, tol: float) -> int:
+    """Map a word left edge to a column.
+
+    Uses the rightmost column whose left edge is at or left of ``x0`` (with
+    tolerance). This keeps subsequent words in a multi-word cell
+    (``Item 1``) in the same column instead of failing nearest-center match.
+    """
+
+    best = 0
+    for index, center in enumerate(col_centers):
+        if center <= x0 + tol:
+            best = index
+        else:
+            break
+    return best
+
+
 def _iter_text_grid_candidates(words: list[_Word]) -> list[dict[str, Any]]:
     if not words:
         return []
@@ -216,31 +234,14 @@ def _iter_text_grid_candidates(words: list[_Word]) -> list[dict[str, Any]]:
     if len(rows) < MIN_TABLE_ROWS:
         return []
 
-    # Find contiguous row ranges with a stable multi-column alignment.
+    # Enumerate contiguous row windows. Preferring only the maximal window
+    # would glue titles/captions onto the grid and then fail the guards.
     candidates: list[dict[str, Any]] = []
-    start = 0
-    while start < len(rows):
-        end = start + 1
-        while end <= len(rows):
-            window = rows[start:end]
-            if len(window) >= MIN_TABLE_ROWS:
-                grid = _try_build_grid(window)
-                if grid is not None:
-                    # Extend while the structure holds.
-                    extended = grid
-                    next_end = end
-                    while next_end < len(rows):
-                        trial = _try_build_grid(rows[start : next_end + 1])
-                        if trial is None:
-                            break
-                        extended = trial
-                        next_end += 1
-                    candidates.append(extended)
-                    start = next_end
-                    break
-            end += 1
-        else:
-            start += 1
+    for start in range(len(rows)):
+        for end in range(start + MIN_TABLE_ROWS, len(rows) + 1):
+            grid = _try_build_grid(rows[start:end])
+            if grid is not None:
+                candidates.append(grid)
     return _dedupe_grids(candidates)
 
 
@@ -271,12 +272,7 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
     for row in rows:
         buckets: list[list[_Word]] = [[] for _ in col_centers]
         for word in row:
-            index = _assign_cluster(word.x0, col_centers, tol=COLUMN_X_TOL_PT * 1.5)
-            if index is None:
-                # Word not on a column left edge — assign by center overlap.
-                index = _assign_cluster(word.cx, col_centers, tol=COLUMN_X_TOL_PT * 2.5)
-            if index is None:
-                return None
+            index = _assign_column_index(word.x0, col_centers, tol=COLUMN_X_TOL_PT)
             buckets[index].append(word)
         # Reject rows that collapse to a single occupied column (paragraph line).
         occupied = sum(1 for bucket in buckets if bucket)
@@ -327,8 +323,14 @@ def _try_build_grid(rows: list[list[_Word]]) -> dict[str, Any] | None:
 
 
 def _dedupe_grids(grids: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _score(grid: dict[str, Any]) -> tuple[float, int, int]:
+        matrix = grid["matrix"]
+        nonempty = sum(1 for row in matrix for cell in row if str(cell).strip())
+        occupancy = nonempty / max(1, int(grid["row_count"]) * int(grid["col_count"]))
+        return (occupancy, nonempty, int(grid["row_count"]) * int(grid["col_count"]))
+
     kept: list[dict[str, Any]] = []
-    for grid in sorted(grids, key=lambda item: (-item["row_count"] * item["col_count"], item["bbox"][1])):
+    for grid in sorted(grids, key=lambda item: (-_score(item)[0], -_score(item)[1], item["bbox"][1])):
         if any(intersection_ratio(grid["bbox"], other["bbox"]) >= 0.6 for other in kept):
             continue
         kept.append(grid)
@@ -513,6 +515,13 @@ def _passes_text_grid_guards(
         sum(1 for row in matrix if row[col].strip()) / row_count for col in range(col_count)
     ]
     if max(col_fill) < 0.7:
+        return False
+    # Title / caption bleed often leaves a nearly empty left column while the
+    # real grid columns are dense — reject that ragged shape.
+    if min(col_fill) < 0.35 and max(col_fill) >= 0.7:
+        return False
+    # A single very long cell (wrapped caption) in an otherwise short grid.
+    if any(len(cell) > 40 for cell in nonempty) and float(median(lengths)) <= 16:
         return False
 
     _ = words  # reserved for future density checks
