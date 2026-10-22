@@ -1,0 +1,11 @@
+{
+  "page_number": 1,
+  "fixture": "figure_caption.pdf",
+  "expect_title": true,
+  "expect_header_footer_ids": [],
+  "reading_order": ["title", "caption"],
+  "paragraphs": [
+    {"id": "title", "bbox": [60, 30, 285, 66], "text": "Architecture Sketch", "role": "title", "font_family_class": "sans"},
+    {"id": "caption", "bbox": [341, 395, 619, 413], "text": "Figure 1. Ingest", "role": "caption", "font_family_class": "sans"}
+  ]
+}

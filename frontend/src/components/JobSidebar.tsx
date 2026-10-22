@@ -1,4 +1,9 @@
-import { INPAINT_ENGINE_OPTIONS, type InpaintEngine } from "../config";
+import {
+  INPAINT_ENGINE_OPTIONS,
+  LAYOUT_PLANNER_OPTIONS,
+  type InpaintEngine,
+  type LayoutPlannerOption,
+} from "../config";
 import type { JobResponse, PagePayload } from "../types";
 import { UPLOAD_ACCEPT } from "../utils/upload";
 
@@ -7,12 +12,14 @@ type JobSidebarProps = {
   convertResult: { page_count: number } | null;
   detectConfidenceThreshold: number;
   inpaintEngine: InpaintEngine;
+  layoutPlanner: LayoutPlannerOption;
   file: File | null;
   isBusy: boolean;
   job: JobResponse | null;
   onConvert: () => void;
   onDetectConfidenceThresholdChange: (value: number) => void;
   onInpaintEngineChange: (value: InpaintEngine) => void;
+  onLayoutPlannerChange: (value: LayoutPlannerOption) => void;
   onFileChange: (file: File | null) => void;
   onRunDetect: () => void;
   onSaveBoxes: () => void;
@@ -29,12 +36,14 @@ export function JobSidebar({
   convertResult,
   detectConfidenceThreshold,
   inpaintEngine,
+  layoutPlanner,
   file,
   isBusy,
   job,
   onConvert,
   onDetectConfidenceThresholdChange,
   onInpaintEngineChange,
+  onLayoutPlannerChange,
   onFileChange,
   onRunDetect,
   onSaveBoxes,
@@ -131,6 +140,27 @@ export function JobSidebar({
                 Generative inpaint is opt-in and non-deterministic. Set OPENAI_API_KEY or
                 GEMINI_API_KEY on the API server. Without a key, conversion falls back to local
                 inpainting. Use Convert to regenerate backgrounds for the current review pass.
+              </span>
+            )}
+            <label className="control-field">
+              <span>Layout Planner (experimental)</span>
+              <select
+                data-testid="layout-planner-select"
+                value={layoutPlanner}
+                onChange={(event) => onLayoutPlannerChange(event.target.value as LayoutPlannerOption)}
+              >
+                {LAYOUT_PLANNER_OPTIONS.map((option) => (
+                  <option key={option.value || "off"} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {layoutPlanner === "gemini" && (
+              <span className="muted step-hint" data-testid="layout-planner-hint">
+                VLM layout planner improves text roles, reading order, and paragraph grouping.
+                Set GEMINI_API_KEY on the API server. Without a key, each page falls back to
+                geometric heuristics. Output is structured JSON only (never pixels).
               </span>
             )}
             <div className="workflow-actions">

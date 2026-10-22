@@ -335,6 +335,8 @@ def _serialize_page(page: PageResult, *, assets_root: Path) -> dict[str, Any]:
         payload["layout_engine"] = page.layout_engine
     if page.layout_fallback_reason is not None:
         payload["layout_fallback_reason"] = page.layout_fallback_reason
+    if page.plan_metadata:
+        payload["plan_metadata"] = dict(page.plan_metadata)
     return payload
 
 
@@ -447,6 +449,9 @@ def _deserialize_page(
         editable_ratio=float(quality_raw.get("editable_ratio", 0.0)),
     )
 
+    plan_raw = payload.get("plan_metadata")
+    plan_metadata: dict[str, object] = dict(plan_raw) if isinstance(plan_raw, dict) else {}
+
     return PageResult(
         page_number=page_number,
         page_kind=page_kind,  # type: ignore[arg-type]
@@ -468,6 +473,7 @@ def _deserialize_page(
         vector_fallback_reason=payload.get("vector_fallback_reason"),
         layout_engine=payload.get("layout_engine"),
         layout_fallback_reason=payload.get("layout_fallback_reason"),
+        plan_metadata=plan_metadata,
     )
 
 

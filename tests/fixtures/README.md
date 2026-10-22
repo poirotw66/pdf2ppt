@@ -7,6 +7,7 @@ Consumers:
 
 - `scripts/bench_inpaint.py` — inpainting-engine metrics
 - `scripts/bench_slide.py` — end-to-end slide fidelity / editability (see `docs/slide-quality.md`)
+- `scripts/bench_layout_planner.py` — Phase-3 layout planner acceptance metrics (see `docs/layout-planner.md`)
 - Regenerate with `python tests/fixtures/generate_fixtures.py`
 
 P1 vector/table fixtures (in addition to the Phase 0 inpaint set):
@@ -23,3 +24,6 @@ P2 layout fixtures (plus optional `*.layout.json` ground truth for grouping metr
 - `figure_caption.pdf` — embedded figure with caption under it
 - `scanned_bullet_list.pdf` — rasterized bullet slide (OCR / scanned path)
 - `flowchart.pdf` — also used to assert side-by-side labels do not merge
+
+Phase 3 layout-planner annotations (`*.planner.json`) plus recorded VLM JSON under
+`layout_planner_recorded/` for CI-safe `--mode recorded` evaluation.

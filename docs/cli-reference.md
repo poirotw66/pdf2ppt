@@ -10,6 +10,9 @@
 - `--vector-complexity-threshold`: max drawings considered in `auto` mode (default `80`)
 - `--layout-engine`: `heuristic` (default, CI-safe) or `ppstructure` (opt-in PP-StructureV3 / LayoutDetection; soft-falls back to heuristic). See [`layout-analysis.md`](layout-analysis.md)
 - `--layout-model-root`: DocLayout / Structure model directory, default `./model`
+- `--layout-planner gemini`: **experimental** opt-in VLM layout planner (Phase 3). Structured JSON only; falls back to heuristics per page on error. Requires `GEMINI_API_KEY`. Not in auto/default. Default apply is low-risk (roles / reading order / HF filter); see [`layout-planner.md`](layout-planner.md)
+- `--layout-planner-model` / `--layout-planner-max-calls` / `--layout-planner-max-cost-usd` / `--layout-planner-timeout-s` / `--layout-planner-concurrency` / `--layout-planner-cache-dir` / `--layout-planner-min-confidence` / `--layout-planner-max-consecutive-failures`: cost/latency brakes, cache, and circuit breaker
+- `--layout-planner-apply-grouping` / `--layout-planner-apply-fonts`: opt into paragraph merges / VLM font remaps (off by default; can hurt SSIM on tables and digital pages)
 - `--emit-ir PATH` / `--ir-only` / `--from-ir PATH` / `-o`: SlideIR export and render ([`slideir.md`](slideir.md)). Subcommands: `pdf2ppt emit-ir …`, `pdf2ppt from-ir …`. Assets live in `{ir_filename}.assets/` next to the IR JSON.
 - `--keep-header-footer`: keep header/footer/page-number regions (skipped by default)
 - `--refine`: **experimental** opt-in P4 render-compare-refine after PPTX build (LibreOffice → PNG, page SSIM, rule-based SlideIR fixes; strict SSIM improvement + editability/text guards). Skipped with a warning if `soffice` is missing or fails. Default off.
@@ -85,7 +88,8 @@ estimated styling.
 - OCR-heavy pages are still estimations, not perfect semantic reconstruction.
 - Simple vector drawings and ruled tables on digital pages become native PPT shapes/tables by default (`--vector-mode auto`). Gradients, patterns, clips, and very dense illustrations still fall back to the raster background; use `--vector-mode off` to disable. Details: [`vector-nativization.md`](vector-nativization.md).
 - Layout analysis defaults to `heuristic` so CI/CPU paths need no model download. Opt into PP-StructureV3 with `--layout-engine ppstructure`. Details: [`layout-analysis.md`](layout-analysis.md).
-- SlideIR (`emit-ir` / `from-ir`) round-trips the same structures P1/P2 already render. `groups` / `plan_metadata` are forward-compatible for P3 and are not rendered today. Details: [`slideir.md`](slideir.md).
+- Experimental VLM layout planner: `--layout-planner gemini` (opt-in, API key). Details: [`layout-planner.md`](layout-planner.md).
+- SlideIR (`emit-ir` / `from-ir`) round-trips P1/P2 structures; Phase-3 `groups` / `plan_metadata` are written and rendered when the layout planner succeeds. Details: [`slideir.md`](slideir.md).
 - Bold and color restoration for OCR text are heuristic-based.
 
 ## Development

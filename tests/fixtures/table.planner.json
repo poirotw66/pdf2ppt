@@ -1,0 +1,20 @@
+{
+  "page_number": 1,
+  "fixture": "table.pdf",
+  "expect_title": true,
+  "expect_header_footer_ids": [],
+  "reading_order": ["title", "dept", "q1", "q2", "q3", "eng", "sales", "mkt", "sup", "ops"],
+  "notes": "Cells must remain separate text frames; planner must not merge table_cell roles.",
+  "paragraphs": [
+    {"id": "title", "bbox": [60, 40, 245, 73], "text": "Budget Summary", "role": "title", "font_family_class": "sans"},
+    {"id": "dept", "bbox": [88, 128, 161, 147], "text": "Department", "role": "table_cell", "font_family_class": "sans"},
+    {"id": "q1", "bbox": [288, 128, 307, 147], "text": "Q1", "role": "table_cell", "font_family_class": "sans"},
+    {"id": "q2", "bbox": [488, 128, 507, 147], "text": "Q2", "role": "table_cell", "font_family_class": "sans"},
+    {"id": "q3", "bbox": [688, 128, 707, 147], "text": "Q3", "role": "table_cell", "font_family_class": "sans"},
+    {"id": "eng", "bbox": [88, 185, 157, 203], "text": "Engineering", "role": "table_cell", "font_family_class": "sans"},
+    {"id": "sales", "bbox": [88, 241, 121, 259], "text": "Sales", "role": "table_cell", "font_family_class": "sans"},
+    {"id": "mkt", "bbox": [88, 298, 145, 316], "text": "Marketing", "role": "table_cell", "font_family_class": "sans"},
+    {"id": "sup", "bbox": [88, 355, 134, 373], "text": "Support", "role": "table_cell", "font_family_class": "sans"},
+    {"id": "ops", "bbox": [88, 411, 152, 429], "text": "Operations", "role": "table_cell", "font_family_class": "sans"}
+  ]
+}

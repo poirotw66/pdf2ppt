@@ -105,7 +105,11 @@ export function usePdf2PptApi() {
     }
   }
 
-  async function convertJob(jobId: string, inpaintEngine: InpaintEngine): Promise<ConvertResponse | null> {
+  async function convertJob(
+    jobId: string,
+    inpaintEngine: InpaintEngine,
+    layoutPlanner: import("../config").LayoutPlannerOption = "",
+  ): Promise<ConvertResponse | null> {
     setIsBusy(true);
     setBusyAction("Converting PPTX...");
     const lamaHint =
@@ -117,7 +121,7 @@ export function usePdf2PptApi() {
       const response = await fetch(`${apiBase}/jobs/${jobId}/convert`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildConvertRequestPayload(inpaintEngine)),
+        body: JSON.stringify(buildConvertRequestPayload(inpaintEngine, false, layoutPlanner)),
       });
       if (!response.ok) {
         throw new Error(await readError(response));

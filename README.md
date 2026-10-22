@@ -23,6 +23,7 @@ backgrounds only where text was removed.
 - Native PDF extraction first; PaddleOCR when the page is scanned or image-heavy
 - Line-box merging so titles stay coherent without collapsing multi-column layouts
 - Optional layout analysis for typed regions, reading order, bullets, and title placeholders ([`docs/layout-analysis.md`](docs/layout-analysis.md))
+- Experimental opt-in VLM layout planner (`--layout-planner gemini`) for structured roles, paragraph grouping, and font-class hints ([`docs/layout-planner.md`](docs/layout-planner.md))
 - Vector / table nativization for simple drawings and ruled tables on digital PDFs ([`docs/vector-nativization.md`](docs/vector-nativization.md))
 - SlideIR agent layer: emit a versioned JSON IR (`emit-ir`) and render PPTX from IR alone (`from-ir`) so agents can round-trip without re-running the PDF pipeline ([`docs/slideir.md`](docs/slideir.md))
 - Background engines: `opencv-fast` (recommended), `white-box`, optional `lama-onnx` / `lama-pytorch`, and cloud generative backends ([`docs/background-engines.md`](docs/background-engines.md))
@@ -65,6 +66,9 @@ pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
 
 # Experimental opt-in P4 render-compare-refine (LibreOffice required; skipped with a warning if missing)
 pdf2ppt input.pdf output.pptx --refine --refine-iters 2
+
+# Experimental opt-in Phase-3 VLM layout planner (requires GEMINI_API_KEY; falls back per page)
+pdf2ppt input.pdf output.pptx --layout-planner gemini
 
 # Agent / SlideIR round-trip (no PPTX until from-ir)
 pdf2ppt emit-ir input.pdf deck.slideir.json

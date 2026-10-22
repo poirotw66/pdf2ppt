@@ -744,6 +744,81 @@ def build_dark_97pct() -> None:
     _save(doc, "dark_97pct.pdf")
 
 
+def build_agenda_numbered_list() -> None:
+    """Numbered agenda list (e02-style): must stay one list frame under planner default."""
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    page.insert_textbox(
+        fitz.Rect(60, 40, 800, 90),
+        "Agenda",
+        fontsize=32,
+        fontname="helv",
+        color=(0.1, 0.1, 0.15),
+    )
+    items = [
+        "1. Financial highlights",
+        "2. Regional performance",
+        "3. Product roadmap",
+        "4. Hiring plan",
+        "5. Open questions",
+    ]
+    y = 130.0
+    for text in items:
+        page.insert_textbox(
+            fitz.Rect(72, y, 880, y + 34),
+            text,
+            fontsize=18,
+            fontname="helv",
+            color=(0.15, 0.15, 0.18),
+        )
+        y += 40.0
+    _save(doc, "agenda_numbered_list.pdf")
+
+
+def build_cjk_paragraph() -> None:
+    """Multi-line CJK paragraph (e05-style): must stay one frame under planner default."""
+
+    fontfile = _cjk_fontfile()
+    if fontfile is None:
+        print("skip cjk_paragraph.pdf (no system CJK font)")
+        return
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    page.insert_font(fontname="cjk", fontfile=fontfile)
+    page.insert_textbox(
+        fitz.Rect(60, 40, 900, 100),
+        "品牌故事",
+        fontsize=32,
+        fontname="cjk",
+        color=(0.1, 0.1, 0.15),
+    )
+    body = (
+        "我們相信好產品來自對細節的堅持，從第一天起就把使用者體驗放在決策核心，"
+        "並以透明溝通建立長期信任。團隊持續迭代，把複雜流程變得簡單可靠。"
+    )
+    page.insert_textbox(
+        fitz.Rect(60, 140, 900, 320),
+        body,
+        fontsize=24,
+        fontname="cjk",
+        color=(0.15, 0.15, 0.18),
+    )
+    page.insert_textbox(
+        fitz.Rect(60, 360, 500, 400),
+        "— 創辦人 陳怡君",
+        fontsize=16,
+        fontname="cjk",
+        color=(0.3, 0.3, 0.35),
+    )
+    try:
+        doc.subset_fonts()
+    except Exception:  # noqa: BLE001
+        pass
+    _save(doc, "cjk_paragraph.pdf")
+
+
 def build_scanned_bullet_list() -> None:
     """Rasterized version of the bullet list slide (forces OCR / scanned path)."""
 
@@ -774,12 +849,93 @@ def build_scanned_bullet_list() -> None:
             fontname="helv",
             color=(0.15, 0.15, 0.18),
         )
+    page.insert_textbox(
+        fitz.Rect(48, 500, 400, 530),
+        "Confidential",
+        fontsize=10,
+        fontname="helv",
+        color=(0.45, 0.45, 0.5),
+    )
+    page.insert_textbox(
+        fitz.Rect(880, 500, 940, 530),
+        "3",
+        fontsize=10,
+        fontname="helv",
+        color=(0.45, 0.45, 0.5),
+    )
     pixmap = page.get_pixmap(dpi=144, alpha=False)
     src.close()
 
     doc, out_page = _new_doc()
     out_page.insert_image(PAGE_RECT, stream=pixmap.tobytes("png"))
     _save(doc, "scanned_bullet_list.pdf")
+
+
+def _cjk_fontfile() -> str | None:
+    """Prefer a system CJK font so mixed Traditional Chinese fixtures embed."""
+
+    candidates = [
+        Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
+        Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def build_mixed_cjk_en() -> None:
+    """Mixed Traditional Chinese + English title/body for planner font/script tests."""
+
+    fontfile = _cjk_fontfile()
+    if fontfile is None:
+        print("skip mixed_cjk_en.pdf (no system CJK font)")
+        return
+
+    doc, page = _new_doc()
+    page.draw_rect(PAGE_RECT, color=None, fill=(1, 1, 1), fill_opacity=1)
+    page.insert_font(fontname="cjk", fontfile=fontfile)
+    page.insert_textbox(
+        fitz.Rect(48, 40, 900, 100),
+        "財務摘要 Q3 2026",
+        fontsize=28,
+        fontname="cjk",
+        color=(0.1, 0.1, 0.15),
+    )
+    page.insert_textbox(
+        fitz.Rect(48, 120, 900, 160),
+        "Q3 2026 - Finance Team",
+        fontsize=16,
+        fontname="helv",
+        color=(0.25, 0.25, 0.3),
+    )
+    page.insert_textbox(
+        fitz.Rect(48, 190, 900, 280),
+        "營收較上季成長 12%，毛利率維持在目標區間。",
+        fontsize=16,
+        fontname="cjk",
+        color=(0.15, 0.15, 0.18),
+    )
+    page.insert_textbox(
+        fitz.Rect(48, 300, 900, 360),
+        "Revenue grew 12% quarter over quarter.",
+        fontsize=16,
+        fontname="helv",
+        color=(0.15, 0.15, 0.18),
+    )
+    page.insert_textbox(
+        fitz.Rect(48, 500, 400, 530),
+        "機密",
+        fontsize=10,
+        fontname="cjk",
+        color=(0.45, 0.45, 0.5),
+    )
+    try:
+        doc.subset_fonts()
+    except Exception:  # noqa: BLE001 — subset is best-effort for fixture size
+        pass
+    _save(doc, "mixed_cjk_en.pdf")
 
 
 def main() -> None:
@@ -800,6 +956,9 @@ def main() -> None:
     build_card_93pct()
     build_dark_97pct()
     build_scanned_bullet_list()
+    build_mixed_cjk_en()
+    build_agenda_numbered_list()
+    build_cjk_paragraph()
 
 
 if __name__ == "__main__":

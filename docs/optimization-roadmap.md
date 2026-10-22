@@ -190,6 +190,15 @@ inpainting/
 由於本階段觸及的模組（`block_analysis.py`、`ocr.py`）與 Phase 1（`inpainting_*`）**不重疊**，
 兩者可並行推進。
 
+> **實作狀態（實驗性 / 已落地）**：opt-in VLM layout planner 已落地於
+> `src/pdf2ppt/layout_planner/`（見 [`layout-planner.md`](./layout-planner.md)）。
+> 預設模型 `gemini-3.1-flash-lite`；輸出為 schema 驗證的結構化 JSON（角色、閱讀順序、
+> 段落合併、字體家族類別），經 SlideIR `groups` / `plan_metadata` 套用。預設只套用
+> 低風險變更（角色／閱讀順序／頁眉頁尾）；合併與字體 remap 需顯式 flag。未設
+> `--layout-planner` 或缺少 API key 時與 main **byte-identical**（並寫入
+> `skip_reason`）。HTTP 失敗計入 call/cost cap；連續失敗／auth 開 circuit。本地方案
+> （Paddle Layout）仍可於後續補強；現有 `--layout-engine heuristic|ppstructure` 不變。
+
 ### 3.1 技術選型：Paddle Layout vs VLM
 
 | 方案 | 優點 | 缺點 |
@@ -207,8 +216,11 @@ inpainting/
 
 `block_analysis.py:180` 的 `font_family=None` 在本階段一併解決——
 版面分析階段已經在看頁面影像，可同時給出「黑體／明體／圓體」等級的字體家族判斷。
+（planner 成功時寫入 `font_family`；關閉時仍為 `None` → `default_font_family`。）
 
 **驗收**：標題判斷準確率、頁眉頁尾過濾率、閱讀順序正確率（需在 Phase 0 語料上補標註）。
+評測腳本：`scripts/bench_layout_planner.py`（`--mode recorded|live|heuristic`）；
+標註：`tests/fixtures/*.planner.json`。
 
 **規模**：大。**風險**：中。
 

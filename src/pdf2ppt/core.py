@@ -56,6 +56,27 @@ class ConversionOptions:
     layout_engine: str = "heuristic"
     layout_model_root: Path | None = Path("model")
     layout_skip_header_footer: bool = True
+    # Opt-in VLM layout planner (Phase 3 / v1.5). Default None keeps output
+    # byte-identical to the geometric heuristic path. Not selected by auto.
+    layout_planner: str | None = None  # e.g. "gemini"
+    layout_planner_model: str | None = None
+    layout_planner_api_key: str | None = None
+    layout_planner_max_calls: int = 30
+    layout_planner_max_cost_usd: float = 1.0
+    layout_planner_timeout_s: float = 45.0
+    layout_planner_concurrency: int = 2
+    layout_planner_cache_dir: Path | None = Path(".pdf2ppt_cache/layout_planner")
+    layout_planner_min_confidence: float = 0.55
+    layout_planner_font_map: dict[str, dict[str, str]] | None = None
+    # Low-risk by default: roles / reading order / HF filter only.
+    # Grouping merges and font-class remaps caused SSIM regressions on tables
+    # and digital pages — opt in explicitly.
+    layout_planner_apply_grouping: bool = False
+    layout_planner_apply_fonts: bool = False
+    layout_planner_max_consecutive_failures: int = 2
+    layout_planner_budget: Any | None = field(default=None, repr=False)
+    layout_planner_transport: Any | None = field(default=None, repr=False)
+    layout_planner_skip_reason: str | None = None
     lang: str = "ch"
     ocr_model_root: Path | None = Path("model")
     ocr_use_doc_orientation: bool = False

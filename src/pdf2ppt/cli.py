@@ -489,6 +489,90 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--layout-planner",
+        choices=("gemini",),
+        default=None,
+        help=(
+            "Experimental opt-in VLM layout planner (Phase 3 / v1.5). Sends each page "
+            "image plus existing OCR/geometry blocks to Gemini and returns structured "
+            "JSON (roles, reading order, paragraph groups, font class). Not selected by "
+            "default or auto. Requires GEMINI_API_KEY / GOOGLE_API_KEY; on any error the "
+            "page falls back to geometric heuristics. See docs/layout-planner.md."
+        ),
+    )
+    parser.add_argument(
+        "--layout-planner-model",
+        default=None,
+        help=(
+            "Optional Gemini model id for --layout-planner (default gemini-3.1-flash-lite). "
+            "Also overridable via PDF2PPT_LAYOUT_PLANNER_MODEL."
+        ),
+    )
+    parser.add_argument(
+        "--layout-planner-max-calls",
+        type=positive_int,
+        default=30,
+        help="Per-document maximum paid layout-planner API calls (cost brake).",
+    )
+    parser.add_argument(
+        "--layout-planner-max-cost-usd",
+        type=float,
+        default=1.0,
+        help="Per-document estimated USD budget for layout-planner calls.",
+    )
+    parser.add_argument(
+        "--layout-planner-timeout-s",
+        type=float,
+        default=45.0,
+        help="HTTP timeout in seconds for each layout-planner API call.",
+    )
+    parser.add_argument(
+        "--layout-planner-concurrency",
+        type=positive_int,
+        default=2,
+        help="Max concurrent layout-planner API calls.",
+    )
+    parser.add_argument(
+        "--layout-planner-cache-dir",
+        type=Path,
+        default=Path(".pdf2ppt_cache/layout_planner"),
+        help="Disk cache for layout-planner JSON (keyed by image+prompt+model hash).",
+    )
+    parser.add_argument(
+        "--layout-planner-min-confidence",
+        type=float,
+        default=0.55,
+        help="Reject planner annotations / groups below this confidence (0–1).",
+    )
+    parser.add_argument(
+        "--layout-planner-apply-grouping",
+        action="store_true",
+        help=(
+            "Opt into VLM paragraph/text-frame merges. Default off (low-risk): only roles, "
+            "reading order, title placeholder, and header/footer filtering are applied. "
+            "Merges still require vertical adjacency / column alignment and never merge "
+            "table cells or chart labels."
+        ),
+    )
+    parser.add_argument(
+        "--layout-planner-apply-fonts",
+        action="store_true",
+        help=(
+            "Opt into VLM font_family_class remapping. Default off. Even when enabled, "
+            "known PDF font names are kept; only unknown/OCR fonts are mapped, and CJK "
+            "fonts are used only when the text contains CJK characters."
+        ),
+    )
+    parser.add_argument(
+        "--layout-planner-max-consecutive-failures",
+        type=positive_int,
+        default=2,
+        help=(
+            "Open the planner circuit after this many consecutive HTTP failures "
+            "(timeout/api_error/validation). Auth errors open the circuit immediately."
+        ),
+    )
+    parser.add_argument(
         "--refine",
         action="store_true",
         help=(
@@ -650,6 +734,17 @@ def _build_conversion_options(
         layout_engine=args.layout_engine,
         layout_model_root=args.layout_model_root,
         layout_skip_header_footer=not args.keep_header_footer,
+        layout_planner=args.layout_planner,
+        layout_planner_model=args.layout_planner_model,
+        layout_planner_max_calls=args.layout_planner_max_calls,
+        layout_planner_max_cost_usd=args.layout_planner_max_cost_usd,
+        layout_planner_timeout_s=args.layout_planner_timeout_s,
+        layout_planner_concurrency=args.layout_planner_concurrency,
+        layout_planner_cache_dir=args.layout_planner_cache_dir,
+        layout_planner_min_confidence=args.layout_planner_min_confidence,
+        layout_planner_apply_grouping=bool(args.layout_planner_apply_grouping),
+        layout_planner_apply_fonts=bool(args.layout_planner_apply_fonts),
+        layout_planner_max_consecutive_failures=args.layout_planner_max_consecutive_failures,
         refine=bool(args.refine),
         refine_iters=args.refine_iters,
         refine_max_fixes_per_slide=args.refine_max_fixes,

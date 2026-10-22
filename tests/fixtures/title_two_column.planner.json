@@ -1,0 +1,12 @@
+{
+  "page_number": 1,
+  "fixture": "title_two_column.pdf",
+  "expect_title": true,
+  "expect_header_footer_ids": [],
+  "reading_order": ["title", "left", "right"],
+  "paragraphs": [
+    {"id": "title", "bbox": [60, 40, 305, 81], "text": "Platform Overview", "role": "title", "font_family_class": "sans"},
+    {"id": "left", "bbox": [60, 140, 432, 205], "text": "Left column covers ingestion, OCR, and layout analysis.", "role": "body", "font_family_class": "sans"},
+    {"id": "right", "bbox": [510, 140, 895, 205], "text": "Right column covers native rendering: text boxes, shapes,", "role": "body", "font_family_class": "sans"}
+  ]
+}

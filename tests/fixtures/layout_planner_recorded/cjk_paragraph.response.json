@@ -1,0 +1,68 @@
+{
+  "blocks": [
+    {
+      "id": "native_1_0_0",
+      "role": "title",
+      "reading_order": 0,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    },
+    {
+      "id": "native_1_1_0",
+      "role": "body",
+      "reading_order": 1,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    },
+    {
+      "id": "native_1_1_1",
+      "role": "body",
+      "reading_order": 2,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    },
+    {
+      "id": "native_1_2_0",
+      "role": "caption",
+      "reading_order": 3,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    }
+  ],
+  "groups": [
+    {
+      "id": "group_0",
+      "member_ids": [
+        "native_1_0_0"
+      ],
+      "role": "title",
+      "reading_order": 0,
+      "confidence": 1.0,
+      "kind": "paragraph"
+    },
+    {
+      "id": "group_1",
+      "member_ids": [
+        "native_1_1_0",
+        "native_1_1_1"
+      ],
+      "role": "body",
+      "reading_order": 1,
+      "confidence": 1.0,
+      "kind": "paragraph"
+    },
+    {
+      "id": "group_2",
+      "member_ids": [
+        "native_1_2_0"
+      ],
+      "role": "caption",
+      "reading_order": 2,
+      "confidence": 1.0,
+      "kind": "paragraph"
+    }
+  ],
+  "model": "gemini-3.1-flash-lite",
+  "prompt_version": "layout-planner-v1",
+  "recorded_from": "live"
+}

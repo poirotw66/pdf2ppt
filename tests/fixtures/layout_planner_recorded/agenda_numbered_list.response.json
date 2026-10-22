@@ -1,0 +1,58 @@
+{
+  "blocks": [
+    {
+      "id": "native_1_0_0",
+      "role": "list_item",
+      "reading_order": 0,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    },
+    {
+      "id": "native_1_1_0",
+      "role": "list_item",
+      "reading_order": 1,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    },
+    {
+      "id": "native_1_2_0",
+      "role": "list_item",
+      "reading_order": 2,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    },
+    {
+      "id": "native_1_3_0",
+      "role": "list_item",
+      "reading_order": 3,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    },
+    {
+      "id": "native_1_4_0",
+      "role": "list_item",
+      "reading_order": 4,
+      "font_family_class": "sans",
+      "confidence": 1.0
+    }
+  ],
+  "groups": [
+    {
+      "id": "group_0",
+      "member_ids": [
+        "native_1_0_0",
+        "native_1_1_0",
+        "native_1_2_0",
+        "native_1_3_0",
+        "native_1_4_0"
+      ],
+      "role": "list_item",
+      "reading_order": 0,
+      "confidence": 1.0,
+      "kind": "paragraph"
+    }
+  ],
+  "model": "gemini-3.1-flash-lite",
+  "prompt_version": "layout-planner-v1",
+  "recorded_from": "live"
+}

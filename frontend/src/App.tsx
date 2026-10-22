@@ -2,8 +2,10 @@ import { useState } from "react";
 
 import {
   defaultInpaintEngine,
+  defaultLayoutPlanner,
   detectConfidenceThreshold as defaultDetectConfidenceThreshold,
   type InpaintEngine,
+  type LayoutPlannerOption,
 } from "./config";
 import { InspectorPanel } from "./components/InspectorPanel";
 import { JobSidebar } from "./components/JobSidebar";
@@ -15,6 +17,7 @@ import { isSupportedUpload } from "./utils/upload";
 export default function App() {
   const [detectConfidenceThreshold, setDetectConfidenceThreshold] = useState(defaultDetectConfidenceThreshold);
   const [inpaintEngine, setInpaintEngine] = useState<InpaintEngine>(defaultInpaintEngine);
+  const [layoutPlanner, setLayoutPlanner] = useState<LayoutPlannerOption>(defaultLayoutPlanner);
   const [file, setFile] = useState<File | null>(null);
   const api = usePdf2PptApi();
   const editor = useBoxEditorState({ setStatusText: api.setStatusText });
@@ -69,7 +72,7 @@ export default function App() {
     if (!saved) {
       return;
     }
-    await api.convertJob(api.job.job_id, inpaintEngine);
+    await api.convertJob(api.job.job_id, inpaintEngine, layoutPlanner);
   }
 
   return (
@@ -80,6 +83,7 @@ export default function App() {
         convertResult={api.convertResult}
         detectConfidenceThreshold={detectConfidenceThreshold}
         inpaintEngine={inpaintEngine}
+        layoutPlanner={layoutPlanner}
         file={file}
         isBusy={api.isBusy}
         job={api.job}
@@ -91,6 +95,7 @@ export default function App() {
           setDetectConfidenceThreshold(Math.min(1, Math.max(0, value)));
         }}
         onInpaintEngineChange={setInpaintEngine}
+        onLayoutPlannerChange={setLayoutPlanner}
         onFileChange={(nextFile) => {
           void handleFileChange(nextFile);
         }}
