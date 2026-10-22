@@ -474,7 +474,6 @@ class GeminiPlannerMockTests(unittest.TestCase):
 
     def test_commit_failure_refunds_unused_worst_case_reserve(self) -> None:
         from pdf2ppt.layout_planner.budget import (
-            DEFAULT_ESTIMATED_COST_USD,
             DEFAULT_WORST_CASE_CALL_COST_USD,
             LayoutPlannerCallRecord,
         )
@@ -496,7 +495,10 @@ class GeminiPlannerMockTests(unittest.TestCase):
                 fallback_kind="timeout",
             )
         )
-        self.assertAlmostEqual(budget.estimated_cost_usd, DEFAULT_ESTIMATED_COST_USD, places=6)
+        self.assertAlmostEqual(budget.estimated_cost_usd, 0.0, places=6)
+        self.assertAlmostEqual(
+            budget.records[0].reserved_cost_usd, DEFAULT_WORST_CASE_CALL_COST_USD, places=6
+        )
 
     def test_blocks_to_evidence_caps_count_and_chars(self) -> None:
         from pdf2ppt.layout_planner.base import blocks_to_evidence
@@ -514,6 +516,252 @@ class GeminiPlannerMockTests(unittest.TestCase):
         evidence = blocks_to_evidence(blocks, max_blocks=5, max_chars_per_block=40)
         self.assertEqual(len(evidence), 5)
         self.assertLessEqual(len(evidence[0].text), 40)
+
+
+class LayoutPlannerFailureRefundServiceTests(unittest.TestCase):
+    """End-to-end service-path refunds: failures must not book the worst-case reserve."""
+
+    def _service(
+        self,
+        transport,
+        *,
+        max_calls: int = 10,
+        max_cost_usd: float = 1.0,
+        max_consecutive_failures: int = 99,
+        api_key: str | None = "test-key",
+    ) -> tuple[LayoutPlannerService, LayoutPlannerBudget]:
+        from pdf2ppt.layout_planner.budget import DEFAULT_WORST_CASE_CALL_COST_USD
+
+        budget = LayoutPlannerBudget(
+            max_calls=max_calls,
+            max_cost_usd=max_cost_usd,
+            max_consecutive_failures=max_consecutive_failures,
+            worst_case_call_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD,
+        )
+        service = LayoutPlannerService(
+            GeminiLayoutPlanner(transport=transport, api_key=api_key),
+            budget=budget,
+            cache_dir=None,
+        )
+        return service, budget
+
+    def _plan_once(self, service: LayoutPlannerService, page_number: int = 1):
+        return service.try_plan_page(
+            page_image=Image.new("RGB", (32, 32), color=(200, 200, 200)),
+            text_blocks=_blocks(),
+            page_number=page_number,
+            page_height=540.0,
+        )
+
+    def _assert_failure_refund(
+        self,
+        budget: LayoutPlannerBudget,
+        *,
+        expected_cost: float,
+        expected_calls: int,
+        fallback_kind: str | None = None,
+    ) -> None:
+        from pdf2ppt.layout_planner.budget import DEFAULT_WORST_CASE_CALL_COST_USD
+
+        self.assertEqual(budget.calls, expected_calls)
+        self.assertEqual(budget.http_attempts, expected_calls)
+        self.assertAlmostEqual(budget.estimated_cost_usd, expected_cost, places=6)
+        # Full worst-case reserve must not stick on the report after reconcile.
+        self.assertLess(
+            budget.estimated_cost_usd + 1e-9,
+            expected_calls * DEFAULT_WORST_CASE_CALL_COST_USD,
+        )
+        for record in budget.records:
+            if not record.http_attempted:
+                continue
+            self.assertAlmostEqual(
+                record.reserved_cost_usd, DEFAULT_WORST_CASE_CALL_COST_USD, places=6
+            )
+            if fallback_kind is not None and not record.success:
+                self.assertEqual(record.fallback_kind, fallback_kind)
+
+    def test_http_error_refunds_reserve(self) -> None:
+        from pdf2ppt.layout_planner.base import LayoutPlannerError
+
+        def transport(_body: dict) -> dict:
+            raise LayoutPlannerError("Gemini layout HTTP 500: upstream boom", kind="api_error")
+
+        service, budget = self._service(transport)
+        self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=0.0, expected_calls=1, fallback_kind="api_error"
+        )
+        self.assertAlmostEqual(budget.records[0].estimated_cost_usd, 0.0, places=6)
+
+    def test_timeout_refunds_reserve(self) -> None:
+        def transport(_body: dict) -> dict:
+            raise TimeoutError("timed out")
+
+        service, budget = self._service(transport)
+        self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=0.0, expected_calls=1, fallback_kind="timeout"
+        )
+
+    def test_invalid_key_401_refunds_and_opens_circuit(self) -> None:
+        import io
+        import urllib.error
+
+        from pdf2ppt.layout_planner.budget import DEFAULT_WORST_CASE_CALL_COST_USD
+
+        def fake_urlopen(_request, timeout=None):  # noqa: ARG001
+            raise urllib.error.HTTPError(
+                url="https://example.invalid/generateContent",
+                code=401,
+                msg="Unauthorized",
+                hdrs=None,  # type: ignore[arg-type]
+                fp=io.BytesIO(b'{"error":{"message":"API key not valid"}}'),
+            )
+
+        budget = LayoutPlannerBudget(
+            max_calls=5,
+            max_cost_usd=1.0,
+            max_consecutive_failures=99,
+            worst_case_call_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD,
+        )
+        service = LayoutPlannerService(
+            GeminiLayoutPlanner(api_key="bad-key", transport=None),
+            budget=budget,
+            cache_dir=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=0.0, expected_calls=1, fallback_kind="auth_error"
+        )
+        self.assertTrue(budget.circuit_open)
+
+    def test_invalid_key_403_refunds_and_opens_circuit(self) -> None:
+        import io
+        import urllib.error
+
+        from pdf2ppt.layout_planner.budget import DEFAULT_WORST_CASE_CALL_COST_USD
+
+        def fake_urlopen(_request, timeout=None):  # noqa: ARG001
+            raise urllib.error.HTTPError(
+                url="https://example.invalid/generateContent",
+                code=403,
+                msg="Forbidden",
+                hdrs=None,  # type: ignore[arg-type]
+                fp=io.BytesIO(b'{"error":{"message":"Permission denied for API key"}}'),
+            )
+
+        budget = LayoutPlannerBudget(
+            max_calls=5,
+            max_cost_usd=1.0,
+            max_consecutive_failures=99,
+            worst_case_call_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD,
+        )
+        service = LayoutPlannerService(
+            GeminiLayoutPlanner(api_key="bad-key", transport=None),
+            budget=budget,
+            cache_dir=None,
+        )
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=0.0, expected_calls=1, fallback_kind="auth_error"
+        )
+        self.assertTrue(budget.circuit_open)
+
+    def test_malformed_json_with_usage_bills_usage_cost(self) -> None:
+        from pdf2ppt.layout_planner.budget import cost_from_usage_metadata
+
+        usage = {"promptTokenCount": 2000, "candidatesTokenCount": 400}
+        expected = cost_from_usage_metadata(usage)
+        assert expected is not None
+
+        def transport(_body: dict) -> dict:
+            return {
+                "candidates": [{"content": {"parts": [{"text": "{not-json"}]}}],
+                "usageMetadata": usage,
+            }
+
+        service, budget = self._service(transport)
+        self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=expected, expected_calls=1, fallback_kind="validation"
+        )
+        self.assertAlmostEqual(budget.records[0].estimated_cost_usd, expected, places=6)
+
+    def test_malformed_json_without_usage_refunds_to_zero(self) -> None:
+        def transport(_body: dict) -> dict:
+            return {"candidates": [{"content": {"parts": [{"text": "{not-json"}]}}]}
+
+        service, budget = self._service(transport)
+        self.assertIsNone(self._plan_once(service))
+        self._assert_failure_refund(
+            budget, expected_cost=0.0, expected_calls=1, fallback_kind="validation"
+        )
+
+    def test_retries_each_count_as_calls_and_usd_cap_still_blocks(self) -> None:
+        """Each failed attempt counts; refunds free the USD reserve so the cap still gates."""
+        from pdf2ppt.layout_planner.budget import DEFAULT_WORST_CASE_CALL_COST_USD
+
+        calls = {"n": 0}
+
+        def failing_transport(_body: dict) -> dict:
+            calls["n"] += 1
+            return {"candidates": [{"content": {"parts": [{"text": "{bad"}]}}]}
+
+        # Without refund, two failures would book ~2× reserve and exceed 1.5×.
+        # With refund, both attempts proceed and reported cost stays 0.
+        service, budget = self._service(
+            failing_transport,
+            max_calls=10,
+            max_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD * 1.5,
+            max_consecutive_failures=99,
+        )
+        self.assertIsNone(self._plan_once(service, page_number=1))
+        self.assertIsNone(self._plan_once(service, page_number=2))
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(budget.calls, 2)
+        self.assertEqual(budget.http_attempts, 2)
+        self.assertAlmostEqual(budget.estimated_cost_usd, 0.0, places=6)
+
+        # Tight cap: exactly one worst-case reserve. A real success leaves too
+        # little room for another reserve → service records a budget fallback.
+        tight = LayoutPlannerBudget(
+            max_calls=10,
+            max_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD,
+            max_consecutive_failures=99,
+            worst_case_call_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD,
+        )
+
+        def success_transport(_body: dict) -> dict:
+            calls["n"] += 1
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": json.dumps(_valid_plan_payload())}],
+                        }
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 2000,
+                    "candidatesTokenCount": 500,
+                },
+            }
+
+        tight_service = LayoutPlannerService(
+            GeminiLayoutPlanner(transport=success_transport, api_key="test-key"),
+            budget=tight,
+            cache_dir=None,
+        )
+        self.assertIsNotNone(self._plan_once(tight_service, page_number=1))
+        self.assertEqual(tight.calls, 1)
+        self.assertGreater(tight.estimated_cost_usd, 0.0)
+        self.assertFalse(tight.try_reserve())
+        blocked = self._plan_once(tight_service, page_number=2)
+        self.assertIsNone(blocked)
+        self.assertEqual(tight.calls, 1)
+        self.assertEqual(tight.records[-1].fallback_kind, "budget")
 
 
 class LayoutPlannerServiceConfigTests(unittest.TestCase):

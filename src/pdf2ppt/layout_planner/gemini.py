@@ -205,18 +205,26 @@ class GeminiLayoutPlanner:
         except Exception as error:  # noqa: BLE001 — transport boundary
             raise LayoutPlannerError(str(error), kind="api_error") from error
 
-        try:
-            text = _extract_json_text(raw)
-            parsed = json.loads(text)
-        except (json.JSONDecodeError, LayoutPlannerError) as error:
-            raise LayoutPlannerError(f"Malformed layout JSON: {error}", kind="validation") from error
-
         cost = _usage_cost_usd(
             raw,
             input_usd_per_mtok=self._input_usd_per_mtok,
             output_usd_per_mtok=self._output_usd_per_mtok,
         )
         prompt_tokens, output_tokens = _usage_tokens(raw)
+        try:
+            text = _extract_json_text(raw)
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, LayoutPlannerError) as error:
+            # Bill real token usage when the failed response included it;
+            # otherwise leave cost at 0 so the service refunds the reserve.
+            raise LayoutPlannerError(
+                f"Malformed layout JSON: {error}",
+                kind="validation",
+                estimated_cost_usd=float(cost) if cost is not None else 0.0,
+                prompt_tokens=prompt_tokens,
+                output_tokens=output_tokens,
+            ) from error
+
         plan = parse_and_validate_layout_plan(
             parsed,
             known_block_ids=known_ids,
@@ -269,7 +277,7 @@ class GeminiLayoutPlanner:
             raise LayoutPlannerError(
                 f"Gemini layout HTTP {error.code}: {detail}",
                 kind=kind,
-                estimated_cost_usd=self._estimated_cost_usd,
+                estimated_cost_usd=0.0,
             ) from error
         except urllib.error.URLError as error:
             reason = str(error.reason)

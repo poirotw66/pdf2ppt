@@ -113,15 +113,18 @@ server environment and are **never** logged or printed.
 - Slots are **reserved atomically** before the HTTP call (`try_reserve`) so
   concurrent workers cannot overshoot `max_calls`.
 - Failed requests (bad JSON, timeouts, API/auth errors) still count toward
-  `calls` / `http_attempts` / estimated cost.
+  `calls` / `http_attempts`. Each retry / attempt is a separate counted call.
 - Cost uses Gemini `usageMetadata` token counts with configurable `$/1M`
   input/output prices (`PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK` /
   `…_OUTPUT_…`, defaults $0.25 / $1.50). The dollar cap reserves a **worst-case
   next-call** cost from generous prompt tokens + `maxOutputTokens` (default
   8k in + 8192 out ≈ $0.0143) and reconciles to actual usage after each
   response, so a single expensive call cannot silently overshoot the cap.
-  Failed calls refund unused reserve (flat estimate when usage is unknown).
-  A warning is logged when `max_cost_usd` is below one reserve.
+  Failed calls refund unused reserve: reported cost is the usage-based token
+  cost when the failed response includes `usageMetadata` (e.g. malformed JSON
+  with usage), otherwise **0** — never the full worst-case reserve. The USD
+  cap remains safe because the reserve is held until reconcile. A warning is
+  logged when `max_cost_usd` is below one reserve.
 - Prompt evidence is capped (block count + per-block characters) so a dense
   page cannot inflate the request past the reserved worst case.
 - After `max_consecutive_failures` consecutive failures, or any auth error,

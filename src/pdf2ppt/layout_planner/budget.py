@@ -211,9 +211,9 @@ class LayoutPlannerBudget:
     def commit_failure(self, record: LayoutPlannerCallRecord) -> None:
         """Finalize a reserved failed HTTP call (still counts against max_calls).
 
-        Refunds unused worst-case reserve when no actual usage is known, so
-        reported cost is not overstated (charge flat ``DEFAULT_ESTIMATED_COST_USD``
-        unless the record carries a known positive actual).
+        Refunds unused worst-case reserve when no actual usage is known
+        (actual cost 0). When the failed response carried ``usageMetadata``,
+        reconcile to that known positive cost instead.
         """
 
         with self._lock:
@@ -221,7 +221,7 @@ class LayoutPlannerBudget:
             if record.estimated_cost_usd and record.estimated_cost_usd > 0:
                 actual = float(record.estimated_cost_usd)
             else:
-                actual = float(DEFAULT_ESTIMATED_COST_USD)
+                actual = 0.0
             self.estimated_cost_usd += actual - reserved
             self.fallbacks += 1
             self.consecutive_failures += 1
