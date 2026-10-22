@@ -12,10 +12,13 @@ Invariants:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 # Fallback flat estimate when usageMetadata is absent.
 DEFAULT_ESTIMATED_COST_USD = 0.002
@@ -113,6 +116,13 @@ class LayoutPlannerBudget:
         limit = max(1, int(self.concurrency))
         self._semaphore = threading.BoundedSemaphore(limit)
         self._pending_reservations = deque()
+        if float(self.max_cost_usd) + 1e-9 < float(self.worst_case_call_cost_usd):
+            logger.warning(
+                "layout planner max_cost_usd=%.6f is below one worst-case reserve "
+                "(%.6f); no paid calls will be made",
+                float(self.max_cost_usd),
+                float(self.worst_case_call_cost_usd),
+            )
 
     def is_circuit_open(self) -> bool:
         with self._lock:
@@ -199,17 +209,19 @@ class LayoutPlannerBudget:
             self.records.append(record)
 
     def commit_failure(self, record: LayoutPlannerCallRecord) -> None:
-        """Finalize a reserved failed HTTP call (still counts against budget)."""
+        """Finalize a reserved failed HTTP call (still counts against max_calls).
+
+        Refunds unused worst-case reserve when no actual usage is known, so
+        reported cost is not overstated (charge flat ``DEFAULT_ESTIMATED_COST_USD``
+        unless the record carries a known positive actual).
+        """
 
         with self._lock:
             reserved = self._pop_reservation()
-            # Failed calls may still be billed; keep the reserved (worst-case)
-            # amount unless the record carries a known lower actual.
-            actual = (
-                float(record.estimated_cost_usd)
-                if record.estimated_cost_usd and record.estimated_cost_usd > 0
-                else reserved
-            )
+            if record.estimated_cost_usd and record.estimated_cost_usd > 0:
+                actual = float(record.estimated_cost_usd)
+            else:
+                actual = float(DEFAULT_ESTIMATED_COST_USD)
             self.estimated_cost_usd += actual - reserved
             self.fallbacks += 1
             self.consecutive_failures += 1

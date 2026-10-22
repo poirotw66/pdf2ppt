@@ -120,9 +120,16 @@ server environment and are **never** logged or printed.
   next-call** cost from generous prompt tokens + `maxOutputTokens` (default
   8k in + 8192 out ≈ $0.0143) and reconciles to actual usage after each
   response, so a single expensive call cannot silently overshoot the cap.
+  Failed calls refund unused reserve (flat estimate when usage is unknown).
+  A warning is logged when `max_cost_usd` is below one reserve.
+- Prompt evidence is capped (block count + per-block characters) so a dense
+  page cannot inflate the request past the reserved worst case.
 - After `max_consecutive_failures` consecutive failures, or any auth error,
   the **circuit opens** and remaining pages fall back without waiting on the
   full timeout.
+- Text-regression fallback allows intended OCR header/footer/page_number
+  removals by matching heuristic frames back to plan source ids (`ocr_*` /
+  `native_*`); only non-HF body loss triggers a per-page fallback.
 
 ## Report fields
 

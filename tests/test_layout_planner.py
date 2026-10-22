@@ -472,6 +472,49 @@ class GeminiPlannerMockTests(unittest.TestCase):
         self.assertFalse(budget.try_reserve())
         self.assertEqual(budget.calls, 2)
 
+    def test_commit_failure_refunds_unused_worst_case_reserve(self) -> None:
+        from pdf2ppt.layout_planner.budget import (
+            DEFAULT_ESTIMATED_COST_USD,
+            DEFAULT_WORST_CASE_CALL_COST_USD,
+            LayoutPlannerCallRecord,
+        )
+
+        budget = LayoutPlannerBudget(
+            max_calls=5,
+            max_cost_usd=1.0,
+            worst_case_call_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD,
+        )
+        self.assertTrue(budget.try_reserve())
+        budget.commit_failure(
+            LayoutPlannerCallRecord(
+                model="t",
+                page_number=1,
+                cache_hit=False,
+                success=False,
+                latency_ms=1.0,
+                estimated_cost_usd=0.0,
+                fallback_kind="timeout",
+            )
+        )
+        self.assertAlmostEqual(budget.estimated_cost_usd, DEFAULT_ESTIMATED_COST_USD, places=6)
+
+    def test_blocks_to_evidence_caps_count_and_chars(self) -> None:
+        from pdf2ppt.layout_planner.base import blocks_to_evidence
+
+        blocks = [
+            TextBlock(
+                id=f"b{i}",
+                source="ocr",
+                bbox=(0.0, float(i), 10.0, float(i) + 1.0),
+                text="x" * 500,
+                confidence=0.9,
+            )
+            for i in range(100)
+        ]
+        evidence = blocks_to_evidence(blocks, max_blocks=5, max_chars_per_block=40)
+        self.assertEqual(len(evidence), 5)
+        self.assertLessEqual(len(evidence[0].text), 40)
+
 
 class LayoutPlannerServiceConfigTests(unittest.TestCase):
     def test_unconfigured_returns_none_and_records_skip_reason(self) -> None:
@@ -868,6 +911,139 @@ class AnnotateGroupedBlocksTitlePlaceholderTests(unittest.TestCase):
             model="test",
         )
         reason = planner_text_regression(before, after, plan)
+        self.assertIsNotNone(reason)
+        self.assertIn("dropped", reason or "")
+
+    def test_planner_text_regression_allows_matched_ocr_header_footer(self) -> None:
+        """Heuristic frame ids differ from plan ids; HF removal must still be allowed."""
+
+        from pdf2ppt.layout_planner.apply import planner_text_regression
+        from pdf2ppt.layout_planner.types import LayoutPlan, PlannedBlock
+
+        header_src = TextBlock(
+            id="ocr_1_0",
+            source="ocr",
+            bbox=(40.0, 10.0, 400.0, 30.0),
+            text="ACME Corp | Q3 Review",
+            confidence=0.9,
+            font_size=10.0,
+        )
+        body_src = TextBlock(
+            id="ocr_1_1",
+            source="ocr",
+            bbox=(40.0, 80.0, 500.0, 120.0),
+            text="Sprint Goals",
+            confidence=0.95,
+            font_size=28.0,
+        )
+        # Heuristic frames use layout_* ids — never present in the Gemini plan.
+        header_frame = TextBlock(
+            id="layout_text_1_0",
+            source="ocr",
+            bbox=(40.0, 10.0, 400.0, 30.0),
+            text="ACME Corp | Q3 Review",
+            confidence=0.9,
+            font_size=10.0,
+        )
+        body_frame = TextBlock(
+            id="layout_text_1_1",
+            source="ocr",
+            bbox=(40.0, 80.0, 500.0, 120.0),
+            text="Sprint Goals",
+            confidence=0.95,
+            font_size=28.0,
+        )
+        plan = LayoutPlan(
+            blocks=[
+                PlannedBlock(
+                    id="ocr_1_0",
+                    role="header",
+                    reading_order=0,
+                    font_family_class="sans",
+                    confidence=0.9,
+                ),
+                PlannedBlock(
+                    id="ocr_1_1",
+                    role="title",
+                    reading_order=1,
+                    font_family_class="sans",
+                    confidence=0.95,
+                ),
+            ],
+            groups=[],
+            model="test",
+        )
+        # After annotate: header frame dropped, body kept.
+        reason = planner_text_regression(
+            [header_frame, body_frame],
+            [body_frame],
+            plan,
+            source_blocks=[header_src, body_src],
+        )
+        self.assertIsNone(reason)
+
+    def test_planner_text_regression_still_blocks_body_loss_with_sources(self) -> None:
+        from pdf2ppt.layout_planner.apply import planner_text_regression
+        from pdf2ppt.layout_planner.types import LayoutPlan, PlannedBlock
+
+        title_src = TextBlock(
+            id="native_1_0",
+            source="native",
+            bbox=(80.0, 60.0, 400.0, 100.0),
+            text="Card title",
+            confidence=0.9,
+            font_size=28.0,
+        )
+        body_src = TextBlock(
+            id="native_1_1",
+            source="native",
+            bbox=(80.0, 140.0, 500.0, 200.0),
+            text="Body paragraph that must stay",
+            confidence=0.9,
+            font_size=14.0,
+        )
+        merged = TextBlock(
+            id="layout_text_1_0",
+            source="native",
+            bbox=(80.0, 60.0, 500.0, 200.0),
+            text="Card title\nBody paragraph that must stay",
+            confidence=0.9,
+            font_size=28.0,
+        )
+        dropped = TextBlock(
+            id="layout_text_1_0",
+            source="native",
+            bbox=(80.0, 60.0, 500.0, 200.0),
+            text="Card title",
+            confidence=0.9,
+            font_size=28.0,
+        )
+        plan = LayoutPlan(
+            blocks=[
+                PlannedBlock(
+                    id="native_1_0",
+                    role="title",
+                    reading_order=0,
+                    font_family_class="sans",
+                    confidence=0.95,
+                ),
+                PlannedBlock(
+                    id="native_1_1",
+                    role="body",
+                    reading_order=1,
+                    font_family_class="sans",
+                    confidence=0.9,
+                ),
+            ],
+            groups=[],
+            model="test",
+        )
+        reason = planner_text_regression(
+            [merged],
+            [dropped],
+            plan,
+            source_blocks=[title_src, body_src],
+        )
         self.assertIsNotNone(reason)
         self.assertIn("dropped", reason or "")
 

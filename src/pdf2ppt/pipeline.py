@@ -619,7 +619,10 @@ def analyze_page(
                 apply_fonts=bool(getattr(options, "layout_planner_apply_fonts", False)),
             )
             regression = planner_text_regression(
-                heuristic_blocks, planned_blocks, pending_planner_plan
+                heuristic_blocks,
+                planned_blocks,
+                pending_planner_plan,
+                source_blocks=layout_input_blocks,
             )
             if regression:
                 # Fall back to planner-off frames for this page (keep HF filter off).

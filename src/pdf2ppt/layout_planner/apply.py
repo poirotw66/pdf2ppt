@@ -264,21 +264,35 @@ def planner_text_regression(
     before_blocks: Sequence[TextBlock],
     after_blocks: Sequence[TextBlock],
     plan: LayoutPlan,
+    source_blocks: Sequence[TextBlock] | None = None,
 ) -> str | None:
     """Return a reason if planner annotations dropped non-HF body text; else None.
 
     Intended HF / page_number removals (OCR sources annotated as skippable) are
-    allowed. Any other character-multiset loss is a regression.
+    allowed. Heuristic frames use ids like ``layout_text_1_N`` while the plan
+    annotates ``ocr_*`` / ``native_*`` sources, so matching goes through
+    ``_match_source_blocks`` (same rule as annotate's HF skip).
     """
 
     annotations = {item.id: item for item in plan.blocks}
-    allowed_drop = {
-        _normalize_text_chars(block.text)
-        for block in before_blocks
-        if block.source == "ocr"
-        and (ann := annotations.get(block.id)) is not None
-        and ann.role in SKIPPABLE_ROLES
-    }
+    sources = list(source_blocks or [])
+    allowed_drop: set[str] = set()
+    for block in before_blocks:
+        ann = annotations.get(block.id)
+        if ann is not None:
+            if block.source == "ocr" and ann.role in SKIPPABLE_ROLES:
+                allowed_drop.add(_normalize_text_chars(block.text))
+            continue
+        if not sources:
+            continue
+        matched = _match_source_blocks(block, sources)
+        matched_annotations = [annotations[item.id] for item in matched if item.id in annotations]
+        if (
+            matched_annotations
+            and all(item.role in SKIPPABLE_ROLES for item in matched_annotations)
+            and all(item.source == "ocr" for item in matched)
+        ):
+            allowed_drop.add(_normalize_text_chars(block.text))
     allowed_drop.discard("")
 
     before_chars: list[str] = []

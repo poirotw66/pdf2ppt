@@ -49,20 +49,45 @@ class LayoutPlannerError(RuntimeError):
         self.estimated_cost_usd = estimated_cost_usd
 
 
-def blocks_to_evidence(blocks: list[Any]) -> list[BlockEvidence]:
-    """Convert ``TextBlock``-like objects into compact VLM evidence."""
+# Bound prompt size so one page cannot blow past the USD worst-case reserve.
+DEFAULT_MAX_EVIDENCE_BLOCKS = 80
+DEFAULT_MAX_EVIDENCE_CHARS_PER_BLOCK = 240
+
+
+def blocks_to_evidence(
+    blocks: list[Any],
+    *,
+    max_blocks: int = DEFAULT_MAX_EVIDENCE_BLOCKS,
+    max_chars_per_block: int = DEFAULT_MAX_EVIDENCE_CHARS_PER_BLOCK,
+) -> list[BlockEvidence]:
+    """Convert ``TextBlock``-like objects into compact VLM evidence.
+
+    Caps block count and per-block text length so a dense page cannot inflate
+    the prompt beyond the budgeted worst-case token reserve.
+    """
 
     evidence: list[BlockEvidence] = []
-    for block in blocks:
+    limit = max(1, int(max_blocks))
+    char_limit = max(16, int(max_chars_per_block))
+    for block in blocks[:limit]:
+        text = str(block.text)
+        if len(text) > char_limit:
+            text = text[: char_limit - 1] + "…"
         evidence.append(
             BlockEvidence(
                 id=str(block.id),
                 bbox=tuple(float(value) for value in block.bbox[:4]),  # type: ignore[arg-type]
-                text=str(block.text),
+                text=text,
                 source=str(getattr(block, "source", "ocr") or "ocr"),
             )
         )
     return evidence
 
 
-__all__ = ["LayoutPlanner", "LayoutPlannerError", "blocks_to_evidence"]
+__all__ = [
+    "DEFAULT_MAX_EVIDENCE_BLOCKS",
+    "DEFAULT_MAX_EVIDENCE_CHARS_PER_BLOCK",
+    "LayoutPlanner",
+    "LayoutPlannerError",
+    "blocks_to_evidence",
+]
