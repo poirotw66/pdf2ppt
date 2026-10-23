@@ -142,6 +142,22 @@ npm run dev
 | `--refine` 被略過 | 安裝 LibreOffice Impress（`soffice` 需在 PATH） |
 | fastapi／pydantic 衝突 | 使用乾淨 venv 並安裝 `[server]` |
 
+### 轉換前預覽（Preview before convert）
+
+在 Review UI 上傳 PDF 後切換到 **Preview before convert**：
+
+1. 按 **Build Preview** — 執行分析並產生 SlideIR（預設關閉 layout planner，不需 Gemini API），以原始頁面圖疊加文字區塊（角色／閱讀順序）、表格／儲存格、圖片與向量形狀。
+2. 可切換疊加層、排除個別元素、更改文字角色（`title`／`body`／`header`／`footer`／`page_number`），或將整頁標為 **raster fallback**。
+3. 按 **Convert** — 先儲存編輯，再以 `from-ir` 產出 PPTX，預覽所見即下載所得。
+
+相關 API：`POST /jobs/{id}/preview`、`GET /jobs/{id}/preview`、`PUT /jobs/{id}/preview-edits`、`POST /jobs/{id}/from-ir`。未使用此流程時，預設 CLI 輸出行為不變。
+
+**限制說明**
+
+- **排除 vs 烘進背景：** `overlay`／`full-page` 頁的照片與許多形狀已畫進背景圖。排除 IR 的 shape／image 只會拿掉原生物件，背景像素仍在。若要整頁點陣圖，請用 **raster fallback**。這類頁面的預覽會帶 `baked_background: true`。
+- **重新分析會清空編輯：** 元素 id 依位置產生（`layout_text_1_N`）。再次 Build Preview 會刪除已存的 `preview_edits.json`，避免 OCR 框變更後 Convert 因未知 id 失敗。
+- **旋轉頁（既有問題）：** 旋轉 90／180／270° 的頁，SlideIR bbox 可能與預覽圖對不齊（與 `main` 上 CLI PPTX 相同）。短期可對這類頁使用 raster fallback。
+
 ## SlideIR
 
 SlideIR 是 pdf2ppt 的**版本化 JSON 中介表示**（schema `1.0`）。Agent 可把它當成確定性的證據層：對 PDF 只分析一次（`emit-ir`）、編輯結構欄位，再渲染（`from-ir`），不必重跑整條 PDF pipeline。Schema 檔：`src/pdf2ppt/schemas/slideir.schema.json`；序列化／反序列化：`pdf2ppt.ir_io`。完整說明見 [`docs/slideir.md`](docs/slideir.md)。
@@ -205,6 +221,10 @@ HTTP（Review UI 後端，預設 `http://127.0.0.1:8008`）：
 | 端點 | 行為 |
 | --- | --- |
 | `POST /jobs/{id}/emit-ir` | 分析 → 只寫 SlideIR |
+| `POST /jobs/{id}/preview` | 分析 → SlideIR（強制關閉 planner）＋疊加預覽 JSON |
+| `GET /jobs/{id}/preview` | 依現有 SlideIR＋已存編輯回傳疊加預覽 |
+| `PUT /jobs/{id}/preview-edits` | 儲存排除／角色／raster-fallback 編輯 |
+| `POST /jobs/{id}/from-ir` | 套用編輯後，將 job 的 SlideIR 渲染成 PPTX |
 | `GET /jobs/{id}/slideir.json` | 下載 IR JSON |
 | `GET /jobs/{id}/slideir-assets.zip` | 下載資產目錄 zip |
 | `POST /from-ir` | multipart：`ir_file`（必填）＋可選 `assets_zip` → 回傳 PPTX |
