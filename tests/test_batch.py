@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import csv
 import json
+import random
 import shutil
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -19,6 +21,7 @@ from pdf2ppt.batch import (
     EXIT_USAGE,
     discover_pdfs,
     format_summary_markdown,
+    is_valid_pptx,
     plan_batch_outputs,
     run_batch,
 )
@@ -38,6 +41,12 @@ def _quality() -> QualityScore:
     )
 
 
+def _write_minimal_pptx(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+
+
 def _fake_ok_report(input_path: Path, output_path: Path) -> ConversionReport:
     page = PageResult(
         page_number=1,
@@ -49,8 +58,7 @@ def _fake_ok_report(input_path: Path, output_path: Path) -> ConversionReport:
         quality_score=_quality(),
         fallback_reason=None,
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(b"PK\x03\x04fake-pptx")
+    _write_minimal_pptx(output_path)
     return ConversionReport(
         input_path=str(input_path),
         output_path=str(output_path),
@@ -106,6 +114,51 @@ class BatchDiscoveryTests(unittest.TestCase):
             )
             outputs = [item.output_path.name for item in planned]
             self.assertEqual(outputs, ["deck.pptx", "deck__2.pptx"])
+
+    def test_collision_plan_stable_under_shuffled_discovery_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lower = root / "a.pdf"
+            upper = root / "a.PDF"
+            lower.write_bytes(b"%PDF-lower")
+            upper.write_bytes(b"%PDF-upper")
+            out = root / "out"
+            plans: set[tuple[str, ...]] = set()
+            rng = random.Random(0)
+            for _ in range(30):
+                order = [lower, upper]
+                rng.shuffle(order)
+                # Mimic discover_pdfs sorting so plan input is always stable.
+                ordered = sorted(
+                    order,
+                    key=lambda item: (
+                        str(item.relative_to(root)).casefold(),
+                        str(item.relative_to(root)),
+                    ),
+                )
+                planned = plan_batch_outputs(
+                    ordered,
+                    input_dir=root,
+                    output_dir=out,
+                    recursive=False,
+                )
+                plans.add(tuple(f"{item.relative_key}->{item.output_path.name}" for item in planned))
+            self.assertEqual(len(plans), 1)
+            only = next(iter(plans))
+            self.assertEqual(only, ("a.PDF->a.pptx", "a.pdf->a__2.pptx"))
+
+    def test_recursive_skips_pdfs_inside_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            nested = root / "docs"
+            nested.mkdir()
+            (nested / "keep.pdf").write_bytes(b"%PDF")
+            out = root / "out"
+            out.mkdir()
+            (out / "stale.pdf").write_bytes(b"%PDF")
+            found = discover_pdfs(root, recursive=True, exclude_dirs=[out])
+            keys = [path.relative_to(root).as_posix() for path in found]
+            self.assertEqual(keys, ["docs/keep.pdf"])
 
 
 @unittest.skipUnless((FIXTURES_DIR / "solid_background.pdf").exists(), "fixture missing")
@@ -222,7 +275,8 @@ class BatchRunTests(unittest.TestCase):
                 "totals": {},
             }
             (output_dir / "summary.json").write_text(json.dumps(prior), encoding="utf-8")
-            (output_dir / "two.pptx").write_bytes(b"PK existing")
+            for name in ("one.pptx", "two.pptx"):
+                _write_minimal_pptx(output_dir / name)
 
             convert_calls: list[str] = []
 
@@ -247,8 +301,204 @@ class BatchRunTests(unittest.TestCase):
             self.assertEqual(code, EXIT_SUCCESS)
             self.assertEqual(convert_calls, [])
             statuses = {row.file: row.status for row in summary.results}
-            self.assertEqual(statuses["one.pdf"], "skipped")
-            self.assertEqual(statuses["two.pdf"], "skipped")
+            self.assertEqual(statuses["one.pdf"], "ok")  # earlier ok row (with metrics) is retained
+            self.assertEqual(summary.results[0].pages, 1)
+            self.assertEqual(statuses["two.pdf"], "skipped")  # no prior row to retain
+
+            # Second resume (+ skip-existing) must keep the same ok count / pages.
+            summary2, code2 = run_batch(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                options_template=template,
+                convert_fn=convert_fn,
+                resume=True,
+                skip_existing=True,
+                quiet=True,
+            )
+            self.assertEqual(code2, EXIT_SUCCESS)
+            self.assertEqual(convert_calls, [])
+            self.assertEqual(summary2.totals["ok"], 1)
+            self.assertEqual(summary2.totals["pages"], 1)
+
+    def test_double_resume_retains_ok_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "in"
+            output_dir = root / "out"
+            input_dir.mkdir()
+            for name in ("a.pdf", "b.pdf"):
+                shutil.copy(FIXTURES_DIR / "solid_background.pdf", input_dir / name)
+
+            convert_calls: list[str] = []
+
+            def convert_fn(options: ConversionOptions, **kwargs: object) -> ConversionReport:
+                convert_calls.append(options.input_path.name)
+                return _fake_ok_report(options.input_path, options.output_path)
+
+            template = ConversionOptions(
+                input_path=input_dir,
+                output_path=output_dir / "x.pptx",
+                report_path=output_dir / "x.report.json",
+            )
+            first, code = run_batch(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                options_template=template,
+                convert_fn=convert_fn,
+                quiet=True,
+            )
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(first.totals["ok"], 2)
+            self.assertEqual(first.totals["pages"], 2)
+            self.assertEqual(sorted(convert_calls), ["a.pdf", "b.pdf"])
+            convert_calls.clear()
+
+            for _ in range(2):
+                again, code = run_batch(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    options_template=template,
+                    convert_fn=convert_fn,
+                    resume=True,
+                    quiet=True,
+                )
+                self.assertEqual(code, EXIT_SUCCESS)
+                self.assertEqual(convert_calls, [])
+                self.assertEqual(again.totals["ok"], 2)
+                self.assertEqual(again.totals["pages"], 2)
+                self.assertEqual(again.results[0].pages, 1)
+                self.assertEqual(again.results[0].status, "ok")
+
+    def test_resume_reconverts_when_pptx_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "in"
+            output_dir = root / "out"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            pdf = input_dir / "gone.pdf"
+            shutil.copy(FIXTURES_DIR / "solid_background.pdf", pdf)
+            prior = {
+                "input_dir": str(input_dir),
+                "output_dir": str(output_dir),
+                "results": [
+                    {
+                        "file": "gone.pdf",
+                        "output": str(output_dir / "gone.pptx"),
+                        "pages": 1,
+                        "status": "ok",
+                        "seconds": 0.2,
+                        "ocr_used": False,
+                        "ocr_pages": 0,
+                        "raster_fallback_pages": 0,
+                        "warnings_count": 0,
+                        "planner_cost_usd": None,
+                        "quality": {"score": 0.9},
+                        "error": None,
+                        "ssim_mean": None,
+                    }
+                ],
+                "totals": {},
+            }
+            (output_dir / "summary.json").write_text(json.dumps(prior), encoding="utf-8")
+            # pptx intentionally missing → resume must reconvert
+            convert_calls: list[str] = []
+
+            def convert_fn(options: ConversionOptions, **kwargs: object) -> ConversionReport:
+                convert_calls.append(Path(options.output_path).name)
+                return _fake_ok_report(options.input_path, options.output_path)
+
+            template = ConversionOptions(
+                input_path=input_dir,
+                output_path=output_dir / "x.pptx",
+                report_path=output_dir / "x.report.json",
+            )
+            summary, code = run_batch(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                options_template=template,
+                convert_fn=convert_fn,
+                resume=True,
+                quiet=True,
+            )
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(convert_calls, ["gone.pptx.partial"])
+            self.assertTrue(is_valid_pptx(output_dir / "gone.pptx"))
+            self.assertEqual(summary.results[0].status, "ok")
+
+    def test_skip_existing_rejects_truncated_pptx(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "in"
+            output_dir = root / "out"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            shutil.copy(FIXTURES_DIR / "solid_background.pdf", input_dir / "a.pdf")
+            (output_dir / "a.pptx").write_bytes(b"PK\x03\x04truncated-not-a-zip")
+            convert_calls: list[str] = []
+
+            def convert_fn(options: ConversionOptions, **kwargs: object) -> ConversionReport:
+                convert_calls.append(options.input_path.name)
+                return _fake_ok_report(options.input_path, options.output_path)
+
+            template = ConversionOptions(
+                input_path=input_dir,
+                output_path=output_dir / "x.pptx",
+                report_path=output_dir / "x.report.json",
+            )
+            summary, code = run_batch(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                options_template=template,
+                convert_fn=convert_fn,
+                skip_existing=True,
+                quiet=True,
+            )
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(convert_calls, ["a.pdf"])
+            self.assertEqual(summary.results[0].status, "ok")
+            self.assertTrue(is_valid_pptx(output_dir / "a.pptx"))
+
+    def test_empty_folder_warns_and_exits_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "in"
+            output_dir = root / "out"
+            input_dir.mkdir()
+            template = ConversionOptions(
+                input_path=input_dir,
+                output_path=output_dir / "x.pptx",
+                report_path=output_dir / "x.report.json",
+            )
+            with self.assertLogs("pdf2ppt.batch", level="WARNING") as logs:
+                summary, code = run_batch(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    options_template=template,
+                    quiet=True,
+                )
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(summary.totals["files"], 0)
+            self.assertTrue(any("no PDF files found" in line for line in logs.output))
+            self.assertTrue((output_dir / "summary.json").is_file())
+
+    def test_missing_input_dir_does_not_create_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_dir = root / "out"
+            template = ConversionOptions(
+                input_path=root / "missing",
+                output_path=output_dir / "x.pptx",
+                report_path=output_dir / "x.report.json",
+            )
+            with self.assertRaises(Exception):
+                run_batch(
+                    input_dir=root / "missing",
+                    output_dir=output_dir,
+                    options_template=template,
+                    quiet=True,
+                )
+            self.assertFalse(output_dir.exists())
 
     def test_summary_content_and_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -123,8 +123,9 @@ pdf2ppt batch ./pdfs -o ./pptx_out
 pdf2ppt batch ./pdfs -o ./pptx_out --recursive --resume --skip-existing
 ```
 
-批次模式只編排既有單檔 pipeline（單一 PDF 的輸出位元組與單檔模式相同）。
-預設 `--jobs 1`（循序）；平行行程為選用，搭配 OCR 時記憶體負擔很大。
+批次模式只編排既有單檔 pipeline。單一 PDF 的輸出與單檔模式位元組一致，但若同一行程內連續轉多個
+OCR 檔，PaddleOCR 暖機可能造成 OCR 文字色約 ±2/255 的差異（在 `main` 上連續呼叫
+`convert_pdf` 也會出現）。預設 `--jobs 1`（循序）；平行行程為選用，搭配 OCR 時記憶體負擔很大。
 探索規則、結束碼與摘要欄位見 [`docs/cli-reference.md`](docs/cli-reference.md)。
 
 ### Review UI（選用）

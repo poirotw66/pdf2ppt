@@ -892,6 +892,9 @@ def _main_batch(argv: list[str]) -> int:
         if not args.quiet:
             print(format_summary_markdown(summary))
         return exit_code
+    except KeyboardInterrupt:
+        print("interrupted: partial summary written to the output directory", file=sys.stderr)
+        return 130
     except InputValidationError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_USAGE

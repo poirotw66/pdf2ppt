@@ -130,9 +130,13 @@ pdf2ppt batch ./pdfs -o ./pptx_out
 pdf2ppt batch ./pdfs -o ./pptx_out --recursive --resume --skip-existing
 ```
 
-Batch mode reuses the single-file pipeline (output for one PDF stays byte-identical).
-Default `--jobs 1` (sequential); parallel processes are optional and memory-heavy with OCR.
-See [`docs/cli-reference.md`](docs/cli-reference.md) for discovery rules, exit codes, and summary columns.
+Batch mode reuses the single-file pipeline. Per-PDF output matches single-file conversion
+byte-for-byte aside from a known PaddleOCR warm-up drift of about ±2/255 on OCR text
+colour when several OCR-heavy files convert in one process (the same drift appears on
+`main` when calling `convert_pdf` back-to-back). Default `--jobs 1` (sequential);
+parallel processes are optional and memory-heavy with OCR. See
+[`docs/cli-reference.md`](docs/cli-reference.md) for discovery rules, exit codes, and
+summary columns.
 
 ### Review UI (optional)
 

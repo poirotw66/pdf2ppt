@@ -9,7 +9,9 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 import time
+import zipfile
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
@@ -89,17 +91,22 @@ def discover_pdfs(
     input_dir: Path,
     *,
     recursive: bool = False,
+    exclude_dirs: Sequence[Path] | None = None,
 ) -> list[Path]:
     """Return PDF paths under ``input_dir`` in stable sorted order.
 
     Non-recursive by default. Matching is case-insensitive on the ``.pdf``
     suffix. Hidden files (name starts with ``.``) are skipped. When recursive,
-    any path segment that starts with ``.`` is skipped.
+    any path segment that starts with ``.`` is skipped. Paths under any
+    ``exclude_dirs`` root (typically the batch output dir) are skipped so a
+    recursive scan cannot pick up PDFs already sitting in the output tree.
     """
     if not input_dir.exists():
         raise InputValidationError(f"Input directory does not exist: {input_dir}")
     if not input_dir.is_dir():
         raise InputValidationError(f"Input path is not a directory: {input_dir}")
+
+    excluded = tuple(path.resolve() for path in (exclude_dirs or ()))
 
     found: list[Path] = []
     if recursive:
@@ -114,6 +121,8 @@ def discover_pdfs(
                 continue
             if any(part.startswith(".") for part in relative.parts):
                 continue
+            if _is_under_excluded(path, excluded):
+                continue
             found.append(path)
     else:
         for path in input_dir.iterdir():
@@ -124,7 +133,22 @@ def discover_pdfs(
             if _is_pdf_filename(path.name):
                 found.append(path)
 
-    return sorted(found, key=lambda item: str(item.relative_to(input_dir)).casefold())
+    # Tie-break on the exact path so ``a.pdf`` / ``a.PDF`` order never depends on iterdir order.
+    return sorted(
+        found,
+        key=lambda item: (str(item.relative_to(input_dir)).casefold(), str(item.relative_to(input_dir))),
+    )
+
+
+def _is_under_excluded(path: Path, excluded: Sequence[Path]) -> bool:
+    resolved = path.resolve()
+    for root in excluded:
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def _is_pdf_filename(name: str) -> bool:
@@ -144,7 +168,7 @@ def plan_batch_outputs(
     inputs would write the same PPTX (e.g. ``a.pdf`` and ``a.PDF``), later files
     get a ``__N`` stem suffix (``a__2.pptx``, ``a__3.pptx``, …).
     """
-    used: set[Path] = set()
+    used: set[str] = set()  # casefolded posix paths: safe on case-insensitive filesystems too
     planned: list[DiscoveredPdf] = []
     for pdf in pdfs:
         relative = pdf.relative_to(input_dir)
@@ -165,9 +189,9 @@ def plan_batch_outputs(
     return planned
 
 
-def _allocate_unique_path(desired: Path, used: set[Path]) -> Path:
-    if desired not in used:
-        used.add(desired)
+def _allocate_unique_path(desired: Path, used: set[str]) -> Path:
+    if desired.as_posix().casefold() not in used:
+        used.add(desired.as_posix().casefold())
         return desired
     stem = desired.stem
     suffix = desired.suffix
@@ -175,10 +199,38 @@ def _allocate_unique_path(desired: Path, used: set[Path]) -> Path:
     index = 2
     while True:
         candidate = parent / f"{stem}__{index}{suffix}"
-        if candidate not in used:
-            used.add(candidate)
+        if candidate.as_posix().casefold() not in used:
+            used.add(candidate.as_posix().casefold())
             return candidate
         index += 1
+
+
+def is_valid_pptx(path: Path) -> bool:
+    """True when ``path`` is a complete OOXML zip (a half-written pptx has no central directory)."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return "[Content_Types].xml" in archive.namelist() and archive.testzip() is None
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def load_previous_rows(summary_path: Path) -> dict[str, BatchFileResult]:
+    """Rows of an existing summary.json keyed by file (used to retain earlier ok results)."""
+    if not summary_path.is_file():
+        return {}
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    names = set(BatchFileResult.__dataclass_fields__)
+    rows: dict[str, BatchFileResult] = {}
+    for item in payload.get("results", []) if isinstance(payload, dict) else []:
+        if isinstance(item, dict) and isinstance(item.get("file"), str):
+            try:
+                rows[item["file"]] = BatchFileResult(**{k: v for k, v in item.items() if k in names})
+            except TypeError:
+                continue
+    return rows
 
 
 def load_resume_ok_files(summary_path: Path) -> set[str]:
@@ -305,21 +357,34 @@ def convert_one_planned(
     measure_quality: bool = False,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> BatchFileResult:
-    """Run the existing pipeline for one PDF and map the report into a batch row."""
+    """Run the existing pipeline for one PDF and map the report into a batch row.
+
+    PPTX is written to a sibling ``*.pptx.partial`` path then atomically renamed
+    so an interrupt never leaves a truncated file that ``--skip-existing`` would
+    treat as finished.
+    """
     started = time.perf_counter()
-    report_path = item.output_path.with_suffix(".report.json")
+    final_pptx = item.output_path
+    partial_pptx = final_pptx.with_name(final_pptx.name + ".partial")
+    report_path = final_pptx.with_suffix(".report.json")
     try:
-        options = options_factory(item.input_path, item.output_path, report_path)
+        final_pptx.parent.mkdir(parents=True, exist_ok=True)
+        if partial_pptx.exists():
+            partial_pptx.unlink()
+        options = options_factory(item.input_path, partial_pptx, report_path)
         report = convert_fn(options, progress_callback=progress_callback)
+        if not is_valid_pptx(partial_pptx):
+            raise RuntimeError(f"conversion produced an invalid pptx: {partial_pptx}")
+        os.replace(partial_pptx, final_pptx)
         metrics = metrics_from_report(report)
         ssim_mean = maybe_measure_ssim(
             pdf_path=item.input_path,
-            pptx_path=item.output_path,
+            pptx_path=final_pptx,
             measure_quality=measure_quality,
         )
         return BatchFileResult(
             file=item.relative_key,
-            output=_relative_or_str(item.output_path),
+            output=_relative_or_str(final_pptx),
             pages=int(metrics["pages"]),
             status="ok",
             seconds=round(time.perf_counter() - started, 3),
@@ -332,9 +397,14 @@ def convert_one_planned(
             ssim_mean=None if ssim_mean is None else round(ssim_mean, 4),
         )
     except Exception as error:  # noqa: BLE001 — isolate per-file failures
+        if partial_pptx.exists():
+            try:
+                partial_pptx.unlink()
+            except OSError:
+                pass
         return BatchFileResult(
             file=item.relative_key,
-            output=_relative_or_str(item.output_path),
+            output=_relative_or_str(final_pptx),
             pages=None,
             status="failed",
             seconds=round(time.perf_counter() - started, 3),
@@ -429,69 +499,84 @@ def run_batch(
 
     input_dir = input_dir.resolve()
     output_dir = output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    pdfs = discover_pdfs(input_dir, recursive=recursive)
+    # Validate the input dir (and discover) before creating the output tree.
+    exclude = (output_dir,) if recursive else ()
+    pdfs = discover_pdfs(input_dir, recursive=recursive, exclude_dirs=exclude)
     planned = plan_batch_outputs(
         pdfs,
         input_dir=input_dir,
         output_dir=output_dir,
         recursive=recursive,
     )
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     summary_json_path = output_dir / SUMMARY_JSON_NAME
-    resume_ok = load_resume_ok_files(summary_json_path) if resume else set()
+    previous_rows = load_previous_rows(summary_json_path)
+    resume_ok = {key for key, row in previous_rows.items() if row.status == "ok"} if resume else set()
+
+    if not planned:
+        message = f"warning: no PDF files found in {input_dir}"
+        logger.warning(message)
+        _emit_progress(progress_stream, quiet, message)
+        empty = BatchSummary(
+            input_dir=str(input_dir),
+            output_dir=str(output_dir),
+            results=[],
+            totals=compute_totals([]),
+        )
+        write_batch_summaries(empty, output_dir)
+        return empty, EXIT_SUCCESS
 
     results: list[BatchFileResult] = []
     to_convert: list[DiscoveredPdf] = []
     for item in planned:
-        if resume and item.relative_key in resume_ok:
-            results.append(
-                BatchFileResult(
-                    file=item.relative_key,
-                    output=_relative_or_str(item.output_path),
-                    pages=None,
-                    status="skipped",
-                    seconds=0.0,
-                    ocr_used=False,
-                    ocr_pages=0,
-                    raster_fallback_pages=0,
-                    warnings_count=0,
-                    planner_cost_usd=None,
-                    quality={},
-                    error="resume: already ok in summary.json",
-                )
-            )
-            _emit_progress(
-                progress_stream,
-                quiet,
-                f"skip (resume) {item.relative_key}",
-            )
+        if resume and item.relative_key in resume_ok and is_valid_pptx(item.output_path):
+            # Keep the earlier ok row (pages/OCR/quality metrics) instead of downgrading it to "skipped".
+            results.append(previous_rows[item.relative_key])
+            _emit_progress(progress_stream, quiet, f"skip (resume) {item.relative_key}")
             continue
-        if skip_existing and item.output_path.is_file():
-            results.append(
-                BatchFileResult(
-                    file=item.relative_key,
-                    output=_relative_or_str(item.output_path),
-                    pages=None,
-                    status="skipped",
-                    seconds=0.0,
-                    ocr_used=False,
-                    ocr_pages=0,
-                    raster_fallback_pages=0,
-                    warnings_count=0,
-                    planner_cost_usd=None,
-                    quality={},
-                    error="skip-existing: output pptx present",
+        if skip_existing and is_valid_pptx(item.output_path):
+            prior = previous_rows.get(item.relative_key)
+            if prior is not None and prior.status == "ok":
+                results.append(prior)
+            else:
+                results.append(
+                    BatchFileResult(
+                        file=item.relative_key,
+                        output=_relative_or_str(item.output_path),
+                        pages=None,
+                        status="skipped",
+                        seconds=0.0,
+                        ocr_used=False,
+                        ocr_pages=0,
+                        raster_fallback_pages=0,
+                        warnings_count=0,
+                        planner_cost_usd=None,
+                        quality={},
+                        error="skip-existing: output pptx present",
+                    )
                 )
-            )
-            _emit_progress(
-                progress_stream,
-                quiet,
-                f"skip (existing) {item.relative_key}",
-            )
+            _emit_progress(progress_stream, quiet, f"skip (existing) {item.relative_key}")
             continue
         to_convert.append(item)
+
+    order = {item.relative_key: index for index, item in enumerate(planned)}
+    planned_keys = set(order)
+
+    def flush_summary() -> None:
+        """Atomically (re)write summary.* so an interrupted run still leaves a valid partial summary."""
+        done = {row.file for row in results}
+        merged = list(results) + [row for key, row in previous_rows.items() if key in planned_keys and key not in done]
+        merged.sort(key=lambda row: order.get(row.file, 10**9))
+        write_batch_summaries(
+            BatchSummary(
+                input_dir=str(input_dir),
+                output_dir=str(output_dir),
+                results=merged,
+                totals=compute_totals(merged),
+            ),
+            output_dir,
+        )
 
     def options_factory(input_path: Path, output_path: Path, report_path: Path) -> ConversionOptions:
         kwargs = conversion_options_kwargs(options_template)
@@ -513,86 +598,96 @@ def run_batch(
     total = len(planned)
     completed_base = len(results)
 
-    if jobs == 1 or len(to_convert) <= 1:
-        for index, item in enumerate(to_convert, start=1):
-            _emit_progress(
-                progress_stream,
-                quiet,
-                f"[{completed_base + index}/{total}] converting {item.relative_key} ...",
-            )
-            result = convert_one_planned(
-                item,
-                options_factory=options_factory,
-                convert_fn=convert_fn,
-                measure_quality=measure_quality,
-            )
-            results.append(result)
-            _emit_progress(
-                progress_stream,
-                quiet,
-                _format_result_line(result),
-            )
-            if result.status == "failed":
-                failed = True
-                if fail_fast:
-                    break
-    else:
-        options_kwargs = conversion_options_kwargs(options_template)
-        futures = {}
-        with ProcessPoolExecutor(max_workers=jobs) as executor:
-            for item in to_convert:
-                payload = {
-                    "input_path": str(item.input_path),
-                    "relative_key": item.relative_key,
-                    "output_path": str(item.output_path),
-                    "options_kwargs": options_kwargs,
-                    "measure_quality": measure_quality,
-                }
-                futures[executor.submit(_worker_convert, payload)] = item
-            done_count = 0
-            for future in as_completed(futures):
-                item = futures[future]
-                done_count += 1
-                try:
-                    result = future.result()
-                except Exception as error:  # noqa: BLE001
-                    result = BatchFileResult(
-                        file=item.relative_key,
-                        output=_relative_or_str(item.output_path),
-                        pages=None,
-                        status="failed",
-                        seconds=0.0,
-                        ocr_used=False,
-                        ocr_pages=0,
-                        raster_fallback_pages=0,
-                        warnings_count=0,
-                        planner_cost_usd=None,
-                        quality={},
-                        error=str(error),
-                    )
-                results.append(result)
+    try:
+        if jobs == 1 or len(to_convert) <= 1:
+            for index, item in enumerate(to_convert, start=1):
                 _emit_progress(
                     progress_stream,
                     quiet,
-                    f"[{completed_base + done_count}/{total}] {_format_result_line(result)}",
+                    f"[{completed_base + index}/{total}] converting {item.relative_key} ...",
+                )
+                result = convert_one_planned(
+                    item,
+                    options_factory=options_factory,
+                    convert_fn=convert_fn,
+                    measure_quality=measure_quality,
+                )
+                results.append(result)
+                flush_summary()
+                _emit_progress(
+                    progress_stream,
+                    quiet,
+                    _format_result_line(result),
                 )
                 if result.status == "failed":
                     failed = True
                     if fail_fast:
-                        for pending in futures:
-                            pending.cancel()
                         break
+        else:
+            options_kwargs = conversion_options_kwargs(options_template)
+            futures = {}
+            with ProcessPoolExecutor(max_workers=jobs) as executor:
+                for item in to_convert:
+                    payload = {
+                        "input_path": str(item.input_path),
+                        "relative_key": item.relative_key,
+                        "output_path": str(item.output_path),
+                        "options_kwargs": options_kwargs,
+                        "measure_quality": measure_quality,
+                    }
+                    futures[executor.submit(_worker_convert, payload)] = item
+                done_count = 0
+                for future in as_completed(futures):
+                    item = futures[future]
+                    done_count += 1
+                    try:
+                        result = future.result()
+                    except Exception as error:  # noqa: BLE001
+                        result = BatchFileResult(
+                            file=item.relative_key,
+                            output=_relative_or_str(item.output_path),
+                            pages=None,
+                            status="failed",
+                            seconds=0.0,
+                            ocr_used=False,
+                            ocr_pages=0,
+                            raster_fallback_pages=0,
+                            warnings_count=0,
+                            planner_cost_usd=None,
+                            quality={},
+                            error=str(error),
+                        )
+                    results.append(result)
+                    flush_summary()
+                    _emit_progress(
+                        progress_stream,
+                        quiet,
+                        f"[{completed_base + done_count}/{total}] {_format_result_line(result)}",
+                    )
+                    if result.status == "failed":
+                        failed = True
+                        if fail_fast:
+                            for pending in futures:
+                                pending.cancel()
+                            break
 
-    # Preserve discovery order in the summary.
-    order = {item.relative_key: index for index, item in enumerate(planned)}
+    except BaseException:
+        flush_summary()
+        raise
+
+    # Preserve discovery order; merge any prior rows for planned files not touched yet
+    # (e.g. --fail-fast left later files unprocessed).
     results.sort(key=lambda row: order.get(row.file, 10**9))
-
-    totals = compute_totals(results)
+    done = {row.file for row in results}
+    merged = list(results) + [
+        row for key, row in previous_rows.items() if key in planned_keys and key not in done
+    ]
+    merged.sort(key=lambda row: order.get(row.file, 10**9))
     summary = BatchSummary(
         input_dir=str(input_dir),
         output_dir=str(output_dir),
-        results=results,
-        totals=totals,
+        results=merged,
+        totals=compute_totals(merged),
     )
     write_batch_summaries(summary, output_dir)
     exit_code = EXIT_PARTIAL_FAILURE if failed else EXIT_SUCCESS
@@ -642,13 +737,20 @@ def write_batch_summaries(summary: BatchSummary, output_dir: Path) -> None:
     """Write summary.json, summary.csv, and summary.md into ``output_dir``."""
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / SUMMARY_JSON_NAME
-    json_path.write_text(
+    tmp_json = json_path.with_name(json_path.name + ".tmp")
+    tmp_json.write_text(
         json.dumps(summary.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    _write_summary_csv(summary, output_dir / SUMMARY_CSV_NAME)
-    md = format_summary_markdown(summary)
-    (output_dir / SUMMARY_MD_NAME).write_text(md + "\n", encoding="utf-8")
+    csv_path = output_dir / SUMMARY_CSV_NAME
+    tmp_csv = csv_path.with_name(csv_path.name + ".tmp")
+    _write_summary_csv(summary, tmp_csv)
+    md_path = output_dir / SUMMARY_MD_NAME
+    tmp_md = md_path.with_name(md_path.name + ".tmp")
+    tmp_md.write_text(format_summary_markdown(summary) + "\n", encoding="utf-8")
+    os.replace(tmp_csv, csv_path)
+    os.replace(tmp_md, md_path)
+    os.replace(tmp_json, json_path)
 
 
 def _write_summary_csv(summary: BatchSummary, path: Path) -> None:
