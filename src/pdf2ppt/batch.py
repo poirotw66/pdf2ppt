@@ -14,7 +14,7 @@ import time
 import zipfile
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
@@ -371,11 +371,17 @@ def convert_one_planned(
         final_pptx.parent.mkdir(parents=True, exist_ok=True)
         if partial_pptx.exists():
             partial_pptx.unlink()
-        options = options_factory(item.input_path, partial_pptx, report_path)
+        # Build options against the FINAL path (so derived names such as the default
+        # ``<stem>.refine.json`` match single-file mode), then only redirect the pptx write.
+        options = replace(
+            options_factory(item.input_path, final_pptx, report_path),
+            output_path=partial_pptx,
+        )
         report = convert_fn(options, progress_callback=progress_callback)
         if not is_valid_pptx(partial_pptx):
             raise RuntimeError(f"conversion produced an invalid pptx: {partial_pptx}")
         os.replace(partial_pptx, final_pptx)
+        _point_report_at_final(report_path, partial_pptx, final_pptx)
         metrics = metrics_from_report(report)
         ssim_mean = maybe_measure_ssim(
             pdf_path=item.input_path,
@@ -396,12 +402,14 @@ def convert_one_planned(
             quality=dict(metrics["quality"]),
             ssim_mean=None if ssim_mean is None else round(ssim_mean, 4),
         )
-    except Exception as error:  # noqa: BLE001 — isolate per-file failures
+    except BaseException as error:  # noqa: BLE001 — isolate per-file failures; always drop the partial
         if partial_pptx.exists():
             try:
                 partial_pptx.unlink()
             except OSError:
                 pass
+        if not isinstance(error, Exception):
+            raise
         return BatchFileResult(
             file=item.relative_key,
             output=_relative_or_str(final_pptx),
@@ -416,6 +424,17 @@ def convert_one_planned(
             quality={},
             error=str(error),
         )
+
+
+def _point_report_at_final(report_path: Path, partial: Path, final: Path) -> None:
+    """The pipeline records the path it wrote; rewrite ``*.pptx.partial`` to the final name."""
+    try:
+        text = report_path.read_text(encoding="utf-8")
+        old, new = json.dumps(str(partial))[1:-1], json.dumps(str(final))[1:-1]
+        if old in text:
+            report_path.write_text(text.replace(old, new), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _relative_or_str(path: Path) -> str:

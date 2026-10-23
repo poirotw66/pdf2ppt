@@ -544,6 +544,86 @@ class BatchRunTests(unittest.TestCase):
             self.assertIn("| deck.pdf |", md)
             self.assertIn("**Totals:**", md)
 
+    def test_report_json_output_path_is_final_pptx(self) -> None:
+        """N1: report.json must record the final pptx path, not ``*.pptx.partial``."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "in"
+            output_dir = root / "out"
+            input_dir.mkdir()
+            shutil.copy(FIXTURES_DIR / "solid_background.pdf", input_dir / "table.pdf")
+            seen_output: list[Path] = []
+
+            def convert_fn(options: ConversionOptions, **kwargs: object) -> ConversionReport:
+                seen_output.append(Path(options.output_path))
+                report = _fake_ok_report(options.input_path, options.output_path)
+                options.report_path.parent.mkdir(parents=True, exist_ok=True)
+                options.report_path.write_text(
+                    json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                return report
+
+            template = ConversionOptions(
+                input_path=input_dir,
+                output_path=output_dir / "x.pptx",
+                report_path=output_dir / "x.report.json",
+            )
+            summary, code = run_batch(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                options_template=template,
+                convert_fn=convert_fn,
+                quiet=True,
+            )
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(summary.results[0].status, "ok")
+            self.assertTrue(seen_output[0].name.endswith(".pptx.partial"))
+            report_payload = json.loads((output_dir / "table.report.json").read_text(encoding="utf-8"))
+            self.assertEqual(Path(report_payload["output_path"]), output_dir / "table.pptx")
+            self.assertNotIn(".partial", report_payload["output_path"])
+            self.assertTrue(is_valid_pptx(output_dir / "table.pptx"))
+            self.assertFalse((output_dir / "table.pptx.partial").exists())
+
+    def test_refine_report_name_matches_single_file(self) -> None:
+        """N2: default refine report is ``<stem>.refine.json``, not ``<stem>.pptx.refine.json``."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "in"
+            output_dir = root / "out"
+            input_dir.mkdir()
+            shutil.copy(FIXTURES_DIR / "solid_background.pdf", input_dir / "table.pdf")
+            refine_paths: list[Path | None] = []
+
+            def convert_fn(options: ConversionOptions, **kwargs: object) -> ConversionReport:
+                refine_paths.append(options.refine_report_path)
+                report = _fake_ok_report(options.input_path, options.output_path)
+                options.report_path.write_text(
+                    json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                if options.refine_report_path is not None:
+                    options.refine_report_path.write_text("{}", encoding="utf-8")
+                return report
+
+            template = ConversionOptions(
+                input_path=input_dir,
+                output_path=output_dir / "x.pptx",
+                report_path=output_dir / "x.report.json",
+                refine=True,
+            )
+            summary, code = run_batch(
+                input_dir=input_dir,
+                output_dir=output_dir,
+                options_template=template,
+                convert_fn=convert_fn,
+                quiet=True,
+            )
+            self.assertEqual(code, EXIT_SUCCESS)
+            self.assertEqual(refine_paths[0], output_dir / "table.refine.json")
+            self.assertTrue((output_dir / "table.refine.json").is_file())
+            self.assertFalse((output_dir / "table.pptx.refine.json").exists())
+
     def test_real_fixture_conversion_smoke(self) -> None:
         """End-to-end on a digital fixture (no OCR) through the real pipeline."""
         with tempfile.TemporaryDirectory() as temp_dir:
