@@ -165,13 +165,17 @@ class SafeZipTests(unittest.TestCase):
             dest.mkdir()
             with self.assertRaises(InputValidationError) as ctx:
                 safe_extract_zip_bytes(data, dest, limits=ZipSafetyLimits())
-            message = str(ctx.exception).lower()
+            message = str(ctx.exception)
+            lowered = message.lower()
             self.assertTrue(
-                "failed to extract" in message
-                or "cannot create directory" in message
-                or "file exists" in message,
+                "failed to extract" in lowered
+                or "cannot create directory" in lowered
+                or "file exists" in lowered,
                 msg=message,
             )
+            # Must not leak the host absolute temp path.
+            self.assertNotIn(str(dest.resolve()), message)
+            self.assertNotIn(tmp, message)
 
     def test_rejects_overlong_filename(self) -> None:
         long_name = "a" * 400 + ".bin"
@@ -181,11 +185,14 @@ class SafeZipTests(unittest.TestCase):
             dest.mkdir()
             with self.assertRaises(InputValidationError) as ctx:
                 safe_extract_zip_bytes(data, dest, limits=ZipSafetyLimits())
-            message = str(ctx.exception).lower()
+            message = str(ctx.exception)
+            lowered = message.lower()
             self.assertTrue(
-                "failed to extract" in message or "file name" in message or "too long" in message,
+                "failed to extract" in lowered or "file name" in lowered or "too long" in lowered,
                 msg=message,
             )
+            self.assertNotIn(str(dest.resolve()), message)
+            self.assertNotIn(tmp, message)
 
 
 if __name__ == "__main__":

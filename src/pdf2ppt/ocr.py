@@ -35,6 +35,20 @@ _PDX_ALREADY_INITIALIZED_MARKERS = (
 )
 
 
+def wait_for_predict_idle(timeout_s: float) -> bool:
+    """Return True once no ``predict`` is running in any thread (False after ``timeout_s``).
+
+    A timed-out (abandoned) worker may still be inside a native ``predict`` that
+    never returns; it keeps ``_PADDLE_PREDICT_LOCK`` forever. Callers use this to
+    stop feeding OCR work to a wedged engine instead of waiting ``timeout`` per page.
+    """
+
+    if _PADDLE_PREDICT_LOCK.acquire(timeout=max(0.0, float(timeout_s))):
+        _PADDLE_PREDICT_LOCK.release()
+        return True
+    return False
+
+
 DEFAULT_PPOCR_VERSION = "PP-OCRv5"
 DEFAULT_DOC_ORIENTATION_MODEL_NAME = "PP-LCNet_x1_0_doc_ori"
 DEFAULT_TEXTLINE_ORIENTATION_MODEL_NAME = "PP-LCNet_x0_25_textline_ori"
@@ -206,6 +220,15 @@ class OcrEngine:
             _PADDLE_OCR_ENGINE_CACHE[cache_key] = engine
             self._engine = engine
         return self._engine
+
+    def warm_up(self) -> None:
+        """Construct the underlying PaddleOCR engine (idempotent).
+
+        Call this on the shared timeout lane before timed OCR batches so model
+        load is not charged against the first page/batch timeout.
+        """
+
+        self._get_engine()
 
     def _build_engine_kwargs(self) -> dict[str, Any]:
         local_model_kwargs = build_local_ocr_model_kwargs(

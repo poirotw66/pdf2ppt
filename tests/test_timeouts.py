@@ -18,6 +18,7 @@ from pdf2ppt.pipeline import analyze_page, prepare_batched_ocr_page_data
 from pdf2ppt.timeouts import (
     _TimeoutLane,
     call_with_timeout,
+    ocr_init_timeout_seconds,
     page_timeout_seconds_from_environ,
     reset_timeout_lane_for_tests,
 )
@@ -70,7 +71,93 @@ class CallWithTimeoutTests(unittest.TestCase):
         self.assertEqual(second, third)
         self.assertEqual(len(set(thread_ids)), 1)
 
-    def test_lane_replaced_after_timeout_still_daemon(self) -> None:
+    def test_clock_starts_when_worker_begins_not_at_enqueue(self) -> None:
+        """A prior slow call must not consume the next job's timeout budget."""
+
+        lane = _TimeoutLane(name="clock-test")
+        release_first = threading.Event()
+        second_started = threading.Event()
+        second_elapsed = {"s": 0.0}
+
+        def first() -> str:
+            release_first.wait(timeout=5.0)
+            return "a"
+
+        def second() -> str:
+            t0 = time.perf_counter()
+            second_started.set()
+            time.sleep(0.35)
+            second_elapsed["s"] = time.perf_counter() - t0
+            return "b"
+
+        results: dict[str, object] = {}
+        errors: dict[str, BaseException] = {}
+
+        def run_first() -> None:
+            try:
+                results["a"] = call_with_timeout(first, 2.0, label="first", lane=lane)
+            except BaseException as error:  # noqa: BLE001
+                errors["a"] = error
+
+        def run_second() -> None:
+            try:
+                # 0.8s budget is enough for the 0.35s body *if* queue wait is excluded.
+                results["b"] = call_with_timeout(second, 0.8, label="second", lane=lane)
+            except BaseException as error:  # noqa: BLE001
+                errors["b"] = error
+
+        t1 = threading.Thread(target=run_first)
+        t2 = threading.Thread(target=run_second)
+        t1.start()
+        time.sleep(0.05)
+        t2.start()
+        time.sleep(0.2)  # ensure second is queued behind first
+        release_first.set()
+        t1.join(timeout=5.0)
+        t2.join(timeout=5.0)
+        self.assertEqual(errors, {})
+        self.assertEqual(results.get("a"), "a")
+        self.assertEqual(results.get("b"), "b")
+        self.assertTrue(second_started.is_set())
+        self.assertLess(second_elapsed["s"], 0.75)
+
+    def test_nested_call_runs_inline(self) -> None:
+        lane = _TimeoutLane(name="nested-test")
+
+        def outer() -> int:
+            return call_with_timeout(lambda: 11, 1.0, label="inner", lane=lane)
+
+        self.assertEqual(call_with_timeout(outer, 2.0, label="outer", lane=lane), 11)
+
+    def test_thread_count_bounded_after_many_timeouts(self) -> None:
+        """Abandoned workers must retire once the hung call returns (not leak forever)."""
+
+        lane = _TimeoutLane(name="bound-test")
+
+        def briefly_hung() -> None:
+            # Longer than the timeout so callers abandon, but finite so workers retire.
+            time.sleep(0.35)
+
+        before = threading.active_count()
+        for index in range(25):
+            with self.assertRaises(TimeoutError):
+                call_with_timeout(briefly_hung, 0.05, label=f"hang-{index}", lane=lane)
+        # Wait for abandoned bodies to finish and generation-check-exit.
+        deadline = time.perf_counter() + 5.0
+        while time.perf_counter() < deadline:
+            if threading.active_count() <= before + 3:
+                break
+            time.sleep(0.05)
+        settled = threading.active_count()
+        self.assertLessEqual(
+            settled - before,
+            3,
+            msg=f"before={before} settled={settled} (workers should retire after hung calls return)",
+        )
+        # Lane still usable.
+        self.assertEqual(call_with_timeout(lambda: 1, 1.0, label="after", lane=lane), 1)
+
+    def test_lane_replaced_after_timeout_still_works(self) -> None:
         lane = _TimeoutLane(name="replace-test")
         hang = threading.Event()
 
@@ -80,7 +167,6 @@ class CallWithTimeoutTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             call_with_timeout(blocked, 0.1, label="hang", lane=lane)
 
-        # Replacement lane must still accept work.
         self.assertEqual(call_with_timeout(lambda: 7, 1.0, label="after", lane=lane), 7)
         hang.set()
 
@@ -89,6 +175,12 @@ class CallWithTimeoutTests(unittest.TestCase):
             self.assertAlmostEqual(page_timeout_seconds_from_environ(), 3.5, places=5)
         with patch.dict("os.environ", {"PDF2PPT_PAGE_TIMEOUT_S": "0"}, clear=False):
             self.assertEqual(page_timeout_seconds_from_environ(), 0.0)
+
+    def test_ocr_init_timeout_is_at_least_300(self) -> None:
+        self.assertAlmostEqual(ocr_init_timeout_seconds(5.0), 300.0, places=5)
+        self.assertAlmostEqual(ocr_init_timeout_seconds(400.0), 400.0, places=5)
+        self.assertEqual(ocr_init_timeout_seconds(0), 0)
+        self.assertIsNone(ocr_init_timeout_seconds(None))
 
 
 class PageOcrTimeoutFallbackTests(unittest.TestCase):
@@ -100,7 +192,6 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
 
         document = fitz.open()
         page = document.new_page(width=200, height=200)
-        # No native text → OCR path.
         options = ConversionOptions(
             input_path=MagicMock(),
             output_path=MagicMock(),
@@ -117,12 +208,12 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
             return OcrPageData(blocks=[], image=Image.new("RGB", (10, 10)))
 
         ocr_engine.extract_text_blocks.side_effect = slow_ocr
+        ocr_engine.warm_up = MagicMock()
 
         with patch("pdf2ppt.pipeline.render_page_image", return_value=Image.new("RGB", (20, 20))):
             result = analyze_page(page, options, ocr_engine)
 
         self.assertEqual(result.text_blocks, [])
-        # Scanned/empty OCR → full-page raster fallback rather than hanging.
         self.assertEqual(result.background_mode, "full-page")
         document.close()
 
@@ -153,6 +244,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
 
         ocr_engine.extract_text_blocks_batch.side_effect = slow_batch
         ocr_engine.extract_text_blocks.side_effect = fast_page
+        ocr_engine.warm_up = MagicMock()
 
         with patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], [])):
             with patch(
@@ -169,17 +261,70 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
                         "pdf2ppt.pipeline.render_page_image",
                         return_value=Image.new("RGB", (8, 8)),
                     ):
-                        results = prepare_batched_ocr_page_data(document, options, ocr_engine)
+                        with patch("pdf2ppt.pipeline.wait_for_predict_idle", return_value=True):
+                            results = prepare_batched_ocr_page_data(document, options, ocr_engine)
 
         self.assertEqual(len(results), 2)
         self.assertEqual(per_page_calls["n"], 2)
+        ocr_engine.warm_up.assert_called()
+        document.close()
+
+    def test_wedged_predict_skips_remaining_pages_quickly(self) -> None:
+        """If predict lock never frees, remaining pages skip OCR after one wait (problem 1)."""
+
+        import fitz
+
+        document = fitz.open()
+        for _ in range(4):
+            document.new_page(width=80, height=80)
+        options = ConversionOptions(
+            input_path=MagicMock(),
+            output_path=MagicMock(),
+            report_path=MagicMock(),
+            page_timeout_s=0.2,
+            ocr_batch_size=2,
+            vector_mode="off",
+        )
+        ocr_engine = MagicMock()
+        ocr_engine.warm_up = MagicMock()
+        ocr_engine.extract_text_blocks_batch.side_effect = AssertionError("must not call OCR when wedged")
+
+        idle_calls = {"n": 0}
+
+        def never_idle(_timeout: float) -> bool:
+            idle_calls["n"] += 1
+            return False
+
+        with patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], [])):
+            with patch(
+                "pdf2ppt.pipeline.compute_page_signals",
+                return_value=MagicMock(
+                    native_char_count=0,
+                    native_text_area_ratio=0.0,
+                    image_area_ratio=1.0,
+                    drawing_count=0,
+                ),
+            ):
+                with patch("pdf2ppt.pipeline.classify_page", return_value="scanned"):
+                    with patch(
+                        "pdf2ppt.pipeline.render_page_image",
+                        return_value=Image.new("RGB", (8, 8)),
+                    ):
+                        with patch("pdf2ppt.pipeline.wait_for_predict_idle", side_effect=never_idle):
+                            t0 = time.perf_counter()
+                            results = prepare_batched_ocr_page_data(document, options, ocr_engine)
+                            elapsed = time.perf_counter() - t0
+
+        self.assertEqual(len(results), 4)
+        self.assertTrue(all(data.blocks == [] for _img, data in results.values()))
+        # One wedge wait (~0.2s) then fast-skip remaining batches — not 4× timeout.
+        self.assertLess(elapsed, 1.5)
+        self.assertEqual(idle_calls["n"], 1)
         document.close()
 
 
 class PredictLockOverlapTests(unittest.TestCase):
     def test_predict_lock_serializes_overlapping_calls(self) -> None:
-        """Abandoned + next predict must not overlap (T3)."""
-
         from pdf2ppt import ocr as ocr_mod
 
         holding = threading.Event()
@@ -226,33 +371,49 @@ class PredictLockOverlapTests(unittest.TestCase):
         self.assertTrue(holding.wait(timeout=2.0))
         t2.start()
         time.sleep(0.2)
-        # Second must be blocked on the predict lock — no overlap yet.
         self.assertFalse(overlap["seen"])
         release.set()
         t1.join(timeout=3.0)
         t2.join(timeout=3.0)
         self.assertFalse(overlap["seen"])
 
+    def test_wait_for_predict_idle_false_while_held(self) -> None:
+        from pdf2ppt import ocr as ocr_mod
+
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def holder() -> None:
+            ocr_mod._PADDLE_PREDICT_LOCK.acquire()
+            acquired.set()
+            release.wait(timeout=5.0)
+            ocr_mod._PADDLE_PREDICT_LOCK.release()
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        self.assertTrue(acquired.wait(timeout=2.0))
+        self.assertFalse(ocr_mod.wait_for_predict_idle(0.15))
+        release.set()
+        thread.join(timeout=3.0)
+        self.assertTrue(ocr_mod.wait_for_predict_idle(1.0))
+
 
 class ProcessExitsAfterTimeoutTests(unittest.TestCase):
     def test_subprocess_exits_after_simulated_hang(self) -> None:
-        """Daemon lane must not keep the interpreter alive after a timeout (T2)."""
-
         script = """
-import sys, time
+import sys
 from pdf2ppt.timeouts import call_with_timeout, reset_timeout_lane_for_tests
 
 reset_timeout_lane_for_tests()
 
 def hang():
     while True:
-        pass  # busy-loop: would pin CPU forever if non-daemon
+        pass
 
 try:
     call_with_timeout(hang, 0.2, label="busy")
 except TimeoutError:
     pass
-# If workers were non-daemon, process would hang here at interpreter shutdown.
 sys.exit(0)
 """
         with tempfile.TemporaryDirectory() as tmp:

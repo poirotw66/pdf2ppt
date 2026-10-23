@@ -11,9 +11,12 @@ Design constraints (verified against real PaddleOCR):
   call breaks multi-batch OCR (``std::exception`` on the second batch).
 - Abandoned workers must be **daemon** threads so a timed-out busy-loop
   cannot keep the interpreter alive at 100% CPU after the job finishes.
-- On timeout the lane is replaced; the abandoned daemon may linger, but the
-  process can exit. Pair with the OCR predict lock so an abandoned wake-up
-  cannot overlap the next ``predict``.
+- The timeout clock starts when the worker **begins** the call (not at
+  enqueue), so concurrent jobs sharing the lane do not time each other out.
+- Queued jobs live in one shared deque and move to the replacement worker;
+  an abandoned worker retires once its hung call returns (generation check)
+  and drops references to call arguments so page images are not pinned.
+- Nested ``call_with_timeout`` from the worker thread runs inline.
 
 LibreOffice invocations should use
 :func:`pdf2ppt.render_compare.run_subprocess_with_process_group` so timeouts
@@ -22,9 +25,9 @@ reap the process tree.
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
-import queue
 import threading
 from collections.abc import Callable
 from typing import TypeVar
@@ -32,6 +35,8 @@ from typing import TypeVar
 logger = logging.getLogger(__name__)
 
 DEFAULT_PAGE_TIMEOUT_SECONDS = 120.0
+# Engine init (model load) is excluded from the first timed OCR call.
+DEFAULT_OCR_INIT_TIMEOUT_SECONDS = 300.0
 
 T = TypeVar("T")
 
@@ -49,54 +54,89 @@ def page_timeout_seconds_from_environ(*, default: float = DEFAULT_PAGE_TIMEOUT_S
         return float(default)
 
 
+def ocr_init_timeout_seconds(page_timeout_s: float | None) -> float | None:
+    """Timeout for a one-shot OCR engine warm-up on the shared lane.
+
+    Returns ``None`` / ``<= 0`` semantics matching ``call_with_timeout`` when
+    page timeouts are disabled; otherwise ``max(page_timeout, 300)`` so model
+    load is not charged against the first batch.
+    """
+
+    if page_timeout_s is None or float(page_timeout_s) <= 0:
+        return page_timeout_s
+    return max(float(page_timeout_s), float(DEFAULT_OCR_INIT_TIMEOUT_SECONDS))
+
+
+class _Job:
+    """One submitted call. ``started`` is set when a worker actually begins it."""
+
+    __slots__ = ("func", "args", "kwargs", "started", "done", "result", "error", "running")
+
+    def __init__(
+        self,
+        func: Callable[..., object],
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+    ) -> None:
+        self.func: Callable[..., object] | None = func
+        self.args: tuple[object, ...] | None = args
+        self.kwargs: dict[str, object] | None = kwargs
+        self.started = threading.Event()
+        self.done = threading.Event()
+        self.result: object = None
+        self.error: BaseException | None = None
+        self.running = False
+
+
 class _TimeoutLane:
-    """Single persistent daemon worker; replaced only after a timeout."""
+    """Single persistent daemon worker; replaced only after a timeout.
+
+    * The timeout clock starts when the worker *begins* the call, not when it is
+      queued, so concurrent API jobs sharing the lane do not time each other out.
+    * Jobs still queued when a worker is abandoned are handed to the replacement
+      worker (they live in one shared deque, not in a per-worker queue).
+    * An abandoned worker exits as soon as its hung call finally returns (it sees
+      that it is no longer the current generation); it drops references to the
+      call arguments/result so a hung call does not pin page images forever.
+    * A call made *from* the worker thread (nesting) runs inline instead of
+      deadlocking on its own lane.
+    """
 
     def __init__(self, *, name: str = "pdf2ppt-timeout-lane") -> None:
         self._name = name
-        self._submit_lock = threading.Lock()
-        self._jobs: queue.Queue[object] | None = None
+        self._cv = threading.Condition(threading.Lock())
+        self._pending: collections.deque[_Job] = collections.deque()
         self._worker: threading.Thread | None = None
         self._generation = 0
 
     def _spawn_locked(self) -> None:
-        jobs: queue.Queue[object] = queue.Queue()
-        self._jobs = jobs
         self._generation += 1
         generation = self._generation
 
         def run() -> None:
             while True:
-                item = jobs.get()
-                if item is None:
-                    return
-                assert isinstance(item, tuple)
-                func_obj, call_args, call_kwargs, done_event, result_box = item
-                assert callable(func_obj)
-                assert isinstance(done_event, threading.Event)
-                assert isinstance(result_box, dict)
+                with self._cv:
+                    while not self._pending and generation == self._generation:
+                        self._cv.wait()
+                    if generation != self._generation:
+                        return  # replaced after a timeout: retire
+                    job = self._pending.popleft()
+                    job.running = True
+                job.started.set()
+                func, args, kwargs = job.func, job.args, job.kwargs
+                job.func = job.args = job.kwargs = None
                 try:
-                    result_box["result"] = func_obj(*call_args, **call_kwargs)
-                    result_box["error"] = None
+                    assert func is not None and args is not None and kwargs is not None
+                    job.result = func(*args, **kwargs)
                 except BaseException as error:  # noqa: BLE001 — deliver to caller
-                    result_box["result"] = None
-                    result_box["error"] = error
+                    job.error = error
                 finally:
-                    done_event.set()
+                    del func, args, kwargs
+                    job.done.set()
 
-        worker = threading.Thread(
-            target=run,
-            name=f"{self._name}-{generation}",
-            daemon=True,
-        )
-        worker.start()
+        worker = threading.Thread(target=run, name=f"{self._name}-{generation}", daemon=True)
         self._worker = worker
-
-    def _ensure_worker_locked(self) -> queue.Queue[object]:
-        if self._jobs is None or self._worker is None or not self._worker.is_alive():
-            self._spawn_locked()
-        assert self._jobs is not None
-        return self._jobs
+        worker.start()
 
     def call(
         self,
@@ -107,36 +147,43 @@ class _TimeoutLane:
         label: str = "operation",
         **kwargs: object,
     ) -> T:
-        done = threading.Event()
-        box: dict[str, object] = {}
-        with self._submit_lock:
-            jobs = self._ensure_worker_locked()
-            jobs.put((func, args, kwargs, done, box))
+        worker = self._worker
+        if worker is not None and threading.current_thread() is worker:
+            return func(*args, **kwargs)  # nested call from the lane itself
 
-        if not done.wait(timeout=max(0.0, float(timeout_s))):
-            # Abandon the hung daemon worker (it keeps the old queue). Spawn a
-            # replacement lane so later calls stay thread-affine to a live worker.
-            with self._submit_lock:
+        job = _Job(func, args, kwargs)
+        with self._cv:
+            self._pending.append(job)
+            if self._worker is None or not self._worker.is_alive():
                 self._spawn_locked()
-            raise TimeoutError(f"{label} timed out after {float(timeout_s):.1f}s")
+            self._cv.notify_all()
 
-        error = box.get("error")
+        # Queue wait is bounded by the timeout of whichever call is running ahead
+        # of us (its caller replaces the worker, which then picks us up).
+        job.started.wait()
+        if not job.done.wait(timeout=max(0.0, float(timeout_s))):
+            with self._cv:
+                if not job.done.is_set():
+                    # Abandon the hung worker; it retires when its call returns.
+                    self._spawn_locked()
+                    self._cv.notify_all()
+                    raise TimeoutError(f"{label} timed out after {float(timeout_s):.1f}s")
+
+        error = job.error
+        result = job.result
+        job.result = job.error = None
         if error is not None:
-            assert isinstance(error, BaseException)
             raise error
-        return box["result"]  # type: ignore[return-value]
+        return result  # type: ignore[return-value]
 
     def reset_for_tests(self) -> None:
         """Drop the worker so the next call starts a fresh lane (unit tests)."""
 
-        with self._submit_lock:
-            if self._jobs is not None:
-                try:
-                    self._jobs.put_nowait(None)
-                except Exception:  # noqa: BLE001
-                    pass
-            self._jobs = None
+        with self._cv:
+            self._generation += 1  # retires the current worker
+            self._pending.clear()
             self._worker = None
+            self._cv.notify_all()
 
 
 _DEFAULT_LANE = _TimeoutLane()
@@ -158,8 +205,9 @@ def call_with_timeout(
 
     When a positive timeout is set, runs on a **persistent daemon worker
     lane** so thread-affine native engines (PaddleOCR) keep working across
-    batches. On timeout the lane is replaced; the abandoned worker is daemon
-    so it cannot block interpreter exit.
+    batches. The clock starts when the worker begins the call. On timeout the
+    lane is replaced; the abandoned worker is daemon and retires when its
+    hung call finally returns.
     """
 
     if timeout_s is None or float(timeout_s) <= 0:
@@ -176,8 +224,10 @@ def reset_timeout_lane_for_tests() -> None:
 
 
 __all__ = [
+    "DEFAULT_OCR_INIT_TIMEOUT_SECONDS",
     "DEFAULT_PAGE_TIMEOUT_SECONDS",
     "call_with_timeout",
+    "ocr_init_timeout_seconds",
     "page_timeout_seconds_from_environ",
     "reset_timeout_lane_for_tests",
 ]

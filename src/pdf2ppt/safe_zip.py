@@ -184,6 +184,15 @@ def validate_zip_archive(
     return file_members
 
 
+def _os_error_detail(error: OSError) -> str:
+    """Human-readable OSError detail without absolute filesystem paths."""
+
+    detail = error.strerror or type(error).__name__
+    if error.errno is not None:
+        return f"[Errno {error.errno}] {detail}"
+    return detail
+
+
 def safe_extract_zip(
     archive: zipfile.ZipFile,
     dest: Path,
@@ -215,7 +224,7 @@ def safe_extract_zip(
             target.parent.mkdir(parents=True, exist_ok=True)
         except OSError as error:
             raise InputValidationError(
-                f"Cannot create directory for zip entry {info.filename!r}: {error}"
+                f"Cannot create directory for zip entry {info.filename!r}: {_os_error_detail(error)}"
             ) from error
 
         # Extract via streaming so a lying file_size cannot blow past limits.
@@ -247,7 +256,7 @@ def safe_extract_zip(
             raise
         except OSError as error:
             raise InputValidationError(
-                f"Failed to extract zip entry {info.filename!r}: {error}"
+                f"Failed to extract zip entry {info.filename!r}: {_os_error_detail(error)}"
             ) from error
 
         # Refuse to leave a symlink behind even if the archive lied about type.

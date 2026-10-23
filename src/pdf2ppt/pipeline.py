@@ -88,7 +88,7 @@ from .native_extraction import (
     promote_ocr_bold_blocks,
     sort_text_blocks,
 )
-from .ocr import OcrEngine
+from .ocr import OcrEngine, wait_for_predict_idle
 from .page_analysis import render_page_image
 from .ppt_render import (
     add_text_block,
@@ -116,7 +116,11 @@ from .text_style import (
     single_line_fit_width_ratio,
     write_text_fit_debug_report,
 )
-from .timeouts import call_with_timeout, page_timeout_seconds_from_environ
+from .timeouts import (
+    call_with_timeout,
+    ocr_init_timeout_seconds,
+    page_timeout_seconds_from_environ,
+)
 from .vector_nativization import (
     apply_cell_fills,
     extract_vector_content,
@@ -978,14 +982,49 @@ def prepare_batched_ocr_page_data(
     render_dpi = resolve_render_dpi(options)
     batch_size = max(1, options.ocr_batch_size or DEFAULT_OCR_BATCH_SIZE)
     page_timeout = _page_timeout_s(options)
+    timeout_enabled = page_timeout is not None and page_timeout > 0
+    engine_wedged = False
+
+    if pages_to_ocr:
+        # Warm the engine on the shared timeout lane under a generous budget so
+        # model load is not charged against the first timed OCR batch.
+        init_timeout = ocr_init_timeout_seconds(page_timeout)
+        try:
+            call_with_timeout(
+                ocr_engine.warm_up,
+                init_timeout,
+                label="OCR engine init",
+            )
+        except TimeoutError as error:
+            logger.error(
+                "OCR engine initialization timed out (%s); skipping OCR for this job",
+                error,
+            )
+            for page, page_number in pages_to_ocr:
+                page_image = render_page_image(page, dpi=render_dpi)
+                batched_results[page_number] = (page_image, OcrPageData(blocks=[], image=page_image))
+            return batched_results
+
     for batch_start in range(0, len(pages_to_ocr), batch_size):
         batch = pages_to_ocr[batch_start : batch_start + batch_size]
         batch_images = [render_page_image(page, dpi=render_dpi) for page, _page_number in batch]
         batch_numbers = [page_number for _page, page_number in batch]
+        if timeout_enabled and not engine_wedged and not wait_for_predict_idle(float(page_timeout or 0.0)):
+            # An abandoned worker is still inside a native predict() and holds the
+            # predict lock: nothing can succeed until it returns. Stop feeding it.
+            engine_wedged = True
+            logger.error(
+                "OCR engine is wedged (a timed-out predict() never returned); "
+                "skipping OCR for the remaining pages of this job"
+            )
+        if engine_wedged:
+            for (page, page_number), page_image in zip(batch, batch_images):
+                batched_results[page_number] = (page_image, OcrPageData(blocks=[], image=page_image))
+            continue
         # Scale the per-page budget across the batch so one hung page cannot
         # block siblings for longer than page_timeout_s each (approx).
         batch_timeout = (
-            None if page_timeout is None or page_timeout <= 0 else float(page_timeout) * max(1, len(batch))
+            float(page_timeout or 0.0) * max(1, len(batch)) if timeout_enabled else None
         )
         try:
             batch_ocr_results = call_with_timeout(
@@ -1006,6 +1045,14 @@ def prepare_batched_ocr_page_data(
             )
             batch_ocr_results = []
             for image, page_number in zip(batch_images, batch_numbers):
+                if not engine_wedged and not wait_for_predict_idle(float(page_timeout or 0.0)):
+                    engine_wedged = True
+                    logger.error(
+                        "OCR engine is wedged; skipping OCR for the remaining pages of this job"
+                    )
+                if engine_wedged:
+                    batch_ocr_results.append(OcrPageData(blocks=[], image=image))
+                    continue
                 try:
                     page_data = call_with_timeout(
                         ocr_engine.extract_text_blocks,
