@@ -417,6 +417,55 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
         self.assertEqual(page_data.blocks, [])
         document.close()
 
+    def test_ocr_processing_error_when_lane_already_swapped_degrades(self) -> None:
+        """N1: A later job must degrade when generation is already > 1 from an earlier swap."""
+
+        import fitz
+
+        document = fitz.open()
+        document.new_page(width=80, height=80)
+        options = ConversionOptions(
+            input_path=MagicMock(),
+            output_path=MagicMock(),
+            report_path=MagicMock(),
+            page_timeout_s=5.0,
+            ocr_batch_size=1,
+            vector_mode="off",
+        )
+        ocr_engine = MagicMock()
+        ocr_engine.warm_up = MagicMock()
+        ocr_engine.extract_text_blocks_batch.side_effect = OcrProcessingError(
+            "OCR batch prediction failed: std::exception"
+        )
+
+        with patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], [])):
+            with patch(
+                "pdf2ppt.pipeline.compute_page_signals",
+                return_value=MagicMock(
+                    native_char_count=0,
+                    native_text_area_ratio=0.0,
+                    image_area_ratio=1.0,
+                    drawing_count=0,
+                ),
+            ):
+                with patch("pdf2ppt.pipeline.classify_page", return_value="scanned"):
+                    with patch(
+                        "pdf2ppt.pipeline.render_page_image",
+                        return_value=Image.new("RGB", (8, 8)),
+                    ):
+                        with patch("pdf2ppt.pipeline.wait_for_predict_idle", return_value=True):
+                            # Generation already > 1 for the whole job (swap happened earlier).
+                            with patch("pdf2ppt.pipeline.timeout_lane_generation", return_value=2):
+                                with patch("pdf2ppt.pipeline.abandoned_calls_running", return_value=0):
+                                    results = prepare_batched_ocr_page_data(
+                                        document, options, ocr_engine
+                                    )
+
+        self.assertEqual(len(results), 1)
+        _image, page_data = results[1]
+        self.assertEqual(page_data.blocks, [])
+        document.close()
+
     def test_ocr_processing_error_without_lane_swap_still_raises(self) -> None:
         """Genuine OCR failures (no timeout / generation change) must still abort."""
 
@@ -480,6 +529,32 @@ class AbandonedCallAndExitDrainTests(unittest.TestCase):
         while time.perf_counter() < deadline and abandoned_calls_running() > 0:
             time.sleep(0.02)
         self.assertEqual(abandoned_calls_running(), 0)
+
+    def test_reset_for_tests_does_not_drive_abandoned_count_negative(self) -> None:
+        """N4: reset_for_tests() zeroing must not let abandoned workers decrement below 0."""
+
+        hang = threading.Event()
+
+        def blocked() -> None:
+            hang.wait(timeout=30.0)
+
+        with self.assertRaises(TimeoutError):
+            call_with_timeout(blocked, 0.1, label="hang")
+        self.assertGreaterEqual(abandoned_calls_running(), 1)
+        reset_timeout_lane_for_tests()
+        self.assertEqual(abandoned_calls_running(), 0)
+        hang.set()
+        deadline = time.perf_counter() + 3.0
+        while time.perf_counter() < deadline:
+            count = abandoned_calls_running()
+            self.assertGreaterEqual(count, 0)
+            if count == 0:
+                # Give the abandoned worker a moment to finish its decrement.
+                time.sleep(0.05)
+                self.assertGreaterEqual(abandoned_calls_running(), 0)
+                break
+            time.sleep(0.02)
+        self.assertGreaterEqual(abandoned_calls_running(), 0)
 
     def test_timeout_lane_generation_bumps_on_timeout(self) -> None:
         hang = threading.Event()

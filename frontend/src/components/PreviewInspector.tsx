@@ -73,8 +73,8 @@ export function PreviewInspector({
           {page.baked_background ? (
             <span className="muted step-hint" data-testid="baked-background-hint">
               This page uses a baked background raster (overlay/full-page). Excluding shapes or images
-              only drops native IR objects — pixels already painted into the background stay. Prefer
-              raster fallback if you need a full-page image.
+              removes native IR objects only — baked pixels may stay visible. If the preview does not
+              change, prefer raster fallback for a full-page image.
             </span>
           ) : null}
           <label className="control-field checkbox-field">
@@ -126,8 +126,8 @@ export function PreviewInspector({
           ) : null}
           {bakedExcludeWarning ? (
             <span className="muted step-hint" data-testid="baked-exclude-warning">
-              Excluding this {selected.kind} will not remove it from the baked background image. Use
-              raster fallback for a full-page photo instead.
+              Excluding this {selected.kind} may leave it visible if it was painted into the baked
+              background. Prefer raster fallback when the preview does not change.
             </span>
           ) : null}
           <div className="inspector-actions">

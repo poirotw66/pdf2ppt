@@ -993,6 +993,81 @@ class ApiTests(unittest.TestCase):
         convert_response = self.client.post(f"/jobs/{job_id}/from-ir")
         self.assertEqual(convert_response.status_code, 200)
 
+    @patch("pdf2ppt.api.convert_pdf")
+    def test_emit_ir_clears_stale_preview_edits(
+        self,
+        convert_pdf_mock: unittest.mock.Mock,
+    ) -> None:
+        """A: POST /emit-ir must drop preview_edits.json (not only /preview)."""
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        job_dir = self.job_store.job_dir(job_id)
+        ir_path = job_dir / "output.slideir.json"
+
+        def _write_ir(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            write_slide_ir([_api_slideir_page()], ir_path, slide_width_pt=320.0, slide_height_pt=240.0)
+            return SimpleNamespace(pages=[object()])
+
+        convert_pdf_mock.side_effect = _write_ir
+        self.assertEqual(self.client.post(f"/jobs/{job_id}/preview", json={}).status_code, 200)
+        save_response = self.client.put(
+            f"/jobs/{job_id}/preview-edits",
+            json={
+                "pages": [
+                    {
+                        "page": 1,
+                        "excluded_ids": ["s1"],
+                        "role_overrides": {"t1": "title"},
+                        "raster_fallback": False,
+                    }
+                ]
+            },
+        )
+        self.assertEqual(save_response.status_code, 200)
+        edits_path = job_dir / "preview_edits.json"
+        self.assertTrue(edits_path.exists())
+
+        emit = self.client.post(f"/jobs/{job_id}/emit-ir", json={})
+        self.assertEqual(emit.status_code, 200)
+        self.assertFalse(edits_path.exists())
+        preview = self.client.get(f"/jobs/{job_id}/preview")
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["edits"], {"pages": []})
+
+    def test_job_lock_busy_returns_409(self) -> None:
+        """B: Contended job lock waits briefly then returns 409 job-busy."""
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        job_dir = self.job_store.job_dir(job_id)
+        write_slide_ir(
+            [_api_slideir_page()],
+            job_dir / "output.slideir.json",
+            slide_width_pt=320.0,
+            slide_height_pt=240.0,
+        )
+        self.job_store.update_job(job_id, status="ir-emitted")
+
+        held = self.job_store.job_lock(job_id)
+        self.assertTrue(held.acquire(blocking=False))
+        try:
+            with patch("pdf2ppt.api.JOB_LOCK_WAIT_S", 0.05):
+                response = self.client.put(
+                    f"/jobs/{job_id}/preview-edits",
+                    json={"pages": [{"page": 1, "excluded_ids": [], "role_overrides": {}}]},
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.json()["detail"]["code"], "job-busy")
+        finally:
+            held.release()
+
     def test_preview_edits_rejects_oversized_body(self) -> None:
         pdf_bytes = build_sample_pdf_bytes()
         create_response = self.client.post(
@@ -1012,6 +1087,50 @@ class ApiTests(unittest.TestCase):
         huge = {"pages": [{"page": 1, "excluded_ids": ["x"] * 50_000, "role_overrides": {}}]}
         response = self.client.put(f"/jobs/{job_id}/preview-edits", json=huge)
         self.assertIn(response.status_code, {413, 422})
+
+    def test_preview_edits_413_includes_cors_headers(self) -> None:
+        """C: Body-limit 413 responses must carry CORS (middleware order)."""
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        job_dir = self.job_store.job_dir(job_id)
+        write_slide_ir(
+            [_api_slideir_page()],
+            job_dir / "output.slideir.json",
+            slide_width_pt=320.0,
+            slide_height_pt=240.0,
+        )
+        self.job_store.update_job(job_id, status="ir-emitted")
+
+        # Guaranteed > 1 MiB so the body-limit middleware returns 413 (not validation 4xx).
+        oversized = b'{"pages":[{"page":1,"excluded_ids":["' + (b"a" * (1024 * 1024)) + b'"],"role_overrides":{}}]}'
+        response = self.client.put(
+            f"/jobs/{job_id}/preview-edits",
+            content=oversized,
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "http://localhost:5173",
+            },
+        )
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "http://localhost:5173",
+        )
+
+    def test_unknown_job_preview_edits_404_without_retaining_locks(self) -> None:
+        """D: Unknown job ids 404 before creating locks; lock map stays empty."""
+        for index in range(50):
+            response = self.client.put(
+                f"/jobs/missing-{index:04d}/preview-edits",
+                json={"pages": []},
+            )
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.json()["detail"]["code"], "not-found")
+        self.assertEqual(len(self.job_store._job_locks), 0)
 
     def test_page_preview_thumbnail_width(self) -> None:
         pdf_bytes = build_sample_pdf_bytes()

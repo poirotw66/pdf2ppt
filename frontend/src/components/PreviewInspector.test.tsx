@@ -132,6 +132,8 @@ describe("PreviewInspector", () => {
         onRasterFallbackChange={vi.fn()}
       />,
     );
-    expect(screen.getByTestId("baked-exclude-warning")).toBeInTheDocument();
+    const warning = screen.getByTestId("baked-exclude-warning");
+    expect(warning).toBeInTheDocument();
+    expect(warning).toHaveTextContent(/may leave it visible/i);
   });
 });

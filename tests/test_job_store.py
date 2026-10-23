@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 import json
 import tempfile
 import unittest
+import weakref
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -57,6 +59,15 @@ class JobStoreTests(unittest.TestCase):
         self.assertEqual(payload["status"], "detected")
         leftovers = list(metadata_path.parent.glob(".job.json.*.tmp"))
         self.assertEqual(leftovers, [])
+
+    def test_job_locks_use_weak_value_dictionary(self) -> None:
+        """D: Unused per-job locks are reclaimable (do not grow without bound)."""
+        self.assertIsInstance(self.job_store._job_locks, weakref.WeakValueDictionary)
+        lock = self.job_store.job_lock("ephemeral-job")
+        self.assertIn("ephemeral-job", self.job_store._job_locks)
+        del lock
+        gc.collect()
+        self.assertNotIn("ephemeral-job", self.job_store._job_locks)
 
 
 def build_sample_pdf_bytes() -> bytes:

@@ -992,9 +992,20 @@ def _ocr_error_after_lane_swap(
     *,
     start_generation: int,
 ) -> bool:
-    """Whether an OCR failure likely comes from Paddle thread-affinity after a timeout."""
+    """Whether an OCR failure likely comes from Paddle thread-affinity after a timeout.
 
-    return timeout_lane_generation() != start_generation or abandoned_calls_running() > 0
+    The initial lane spawn sets generation to 1. Any later replacement bumps it
+    above 1. Once that has happened, degrade for the rest of the process —
+    including *later* jobs that never saw the swap — because a Paddle engine
+    built on a prior worker thread can fail permanently on the replacement
+    thread (~30–40% of threads).
+    """
+
+    # Call sites pass start_generation for readability. Degrade for the rest of
+    # the process once the lane has ever been replaced (generation > 1), not
+    # only when generation changed during this job.
+    del start_generation
+    return timeout_lane_generation() > 1 or abandoned_calls_running() > 0
 
 
 def prepare_batched_ocr_page_data(
