@@ -46,13 +46,21 @@ from .models import TextBlock
 from .ocr import OcrEngine
 from .paths import resolve_repo_relative_path
 from .pipeline import build_notebooklm_watermark_mask_block, convert_from_ir, convert_pdf
+from .safe_zip import (
+    DEFAULT_ZIP_MAX_COMPRESSED_BYTES,
+    DEFAULT_ZIP_MAX_ENTRIES,
+    ZipSafetyLimits,
+    reject_oversized_compressed,
+    safe_extract_zip,
+)
 from .upload_input import SUPPORTED_UPLOAD_SUFFIXES, is_raster_image_upload, normalize_upload_to_pdf_bytes
 
 logger = logging.getLogger(__name__)
 
-# Caps for POST /from-ir uploads (agent-facing; keep modest for local job store).
-MAX_FROM_IR_FILE_BYTES = 50 * 1024 * 1024
-MAX_FROM_IR_ZIP_MEMBERS = 10_000
+# Caps for POST /from-ir JSON uploads (assets zip uses ZipSafetyLimits / env vars).
+MAX_FROM_IR_FILE_BYTES = DEFAULT_ZIP_MAX_COMPRESSED_BYTES
+# Back-compat alias for tests / callers that imported the old constant.
+MAX_FROM_IR_ZIP_MEMBERS = DEFAULT_ZIP_MAX_ENTRIES
 
 app = FastAPI(title="pdf2ppt API", version="0.1.0")
 app.add_middleware(
@@ -350,12 +358,16 @@ async def from_ir_upload(
 
         if assets_zip is not None and assets_zip.filename:
             zip_bytes = await assets_zip.read()
-            _reject_oversized_upload(len(zip_bytes), label="assets zip")
+            zip_limits = ZipSafetyLimits.from_environ()
+            try:
+                reject_oversized_compressed(len(zip_bytes), limits=zip_limits, label="assets zip")
+            except InputValidationError as error:
+                raise _to_http_exception(error) from error
             zip_path = work / "assets.zip"
             zip_path.write_bytes(zip_bytes)
             try:
                 with zipfile.ZipFile(zip_path) as archive:
-                    _safe_extract_zip(archive, work)
+                    safe_extract_zip(archive, work, limits=zip_limits)
             except zipfile.BadZipFile as error:
                 raise _to_http_exception(InputValidationError(f"Invalid assets zip: {error}")) from error
             except InputValidationError as error:
@@ -495,26 +507,9 @@ def _reject_oversized_upload(size: int, *, label: str) -> None:
 
 
 def _safe_extract_zip(archive: zipfile.ZipFile, dest: Path) -> None:
-    """Extract a zip into ``dest``, rejecting path-traversal members."""
-    dest_resolved = dest.resolve()
-    members = archive.infolist()
-    if len(members) > MAX_FROM_IR_ZIP_MEMBERS:
-        raise InputValidationError(
-            f"assets zip has too many members (limit {MAX_FROM_IR_ZIP_MEMBERS})."
-        )
-    for info in members:
-        name = info.filename
-        if not name or name.endswith("/"):
-            continue
-        path = Path(name)
-        if path.is_absolute() or ".." in path.parts:
-            raise InputValidationError("Unsafe path in assets zip.")
-        target = (dest / path).resolve()
-        try:
-            target.relative_to(dest_resolved)
-        except ValueError as error:
-            raise InputValidationError("Unsafe path in assets zip.") from error
-    archive.extractall(dest)
+    """Extract a zip into ``dest`` with traversal / bomb / symlink guards."""
+
+    safe_extract_zip(archive, dest, limits=ZipSafetyLimits.from_environ())
 
 
 def _scrub_slideir_error(error: SlideIrError) -> SlideIrError:
@@ -575,6 +570,7 @@ def _conversion_options_from_request(
         ocr_drop_score=request.drop_score,
         ocr_return_word_box=request.return_word_box,
         ocr_batch_size=request.ocr_batch_size,
+        page_timeout_s=float(getattr(request, "page_timeout_s", 120.0)),
         render_dpi=request.dpi,
         background_dpi=request.background_dpi,
         background_image_format=request.background_format,

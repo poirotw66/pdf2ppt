@@ -230,12 +230,36 @@ class LayoutPlannerService:
             )
             return None
 
-        acquired = self._budget.acquire_slot(
-            timeout_s=max(1.0, float(getattr(self._planner, "_timeout_s", 45.0)))
-        )
+        # Wait for a concurrency slot, but bail out (and refund) if the circuit
+        # opens while we are queued — do not dispatch reserved-but-not-started
+        # calls after the breaker trips.
+        slot_deadline = max(1.0, float(getattr(self._planner, "_timeout_s", 45.0)))
+        acquired = False
+        waited = 0.0
+        poll_s = min(0.25, slot_deadline)
+        while waited < slot_deadline + 1e-9:
+            if self._budget.is_circuit_open():
+                self._budget.cancel_reservation(
+                    LayoutPlannerCallRecord(
+                        model=self.model,
+                        page_number=page_number,
+                        cache_hit=False,
+                        success=False,
+                        latency_ms=timer.elapsed_ms(),
+                        estimated_cost_usd=0.0,
+                        note=self._budget.circuit_reason or "circuit open before dispatch",
+                        fallback_kind="circuit",
+                    )
+                )
+                return None
+            step = min(poll_s, max(0.0, slot_deadline - waited))
+            if self._budget.acquire_slot(timeout_s=step):
+                acquired = True
+                break
+            waited += step
         if not acquired:
-            # Reservation already counted; no HTTP spend — refund reserve.
-            self._budget.commit_failure(
+            # Reservation already counted; no HTTP spend — full refund.
+            self._budget.cancel_reservation(
                 LayoutPlannerCallRecord(
                     model=self.model,
                     page_number=page_number,
@@ -245,6 +269,24 @@ class LayoutPlannerService:
                     estimated_cost_usd=0.0,
                     note="concurrency slot timeout",
                     fallback_kind="timeout",
+                )
+            )
+            return None
+
+        # Re-check after acquiring the slot: another worker may have tripped the
+        # breaker while we were waiting.
+        if self._budget.is_circuit_open():
+            self._budget.release_slot()
+            self._budget.cancel_reservation(
+                LayoutPlannerCallRecord(
+                    model=self.model,
+                    page_number=page_number,
+                    cache_hit=False,
+                    success=False,
+                    latency_ms=timer.elapsed_ms(),
+                    estimated_cost_usd=0.0,
+                    note=self._budget.circuit_reason or "circuit open before dispatch",
+                    fallback_kind="circuit",
                 )
             )
             return None

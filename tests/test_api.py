@@ -19,6 +19,7 @@ from pdf2ppt.ir_io import default_assets_dir_name, write_slide_ir
 from pdf2ppt.job_store import JobStore
 from pdf2ppt.models import ImagePlacement, PageResult, QualityScore, ShapeElement, TextBlock
 from pdf2ppt.paths import get_repo_root
+from pdf2ppt.safe_zip import ZipSafetyLimits
 
 
 class ApiTests(unittest.TestCase):
@@ -736,6 +737,36 @@ class ApiTests(unittest.TestCase):
         # Also ensure nothing escaped next to the job store root.
         sibling_evil = self.job_store.root.parent / "evil-outside.txt"
         self.assertFalse(sibling_evil.exists())
+        leftover = list(self.job_store.root.glob("pdf2ppt-from-ir-*"))
+        self.assertEqual(leftover, [])
+
+    def test_from_ir_zip_bomb_rejected(self) -> None:
+        ir_bytes, _zip_bytes = build_slideir_upload_pair(self.temp_dir.name)
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("bomb.bin", b"\x00" * 400_000)
+        zip_bytes = zip_buffer.getvalue()
+        # Force a tight ratio so the highly compressible payload trips the bomb check.
+        with patch(
+            "pdf2ppt.api.ZipSafetyLimits.from_environ",
+            return_value=ZipSafetyLimits(
+                max_compressed_bytes=50 * 1024 * 1024,
+                max_uncompressed_bytes=50 * 1024 * 1024,
+                max_entries=10_000,
+                max_entry_bytes=50 * 1024 * 1024,
+                max_compression_ratio=5.0,
+            ),
+        ):
+            response = self.client.post(
+                "/from-ir",
+                files={
+                    "ir_file": ("deck.slideir.json", ir_bytes, "application/json"),
+                    "assets_zip": ("assets.zip", zip_bytes, "application/zip"),
+                },
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"]["code"], "input-error")
+        self.assertIn("compression", response.json()["detail"]["message"].lower())
         leftover = list(self.job_store.root.glob("pdf2ppt-from-ir-*"))
         self.assertEqual(leftover, [])
 

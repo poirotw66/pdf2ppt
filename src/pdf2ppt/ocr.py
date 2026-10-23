@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import statistics
+import threading
 import warnings
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -19,6 +20,16 @@ from .core import OcrInitializationError, OcrPageData, OcrProcessingError
 from .models import TextBlock
 
 logger = logging.getLogger(__name__)
+
+# Process-level PaddleOCR cache + lock: PDX allows only one init per process, and
+# abandoned timeout workers must not race a second constructor.
+_PADDLE_OCR_INIT_LOCK = threading.RLock()
+_PADDLE_OCR_ENGINE_CACHE: dict[tuple[tuple[str, object], ...], Any] = {}
+_PDX_ALREADY_INITIALIZED_MARKERS = (
+    "PDX has already been initialized",
+    "pdx has already been initialized",
+    "already been initialized",
+)
 
 
 DEFAULT_PPOCR_VERSION = "PP-OCRv5"
@@ -129,8 +140,22 @@ class OcrEngine:
         self.return_word_box = return_word_box
         self._engine: Any | None = None
 
+    def _engine_cache_key(self, engine_kwargs: dict[str, Any]) -> tuple[tuple[str, object], ...]:
+        items: list[tuple[str, object]] = []
+        for key in sorted(engine_kwargs):
+            value = engine_kwargs[key]
+            if isinstance(value, Path):
+                items.append((key, str(value)))
+            else:
+                items.append((key, value))
+        return tuple(items)
+
     def _get_engine(self) -> Any:
-        if self._engine is None:
+        if self._engine is not None:
+            return self._engine
+        with _PADDLE_OCR_INIT_LOCK:
+            if self._engine is not None:
+                return self._engine
             os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
             try:
                 with suppress_known_paddle_runtime_warnings():
@@ -141,6 +166,12 @@ class OcrEngine:
                 ) from error
 
             engine_kwargs = self._build_engine_kwargs()
+            cache_key = self._engine_cache_key(engine_kwargs)
+            cached = _PADDLE_OCR_ENGINE_CACHE.get(cache_key)
+            if cached is not None:
+                self._engine = cached
+                return self._engine
+
             logger.info(
                 "Initializing PaddleOCR engine for lang=%s with model_root=%s doc_orientation=%s textline_orientation=%s",
                 self.lang,
@@ -150,11 +181,27 @@ class OcrEngine:
             )
             try:
                 with suppress_known_paddle_runtime_warnings():
-                    self._engine = PaddleOCR(**engine_kwargs)
+                    engine = PaddleOCR(**engine_kwargs)
             except Exception as error:
+                message = str(error)
+                if any(marker in message for marker in _PDX_ALREADY_INITIALIZED_MARKERS):
+                    # Another thread finished init (or an abandoned worker left PDX
+                    # up). Reuse any cached engine rather than constructing again.
+                    for existing in _PADDLE_OCR_ENGINE_CACHE.values():
+                        self._engine = existing
+                        logger.warning(
+                            "PaddleOCR reported PDX already initialized; reusing cached engine instance."
+                        )
+                        return self._engine
+                    raise OcrInitializationError(
+                        "PaddleOCR PDX is already initialized but no cached engine is available. "
+                        "Avoid constructing multiple OCR engines in one process."
+                    ) from error
                 raise OcrInitializationError(
                     "Failed to initialize PaddleOCR. Verify model downloads and environment dependencies."
                 ) from error
+            _PADDLE_OCR_ENGINE_CACHE[cache_key] = engine
+            self._engine = engine
         return self._engine
 
     def _build_engine_kwargs(self) -> dict[str, Any]:

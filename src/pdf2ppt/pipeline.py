@@ -116,6 +116,7 @@ from .text_style import (
     single_line_fit_width_ratio,
     write_text_fit_debug_report,
 )
+from .timeouts import call_with_timeout, page_timeout_seconds_from_environ
 from .vector_nativization import (
     apply_cell_fills,
     extract_vector_content,
@@ -487,7 +488,21 @@ def analyze_page(
             ocr_render_seconds = perf_counter() - ocr_render_started_at
 
             ocr_started_at = perf_counter()
-            ocr_page_data = ocr_engine.extract_text_blocks(page_image, page.number + 1)
+            try:
+                ocr_page_data = call_with_timeout(
+                    ocr_engine.extract_text_blocks,
+                    _page_timeout_s(options),
+                    page_image,
+                    page.number + 1,
+                    label=f"OCR page {page.number + 1}",
+                )
+            except TimeoutError as error:
+                logger.warning(
+                    "OCR timed out on page %s (%s); continuing with empty OCR / raster fallback",
+                    page.number + 1,
+                    error,
+                )
+                ocr_page_data = OcrPageData(blocks=[], image=page_image)
             ocr_seconds = perf_counter() - ocr_started_at
         ocr_enrich_started_at = perf_counter()
         ocr_reference_image = ocr_page_data.image
@@ -566,17 +581,30 @@ def analyze_page(
                 # Default: keep heuristic paragraph/list grouping; overlay roles later.
                 pending_planner_plan = planned.plan
 
-    layout_page = layout_engine.analyze(
-        layout_image,
-        page_width=float(page.rect.width),
-        page_height=float(page.rect.height),
-        # Figure/region detection still uses pre-merge geometry when the planner
-        # already produced text frames.
-        text_blocks=layout_input_blocks if used_layout_planner else text_blocks,
-        page_number=page_number,
-        shape_bboxes=[shape.bbox for shape in vector_result.shapes],
-        table_bboxes=[table.bbox for table in vector_result.tables],
-    )
+    try:
+        layout_page = call_with_timeout(
+            layout_engine.analyze,
+            _page_timeout_s(options),
+            layout_image,
+            page_width=float(page.rect.width),
+            page_height=float(page.rect.height),
+            # Figure/region detection still uses pre-merge geometry when the planner
+            # already produced text frames.
+            text_blocks=layout_input_blocks if used_layout_planner else text_blocks,
+            page_number=page_number,
+            shape_bboxes=[shape.bbox for shape in vector_result.shapes],
+            table_bboxes=[table.bbox for table in vector_result.tables],
+            label=f"layout page {page_number}",
+        )
+    except TimeoutError as error:
+        logger.warning(
+            "Layout analysis timed out on page %s (%s); falling back to empty heuristic regions",
+            page_number,
+            error,
+        )
+        from .layout import LayoutPageResult
+
+        layout_page = LayoutPageResult(regions=[], engine="heuristic", fallback_reason=str(error))
     if used_layout_planner:
         # Keep geometric figure crops; text boxes already come from the planner.
         layout_figure_images = extract_figure_image_placements(
@@ -949,14 +977,44 @@ def prepare_batched_ocr_page_data(
 
     render_dpi = resolve_render_dpi(options)
     batch_size = max(1, options.ocr_batch_size or DEFAULT_OCR_BATCH_SIZE)
+    page_timeout = _page_timeout_s(options)
     for batch_start in range(0, len(pages_to_ocr), batch_size):
         batch = pages_to_ocr[batch_start : batch_start + batch_size]
         batch_images = [render_page_image(page, dpi=render_dpi) for page, _page_number in batch]
         batch_numbers = [page_number for _page, page_number in batch]
-        batch_ocr_results = ocr_engine.extract_text_blocks_batch(batch_images, batch_numbers)
+        # Scale the per-page budget across the batch so one hung page cannot
+        # block siblings for longer than page_timeout_s each (approx).
+        batch_timeout = (
+            None if page_timeout is None or page_timeout <= 0 else float(page_timeout) * max(1, len(batch))
+        )
+        try:
+            batch_ocr_results = call_with_timeout(
+                ocr_engine.extract_text_blocks_batch,
+                batch_timeout,
+                batch_images,
+                batch_numbers,
+                label=f"OCR batch pages {batch_numbers}",
+            )
+        except TimeoutError as error:
+            logger.warning(
+                "OCR batch timed out for pages %s (%s); continuing with empty OCR for those pages",
+                batch_numbers,
+                error,
+            )
+            batch_ocr_results = [OcrPageData(blocks=[], image=image) for image in batch_images]
         for (page, page_number), page_image, ocr_page_data in zip(batch, batch_images, batch_ocr_results):
             batched_results[page_number] = (page_image, ocr_page_data)
     return batched_results
+
+
+def _page_timeout_s(options: ConversionOptions) -> float | None:
+    """Resolve the per-page OCR/layout timeout; env overrides the options default."""
+
+    configured = getattr(options, "page_timeout_s", None)
+    if configured is None:
+        return page_timeout_seconds_from_environ()
+    # Explicit option wins; env is only the ConversionOptions default source via CLI.
+    return float(configured)
 
 
 def resolve_approved_ocr_blocks(
