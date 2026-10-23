@@ -4,10 +4,9 @@
 
 **English** | [繁體中文](README_tw.md)
 
-`pdf2ppt` converts PDF slides into editable PowerPoint (`.pptx`) decks. It
-targets presentation-style documents: recover editable text and layout when
-possible, fall back to OCR for scanned or image-heavy pages, and rebuild
-backgrounds only where text was removed.
+Convert PDF slides into **editable** PowerPoint (`.pptx`). Native extraction
+first, OCR for scanned pages, optional layout / VLM planning, and backgrounds
+only where text was removed.
 
 ## Showcase
 
@@ -18,24 +17,23 @@ backgrounds only where text was removed.
 
 <p align="center"><em>Source PDF on the left, converted editable PowerPoint on the right.</em></p>
 
-## What it does
+## Features
 
-- Native PDF extraction first; PaddleOCR when the page is scanned or image-heavy
-- Line-box merging so titles stay coherent without collapsing multi-column layouts
-- Optional layout analysis for typed regions, reading order, bullets, and title placeholders ([`docs/layout-analysis.md`](docs/layout-analysis.md))
-- Experimental opt-in VLM layout planner (`--layout-planner gemini`) for structured roles, paragraph grouping, and font-class hints ([`docs/layout-planner.md`](docs/layout-planner.md))
-- Vector / table nativization for simple drawings and ruled tables on digital PDFs ([`docs/vector-nativization.md`](docs/vector-nativization.md))
-- SlideIR agent layer: emit a versioned JSON IR (`emit-ir`) and render PPTX from IR alone (`from-ir`) so agents can round-trip without re-running the PDF pipeline ([`docs/slideir.md`](docs/slideir.md))
-- Background engines: `opencv-fast` (recommended), `white-box`, optional `lama-onnx` / `lama-pytorch`, and cloud generative backends ([`docs/background-engines.md`](docs/background-engines.md))
-- Optional deterministic render-compare-refine loop (`--refine`, experimental) after PPTX build: budget-aware baseline (full or partial), continuous severity ordering, leftover-time reallocation, per-element attempt reset after accepts. Real-soffice page/accept counts are machine-dependent.
-- JSON conversion report, debug artifacts, and an optional OCR review UI
+- Native PDF extraction; PaddleOCR fallback for scanned / image-heavy pages (`[ocr]`)
+- Optional layout analysis (heuristic / PP-Structure) and experimental Gemini layout planner (USD + call caps, circuit breaker, `--layout-planner-apply-grouping`)
+- Vector / table nativization: ruled tables, **borderless / zebra** inference, **tables over photos** ([`docs/vector-nativization.md`](docs/vector-nativization.md))
+- SlideIR agent layer: `emit-ir` / `from-ir` + HTTP (`POST /jobs`, `/emit-ir`, `/slideir.json`, `/slideir-assets.zip`, `POST /from-ir`)
+- Optional `--refine` render-compare loop (LibreOffice)
+- Review UI with **Preview before convert** (overlays, light edits, thumbnails, `baked_background`)
+- Hardening: safe zip limits for `from-ir`, per-page timeouts (`PDF2PPT_PAGE_TIMEOUT_S`, default **120s**), OCR timeout-lane degrade, planner circuit breaker
+- Batch folder convert: `pdf2ppt batch` with resume, summaries, exit codes **0 / 1 / 2**
+- Packaging: pip / pipx extras `[ocr]` `[server]` `[dev]` `[all]` (paddlepaddle **3.2.0**), `python -m pdf2ppt`, Docker Compose
 
-## Install
+Docs index: [`docs/README.md`](docs/README.md).
 
-Requirements: Python 3.11+, Linux recommended. Keep `numpy<2` when using OCR
-(PaddleOCR / PaddleX are more reliable that way).
+## Quick start
 
-Shorter walkthrough: [`docs/quickstart.md`](docs/quickstart.md).
+Requirements: Python **3.11+**, Linux recommended. Keep `numpy<2` with OCR.
 
 ### pip / venv
 
@@ -44,7 +42,9 @@ cd pdf2ppt
 python -m venv .venv && source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install ".[ocr]"          # conversion + OCR
-# python -m pip install -e ".[dev]"    # editable: OCR + Review UI API + lint/pytest
+# python -m pip install -e ".[dev]"    # editable: OCR + API + lint/pytest
+pdf2ppt tests/fixtures/solid_background.pdf output.pptx
+# same entry: python -m pdf2ppt …
 ```
 
 ### pipx
@@ -59,16 +59,14 @@ pdf2ppt --help
 | Extra | What you get |
 | --- | --- |
 | *(core)* | Digital/native PDF → PPTX |
-| `[ocr]` | PaddleOCR + **paddlepaddle==3.2.0** (3.3.1 breaks OCR — do not upgrade) |
+| `[ocr]` | PaddleOCR + **paddlepaddle==3.2.0** (3.3.x breaks PP-OCRv5 on CPU) |
 | `[server]` | FastAPI Review UI backend (`pdf2ppt-api`) |
 | `[dev]` | `[ocr]` + `[server]` + ruff + mypy + pytest |
 | `[all]` | `[ocr]` + `[server]` + CPU ONNX Runtime |
 | `[cpu]` / `[gpu]` | ONNX Runtime for `lama-onnx` |
+| `[layout]` | Alias of `[ocr]` (PP-Structure layout) |
 
-Always prefer an editable install from this repo for development
-(`pip install -e ".[dev]"`). Do not point `PYTHONPATH` at `build/lib/` — that
-directory is a stale setuptools artifact and is gitignored. OCR models default
-to `./model` (override with `--ocr-model-root`).
+OCR models default to `./model` (`--ocr-model-root`). Prefer `pip install -e ".[dev]"` for development; do not point `PYTHONPATH` at `build/lib/`.
 
 ### Docker
 
@@ -78,258 +76,202 @@ docker compose up --build
 # API health: http://127.0.0.1:8008/health
 ```
 
-OCR models default to the named volume `pdf2ppt-models` (writable by
-container uid 10001). To bind a host directory instead, set
-`PDF2PPT_MODEL_DIR=./model` and `chown 10001:10001` it — a plain host-owned
-`./model` is not writable by the container user on Linux. Job outputs use the
-`pdf2ppt-jobs` volume (no `./output` bind).
-
-One-shot CLI (mount inputs/outputs):
+Image sets `PDF2PPT_ROOT=/data`. OCR models use named volume `pdf2ppt-models`
+(writable by container **uid 10001**). For a host bind: `PDF2PPT_MODEL_DIR=./model`
+and `chown 10001:10001`. Jobs use `pdf2ppt-jobs` (no `./output` bind).
 
 ```bash
 docker build -t pdf2ppt .
-# Match the host uid so writes under the bind mount succeed (image USER is 10001).
+# Match host uid so bind-mount writes succeed (image USER is 10001).
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work" -w /work pdf2ppt \
   pdf2ppt tests/fixtures/solid_background.pdf /work/output.pptx
 ```
 
-`GEMINI_API_KEY` is **optional** (layout planner / generative Gemini only) and
-must be passed at runtime (`-e` / Compose `.env`) — it is never baked into
-images. See `.env.example`. LibreOffice is omitted by default; rebuild with
-`--build-arg INSTALL_LIBREOFFICE=1` for `--refine`.
+`GEMINI_API_KEY` is optional (planner / generative Gemini only) and runtime-only
+(see `.env.example`). Rebuild with `--build-arg INSTALL_LIBREOFFICE=1` for `--refine`.
 
-## Quick start
-
-Three commands to a PPTX (after install):
-
-```bash
-python -m pip install ".[ocr]"
-pdf2ppt tests/fixtures/solid_background.pdf output.pptx
-# same entry point:
-python -m pdf2ppt tests/fixtures/solid_background.pdf output.pptx
-```
-
-Common flags:
+## Basic usage
 
 ```bash
 pdf2ppt input.pdf output.pptx --report output.report.json --debug-dir output_debug
 pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
 
-# Experimental opt-in P4 render-compare-refine (LibreOffice required; skipped with a warning if missing)
+# Experimental refine (LibreOffice; skipped with a warning if soffice missing)
 pdf2ppt input.pdf output.pptx --refine --refine-iters 2
 
-# Experimental opt-in Phase-3 VLM layout planner (requires GEMINI_API_KEY; falls back per page)
+# Experimental Gemini layout planner (GEMINI_API_KEY; per-page fallback)
 pdf2ppt input.pdf output.pptx --layout-planner gemini
+pdf2ppt input.pdf output.pptx --layout-planner gemini --layout-planner-apply-grouping
 
-# Agent / SlideIR round-trip (no PPTX until from-ir)
+# SlideIR round-trip
 pdf2ppt emit-ir input.pdf deck.slideir.json
 pdf2ppt from-ir deck.slideir.json rebuilt.pptx
-
-# Batch folder convert (same options as single-file; failure isolation + summary.*)
-pdf2ppt batch ./pdfs -o ./pptx_out
-pdf2ppt batch ./pdfs -o ./pptx_out --recursive --resume --skip-existing
 ```
 
-Batch mode reuses the single-file pipeline. Per-PDF output matches single-file conversion
-byte-for-byte aside from a known PaddleOCR warm-up drift of about ±2/255 on OCR text
-colour when several OCR-heavy files convert in one process (the same drift appears on
-`main` when calling `convert_pdf` back-to-back). Default `--jobs 1` (sequential);
-parallel processes are optional and memory-heavy with OCR. See
-[`docs/cli-reference.md`](docs/cli-reference.md) for discovery rules, exit codes, and
-summary columns.
+Full flag list: [`docs/cli-reference.md`](docs/cli-reference.md).
 
-### Review UI (optional)
+### SlideIR (short)
+
+Schema `1.0`; assets live next to the IR as `{ir}.assets/`. Planner roles /
+reading order apply when `--layout-planner gemini` succeeds; **`groups` only
+with `--layout-planner-apply-grouping`**. HTTP (API on `:8008`):
+
+| Endpoint | Behaviour |
+| --- | --- |
+| `POST /jobs` | Upload PDF/PNG/JPG → job |
+| `POST /jobs/{id}/emit-ir` | Analysis → SlideIR |
+| `GET /jobs/{id}/slideir.json` | Download IR |
+| `GET /jobs/{id}/slideir-assets.zip` | Download assets zip |
+| `POST /from-ir` | Multipart `ir_file` + optional `assets_zip` → PPTX |
+
+Details and zip safety limits: [`docs/slideir.md`](docs/slideir.md).
+
+## Batch usage
 
 ```bash
-# Terminal 1 — API
-python -m pip install -e ".[ocr,server]"
-pdf2ppt-api
-# or: python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
-
-# Terminal 2 — frontend
-cd frontend
-npm install            # first time / after dependency changes
-npm run dev
+pdf2ppt batch ./pdfs -o ./pptx_out
+pdf2ppt batch ./pdfs -o ./pptx_out --recursive --resume --skip-existing
+pdf2ppt batch ./pdfs -o ./pptx_out --fail-fast --jobs 1 --measure-quality
 ```
 
-Open `http://127.0.0.1:5173`. Full workflow, job storage, and API details:
-[`docs/review-ui.md`](docs/review-ui.md). Or use `docker compose up --build`
-and open `http://127.0.0.1:8080`.
+| Topic | Behaviour |
+| --- | --- |
+| Discovery | `*.pdf` / `*.PDF`; non-recursive by default; `--recursive` mirrors subfolders; skips hidden names and PDFs already under the output dir |
+| Isolation | One bad PDF does not stop the batch (unless `--fail-fast`) |
+| Resume | `--skip-existing` / `--resume` keep valid PPTX; after interrupt, rerun with `--resume` |
+| Summaries | `summary.csv` / `summary.json` / `summary.md` (atomic flush after each file) |
+| Jobs | `--jobs` default **1**; `>1` uses processes (OCR is memory-heavy) |
+| Exit codes | **0** all ok/skipped · **1** ≥1 failed · **2** usage/validation · **130** KeyboardInterrupt (partial summary kept) |
 
-### Troubleshooting
+Per-file PPTX matches single-file conversion aside from known PaddleOCR warm-up
+colour drift (~±2/255) when several OCR-heavy files share one process. **Note:**
+SIGINT during native OCR can still end with a non-zero abnormal code from the
+interpreter; `summary.*` remains valid for `--resume`.
+
+## Review UI / API overview
+
+```bash
+# Terminal 1
+python -m pip install -e ".[ocr,server]"
+pdf2ppt-api    # http://127.0.0.1:8008
+
+# Terminal 2
+cd frontend && npm install && npm run dev   # http://127.0.0.1:5173
+```
+
+Or `docker compose up --build` → UI on **8080**.
+
+**Preview before convert:** Build Preview → edit overlays (exclude / role /
+raster fallback) → Convert via `from-ir`.
+
+| Topic | Detail |
+| --- | --- |
+| Endpoints | `POST/GET …/preview`, `PUT …/preview-edits`, `POST …/from-ir`, page thumbs `GET …/pages/{n}.jpg?width=` (UI uses **120**) |
+| Planner | Preview forces layout planner **off** (no Gemini key) |
+| `baked_background` | `true` on `overlay` / `full-page`; exclude may leave baked pixels — use raster fallback |
+| **413** | Preview-edits body > **1 MiB** |
+| **409 `job-busy`** | Job lock wait ~5s, max **4** waiters; UI auto-retries preview-edits with **1s / 2s / 4s** (not upload / final convert / from-ir) |
+
+Full workflow: [`docs/review-ui.md`](docs/review-ui.md).
+
+## Configuration (environment)
+
+Compose forwards only the variables listed under `api.environment` in
+`docker-compose.yml`. Vars such as `PDF2PPT_PAGE_TIMEOUT_S`, `PDF2PPT_ZIP_MAX_*`,
+and `PDF2PPT_LAYOUT_PLANNER_*_USD_PER_MTOK` apply to pip/CLI runs unless you add
+them to compose. Template: [`.env.example`](.env.example).
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PDF2PPT_ROOT` | auto (repo) / Docker `/data` | Project root for models / relative paths |
+| `PDF2PPT_JOB_ROOT` | `.pdf2ppt_jobs` | Review UI job store |
+| `PDF2PPT_JOB_RETENTION_HOURS` | `24` | Job TTL (`<=0` disables expiry) |
+| `PDF2PPT_CORS_ORIGINS` | Vite `5173` origins | Comma-separated; `*` rejected (credentials on); comma-only → defaults |
+| `PDF2PPT_PAGE_TIMEOUT_S` | `120` | Per-page OCR/layout timeout (`<=0` disables); pip/CLI unless added to compose |
+| `PDF2PPT_ZIP_MAX_COMPRESSED_BYTES` | `50 MiB` | `from-ir` assets zip; pip/CLI unless added to compose |
+| `PDF2PPT_ZIP_MAX_UNCOMPRESSED_BYTES` | `200 MiB` | … |
+| `PDF2PPT_ZIP_MAX_ENTRIES` | `10000` | … |
+| `PDF2PPT_ZIP_MAX_ENTRY_BYTES` | `50 MiB` | … |
+| `PDF2PPT_ZIP_MAX_COMPRESSION_RATIO` | `100` | … |
+| `PDF2PPT_LAYOUT_PLANNER_MODEL` | `gemini-3.1-flash-lite` | Planner model override (compose-forwarded) |
+| `PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK` / `_OUTPUT_…` | `0.25` / `1.50` | Cost accounting; pip/CLI unless added to compose |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | unset | Planner / generative Gemini |
+| `OPENAI_API_KEY` | unset | Generative OpenAI |
+| `PDF2PPT_GEMINI_IMAGE_MODEL` / `PDF2PPT_OPENAI_IMAGE_MODEL` | product defaults | Generative image models |
+| `PDF2PPT_API_PORT` / `PDF2PPT_UI_PORT` | `8008` / `8080` | Compose host ports |
+| `PDF2PPT_MODEL_DIR` | named volume `pdf2ppt-models` | Compose model mount |
+
+Never commit real keys.
+
+**Layout planner brakes (CLI defaults):** max calls **30**, max cost **$1.0**,
+timeout **45s**, concurrency **2**, circuit after **2** consecutive failures
+(auth fails open the circuit immediately). Details: [`docs/layout-planner.md`](docs/layout-planner.md).
+
+## Development / testing
+
+```bash
+python -m pip install -e ".[dev]"
+make lint          # ruff
+make typecheck     # mypy
+make test          # pytest
+make test-all      # lint + typecheck + pytest + frontend
+make help          # all shortcuts
+```
+
+CI (`.github/workflows/ci.yml`): pytest, ruff + mypy, frontend tests/build,
+wheel smoke test, report-only slide-quality bench.
+
+## Known limitations
+
+- **Rotated pages (90/180/270°):** SlideIR / overlay element boxes use unrotated
+  page coordinates and may not match the preview image (same as CLI PPTX). Prefer
+  raster fallback on those pages.
+- **Wide non-wrapping text:** LibreOffice often ignores `wrap=none` on
+  placeholders; title widening and OCR single-line heuristics mitigate but do not
+  eliminate reflow vs PowerPoint.
+- **OCR timeout lane:** After a page timeout the OCR worker thread is replaced;
+  Paddle is thread-affine, so ~30–40% of replacements can raise native
+  `std::exception`. The pipeline degrades to empty OCR / raster fallback for that
+  page instead of failing the whole job. Prefer the default 120s timeout.
+- **Refine time reserve:** The refine loop refuses to start a trial when remaining
+  budget is below the issued soffice reserve (`max(5s, 3×` last single-page
+  render)), so a tiny leftover crumb cannot kill a healthy convert. Default deck
+  budget is **90s**; counts are machine-dependent.
+- **Batch SIGINT during native OCR:** Summary files stay valid; the process may
+  still exit with a non-zero abnormal code — rerun with `--resume`.
+
+## Troubleshooting / FAQ
 
 | Issue | Fix |
 | --- | --- |
-| `Failed to import PaddleOCR` | Install `[ocr]`; keep `numpy<2` |
-| OCR fails after upgrading Paddle | Stay on **paddlepaddle==3.2.0** (3.3.1 breaks PP-OCRv5) |
-| CJK metrics / refine look wrong | Install `fonts-noto-cjk` |
-| `--refine` skipped | Install LibreOffice Impress (`soffice` on PATH) |
-| Conflicting fastapi/pydantic | Use a dedicated venv with `[server]` |
+| `Failed to import PaddleOCR` / missing OCR extra | `pip install 'pdf2ppt[ocr]'`; keep `numpy<2` |
+| OCR breaks after upgrading Paddle | Stay on **paddlepaddle==3.2.0** (3.3.x breaks PP-OCRv5 on CPU) |
+| `--refine` skipped | Install LibreOffice Impress (`soffice` on PATH); Docker: `INSTALL_LIBREOFFICE=1` |
+| Page / OCR timeouts, empty OCR after hang | Raise `--page-timeout-s` / `PDF2PPT_PAGE_TIMEOUT_S`; see OCR lane limitation above |
+| `409 job-busy` | Another request holds the job; UI retries preview-edits (1/2/4s). Wait or retry Convert manually |
+| `413` on preview-edits | Body exceeds **1 MiB** — reduce edit payload |
+| Docker permission / model dir not writable | Named volume `pdf2ppt-models`, or `chown 10001:10001` host bind; CLI: `docker run --user "$(id -u):$(id -g)"` |
+| `PDF2PPT_CORS_ORIGINS=*` | Rejected while credentials are enabled; list explicit origins |
+| fastapi / pydantic conflicts | Clean venv + `[server]` |
+| CJK / refine metrics look wrong | Install `fonts-noto-cjk` |
 
-### Preview before convert
-
-In the Review UI, switch to **Preview before convert** after uploading a PDF:
-
-1. Click **Build Preview** — runs analysis → SlideIR (layout planner off; no Gemini key needed) and shows each page image with overlays for text blocks (role + reading order), tables/cells, images, and vector shapes.
-2. Toggle overlay layers, exclude individual blocks/tables/images/shapes, change a text block’s role (`title` / `body` / `header` / `footer` / `page_number`), or mark a page as **raster fallback**.
-3. Click **Convert** — edits are saved, then PPTX is built with `from-ir` so what you previewed is what you download.
-
-HTTP helpers (same backend): `POST /jobs/{id}/preview`, `GET /jobs/{id}/preview`, `PUT /jobs/{id}/preview-edits`, `POST /jobs/{id}/from-ir`. The default CLI convert path is unchanged when this UI flow is not used.
-
-**Limitations**
-
-- **Exclude vs baked backgrounds:** On `overlay` / `full-page` pages, photos and many shapes may already be painted into the background raster. Excluding an IR shape/image drops the native object only — baked pixels may stay visible. Use **raster fallback** when the preview does not change or you need a full-page image. Preview responses set `baked_background: true` on those pages.
-- **Re-analysis clears edits:** Element ids are positional (`layout_text_1_N`). Building preview again or running `emit-ir` deletes saved `preview_edits.json` so Convert cannot fail with unknown ids after OCR box changes.
-- **`409 job-busy`:** Another request is still working on this job; retry shortly. Contended preview-edits / from-ir calls wait briefly, then return this code instead of hanging the threadpool.
-- **Rotated pages (known, pre-existing):** For pages rotated 90/180/270°, SlideIR bboxes may not match the preview image (same mismatch as CLI PPTX on `main`). Prefer raster fallback on those pages until fixed upstream.
-
-## SlideIR
-
-SlideIR is pdf2ppt’s **versioned JSON intermediate representation** (schema
-`1.0`). Agents treat it as a deterministic evidence layer: analyze a PDF once
-(`emit-ir`), edit structure fields, then render (`from-ir`) without re-running
-the PDF pipeline. Schema: `src/pdf2ppt/schemas/slideir.schema.json`. I/O:
-`pdf2ppt.ir_io`. Full detail: [`docs/slideir.md`](docs/slideir.md).
-
-### Main fields
-
-| Level | Field | Meaning |
-| --- | --- | --- |
-| Deck | `schema_version` | Currently `"1.0"`; reject unknown majors |
-| Deck | `slide_width_pt` / `slide_height_pt` | Slide size in PDF points |
-| Deck | `assets_dir` | Sibling asset directory name (default `{ir_filename}.assets`) |
-| Deck | `source` | Optional source path and page count |
-| Deck | `plan_metadata` | Optional; written whenever `--layout-planner` is enabled (including when pages fall back) |
-| Page | `page_number` / `page_kind` / `background_mode` | Page index, digital/scanned/hybrid, background mode |
-| Page | `text_blocks` | Text boxes (`id`, `bbox`, `text`, style, `block_role`, `reading_order`, `paragraphs`, …) |
-| Page | `shapes` / `tables` / `images` | Native shapes, tables, image crops (images reference assets by relative path) |
-| Page | `layout_regions` | Layout regions |
-| Page | `groups` | Optional element groups (`id`, `member_ids`, optional `bbox`/`confidence`); written only with `--layout-planner-apply-grouping` |
-| Page | `plan_metadata` | Optional per-page planner metadata (engine, model, accepted groups, …) |
-| Page | `background` | Optional background image asset ref |
-| Page | `reading_order` | Optional explicit element-id order |
-
-Assets use **relative paths next to the IR file** (not base64):
-
-```text
-deck.slideir.json
-deck.slideir.json.assets/
-  pages/
-    001/
-      background.png  # optional; .png/.jpg depending on image data
-      image_000.png
-```
-
-Treat emitted text as ground truth (`locked: true`). Prefer editing
-`block_role`, `reading_order`, and renderer-supported styles over rewriting
-strings; do not invent text or point assets outside `assets_dir`. With
-`--layout-planner gemini`, a successful plan writes `pages[].plan_metadata`
-and applies block roles and reading order to `text_blocks` before the IR is
-saved. Paragraph merges and `pages[].groups` are written only with
-`--layout-planner-apply-grouping`. `from-ir` renders the structures already
-present in the IR.
-
-### Export IR from a PDF
-
-```bash
-# IR only (no PPTX)
-pdf2ppt emit-ir input.pdf deck.slideir.json
-# equivalent:
-pdf2ppt input.pdf --emit-ir deck.slideir.json --ir-only
-
-# Convert and also write IR
-pdf2ppt input.pdf output.pptx --emit-ir deck.slideir.json
-```
-
-Analysis flags (`--vector-mode`, `--layout-engine`, OCR/inpaint options, …)
-apply to `emit-ir` the same way as `convert`.
-
-### Edit and rebuild PPTX
-
-```bash
-# Subcommand
-pdf2ppt from-ir deck.slideir.json rebuilt.pptx
-# equivalent flag form:
-pdf2ppt --from-ir deck.slideir.json -o rebuilt.pptx
-```
-
-HTTP (Review UI backend, default `http://127.0.0.1:8008`):
-
-| Endpoint | Behavior |
-| --- | --- |
-| `POST /jobs/{id}/emit-ir` | Analysis → SlideIR only |
-| `POST /jobs/{id}/preview` | Analyze → SlideIR (planner forced off) + overlay preview JSON |
-| `GET /jobs/{id}/preview` | Overlay preview from existing SlideIR + saved edits |
-| `PUT /jobs/{id}/preview-edits` | Save exclude / role / raster-fallback edits |
-| `POST /jobs/{id}/from-ir` | Apply edits → render job SlideIR to PPTX |
-| `GET /jobs/{id}/slideir.json` | Download IR JSON |
-| `GET /jobs/{id}/slideir-assets.zip` | Download assets directory as a zip |
-| `POST /from-ir` | Multipart: required `ir_file` + optional `assets_zip` → PPTX |
-
-Create the job first with `POST /jobs` (multipart file upload);
-`POST /jobs/{id}/emit-ir` then takes a JSON body (`{}` for defaults). IR
-downloaded from the API names its assets folder `output.slideir.json.assets`,
-so CLI `from-ir` users must unzip into a folder of that name
-(`POST /from-ir` handles it automatically).
-
-```bash
-curl -o rebuilt.pptx \
-  -F "ir_file=@deck.slideir.json;type=application/json" \
-  -F "assets_zip=@deck.slideir.assets.zip;type=application/zip" \
-  http://127.0.0.1:8008/from-ir
-```
-
-### Short example
-
-```bash
-pdf2ppt emit-ir tests/fixtures/solid_background.pdf /tmp/deck.slideir.json
-# Optionally edit /tmp/deck.slideir.json (e.g. text_blocks[].block_role / reading_order)
-pdf2ppt from-ir /tmp/deck.slideir.json /tmp/deck.pptx
-```
-
-## Architecture
-
-```text
-PDF → page classify (digital / scanned / hybrid)
-    → native extract and/or OCR (+ line merge, optional layout)
-    → optional vector/table nativization
-    → conditional background (elements / overlay / full-page)
-    → PPTX + JSON report
-    → optional --refine (experimental render-compare-fix; LibreOffice)
-    → optional SlideIR emit / from-ir render
-```
-
-| Piece | Role |
-| --- | --- |
-| `src/pdf2ppt/cli.py` | CLI entry |
-| `src/pdf2ppt/batch.py` | Batch folder convert |
-| `src/pdf2ppt/pipeline.py` | Conversion orchestration |
-| `src/pdf2ppt/ir_io.py` | SlideIR serialize / deserialize |
-| `src/pdf2ppt/api.py` | Review UI backend |
-| `frontend/` | OCR box review UI |
-
-Background strategy in short: keep native elements when safe; for overlay
-pages, `auto` prefers `opencv-fast`, then `lama-onnx` when a LaMa runtime is
-available, otherwise `white-box`. Details:
-[`docs/background-engines.md`](docs/background-engines.md).
-
-## More docs
+## Docs
 
 | Doc | Contents |
 | --- | --- |
-| [`docs/quickstart.md`](docs/quickstart.md) | Install, first convert, Docker, troubleshooting |
-| [`docs/cli-reference.md`](docs/cli-reference.md) | Flags, modes, outputs, limitations |
-| [`docs/background-engines.md`](docs/background-engines.md) | Inpaint engines and `auto` routing |
-| [`docs/review-ui.md`](docs/review-ui.md) | Review UI setup and API |
-| [`docs/layout-analysis.md`](docs/layout-analysis.md) | Heuristic / PP-Structure layout |
-| [`docs/vector-nativization.md`](docs/vector-nativization.md) | Shape and table nativization |
-| [`docs/slideir.md`](docs/slideir.md) | SlideIR emit-ir / from-ir agent layer |
+| [`docs/README.md`](docs/README.md) | **Index** of all docs |
+| [`docs/quickstart.md`](docs/quickstart.md) | Install, first convert, Docker |
+| [`docs/architecture.md`](docs/architecture.md) | Pipeline diagram + module map |
+| [`docs/cli-reference.md`](docs/cli-reference.md) | Flags, batch, exits, OCR timeout |
+| [`docs/review-ui.md`](docs/review-ui.md) | Review UI + API + preview |
+| [`docs/slideir.md`](docs/slideir.md) | SlideIR emit-ir / from-ir |
+| [`docs/layout-planner.md`](docs/layout-planner.md) | Gemini planner caps / circuit |
+| [`docs/layout-analysis.md`](docs/layout-analysis.md) | Heuristic / PP-Structure |
+| [`docs/vector-nativization.md`](docs/vector-nativization.md) | Shapes + borderless/zebra tables |
+| [`docs/background-engines.md`](docs/background-engines.md) | Inpaint engines / `auto` |
 | [`docs/generative-inpaint.md`](docs/generative-inpaint.md) | Cloud generative backends |
-| [`docs/slide-quality.md`](docs/slide-quality.md) | Fidelity / editability evaluation |
-
-CI (`.github/workflows/ci.yml`) runs pytest, ruff + mypy, frontend tests and
-build, a packaging wheel smoke test, plus a report-only slide-quality bench.
-Local shortcuts: `make help`.
+| [`docs/slide-quality.md`](docs/slide-quality.md) | Fidelity / refine evaluation |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history |
 
 ## License
 

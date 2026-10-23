@@ -8,6 +8,24 @@ pipeline.
 Schema file (bundled): `src/pdf2ppt/schemas/slideir.schema.json`  
 Python I/O: `pdf2ppt.ir_io`
 
+## Main fields
+
+| Level | Field | Meaning |
+| --- | --- | --- |
+| Deck | `schema_version` | Currently `"1.0"`; reject unknown majors |
+| Deck | `slide_width_pt` / `slide_height_pt` | Slide size in PDF points |
+| Deck | `assets_dir` | Sibling asset directory name (default `{ir_filename}.assets`) |
+| Deck | `source` | Optional source path and page count |
+| Deck | `plan_metadata` | Optional; written whenever `--layout-planner` is enabled (including when pages fall back) |
+| Page | `page_number` / `page_kind` / `background_mode` | Page index, digital/scanned/hybrid, background mode |
+| Page | `text_blocks` | Text boxes (`id`, `bbox`, `text`, style, `block_role`, `reading_order`, `paragraphs`, …) |
+| Page | `shapes` / `tables` / `images` | Native shapes, tables, image crops (images reference assets by relative path) |
+| Page | `layout_regions` | Layout regions |
+| Page | `groups` | Optional element groups (`id`, `member_ids`, optional `bbox`/`confidence`); written only with `--layout-planner-apply-grouping` |
+| Page | `plan_metadata` | Optional per-page planner metadata (engine, model, accepted groups, …) |
+| Page | `background` | Optional background image asset ref |
+| Page | `reading_order` | Optional explicit element-id order |
+
 ## What is in scope
 
 IR ⊆ what P1/P2 already render:
@@ -103,9 +121,10 @@ Limits (env overrides, defaults in parentheses):
 `PDF2PPT_ZIP_MAX_COMPRESSION_RATIO` (100). Oversized or unsafe zips return 4xx.
 
 `PUT /jobs/{id}/preview-edits` and `POST /jobs/{id}/from-ir` take a short
-per-job lock. If another request is still working on the same job, they return
-`409` with code `job-busy` (retry shortly). Re-running `POST /preview` or
-`POST /emit-ir` also clears saved `preview_edits.json` for that job.
+per-job lock (~5s wait, max **4** waiters). If the lock cannot be acquired they
+return `409` with code `job-busy`. Preview-edits bodies over **1 MiB** return
+`413`. Re-running `POST /preview` or `POST /emit-ir` also clears saved
+`preview_edits.json` for that job. See [`review-ui.md`](review-ui.md).
 
 Defaults leave existing convert behavior unchanged.
 

@@ -25,7 +25,7 @@ npm install            # first time, or after dependency changes
 npm run dev
 ```
 
-Docker Compose alternative (API + static UI, output volume, healthchecks):
+Docker Compose alternative (API + static UI, named volumes for jobs/models, healthchecks; no `./output` bind — download PPTX over HTTP):
 
 ```bash
 docker compose up --build
@@ -59,10 +59,11 @@ Optional second mode (no Gemini / layout planner required):
 Notes:
 
 - Re-running **Build Preview** or **emit-ir** deletes `preview_edits.json` for that job (element ids are positional and go stale after OCR box edits). The UI also resets its local edit state.
-- Contended `PUT /preview-edits` and `POST /from-ir` may return `409` with code `job-busy` when another request is still working on the same job; retry shortly.
+- Contended `PUT /preview-edits` and `POST /from-ir` wait up to ~**5s** for the job lock, with at most **4** waiters per job, then return `409` with code `job-busy`. The frontend auto-retries **preview-edits** (and related preview fetches) with **1s → 2s → 4s** backoff; upload, detect, final convert, and from-ir Convert do **not** auto-retry.
+- `PUT /preview-edits` bodies larger than **1 MiB** return **413** (CORS headers still included).
 - Exclude removes native SlideIR objects. On `overlay` / `full-page` pages (`baked_background: true`), content painted into the background raster may stay visible — if the preview does not change, use raster fallback for a full-page image.
-- Thumbnails use `GET /jobs/{id}/pages/{n}.jpg?width=120`.
-- Rotated PDF pages may show overlay/image mismatch (pre-existing SlideIR/geometry issue on `main`); prefer raster fallback there.
+- Thumbnails use `GET /jobs/{id}/pages/{n}.jpg?width=120` (`width` allowed range 16–4096).
+- Rotated PDF pages may show overlay/image mismatch (element boxes use unrotated coordinates; pre-existing on `main`); prefer raster fallback there.
 
 ## Job storage and cleanup
 
@@ -97,9 +98,13 @@ Notes:
 - `GET /jobs/{job_id}/preview` — overlay preview from existing SlideIR + edits
 - `PUT /jobs/{job_id}/preview-edits` — save exclude / role / raster-fallback edits
 - `POST /jobs/{job_id}/from-ir` — apply edits and render PPTX from job SlideIR
-- `GET /jobs/{job_id}/pages/{page_number}.jpg`
+- `GET /jobs/{job_id}/pages/{page_number}.jpg` optional `?width=` (16–4096)
+- `GET /jobs/{job_id}/slideir.json` / `GET /jobs/{job_id}/slideir-assets.zip`
+- `POST /jobs/{job_id}/emit-ir`
+- `POST /from-ir` (multipart `ir_file` + optional `assets_zip`)
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`
+- `GET /health`
 - `DELETE /jobs/{job_id}`
 
 Detect request options:
@@ -107,6 +112,11 @@ Detect request options:
 - `confidence_threshold` filters out OCR boxes below the given confidence before the response is returned (default `0.75`).
 - `return_word_box`: mirrors CLI `--ocr-return-word-box`, default `false`.
 - The API applies the same line-merge post-processing as the CLI before returning boxes. Restart the API after code changes and rerun detect; existing job detection payloads are not refreshed automatically.
+
+ConvertRequest layout-planner fields: the API exposes only `layout_planner`,
+`layout_planner_max_calls` (0–100), `layout_planner_timeout_s` (1–120),
+`layout_planner_apply_grouping`, and `layout_planner_apply_fonts`. The planner
+model, USD cap, and cache dir are server-side only (not client-settable).
 
 ## Error response model
 
@@ -125,7 +135,7 @@ Common error codes:
 - `ocr-processing-error`: OCR runtime failed while processing the request
 - `page-conversion-error`: a page failed during conversion
 - `not-found`: unknown job id or missing generated artifact
-- `job-busy`: another request is still working on this job; retry shortly (`409`)
+- `job-busy`: another request is still working on this job (`409`; max 4 waiters, ~5s lock wait)
 
 Typical endpoint status codes:
 
@@ -133,8 +143,11 @@ Typical endpoint status codes:
 - `POST /jobs/{job_id}/detect`: `200`, `404`, `502`, `503`
 - `PUT /jobs/{job_id}/boxes`: `200`, `400`, `404`
 - `POST /jobs/{job_id}/convert`: `200`, `400`, `404`, `500`, `502`, `503`
+- `POST /jobs/{job_id}/preview`: `200`, `404`, `500`, `502`, `503`
 - `PUT /jobs/{job_id}/preview-edits`: `200`, `400`, `404`, `409`, `413`
 - `POST /jobs/{job_id}/from-ir`: `200`, `400`, `404`, `409`, `500`
+- `POST /from-ir`: `200`, `400` (also zip safety / size limits)
+- `GET /health`: `200`
 
 ## Related source files
 

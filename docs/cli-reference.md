@@ -130,8 +130,16 @@ estimated styling.
 - Simple vector drawings and ruled tables on digital pages become native PPT shapes/tables by default (`--vector-mode auto`). Gradients, patterns, clips, and very dense illustrations still fall back to the raster background; use `--vector-mode off` to disable. Details: [`vector-nativization.md`](vector-nativization.md).
 - Layout analysis defaults to `heuristic` so CI/CPU paths need no model download. Opt into PP-StructureV3 with `--layout-engine ppstructure`. Details: [`layout-analysis.md`](layout-analysis.md).
 - Experimental VLM layout planner: `--layout-planner gemini` (opt-in, API key). Details: [`layout-planner.md`](layout-planner.md).
-- SlideIR (`emit-ir` / `from-ir`) round-trips P1/P2 structures; Phase-3 `groups` / `plan_metadata` are written and rendered when the layout planner succeeds. Details: [`slideir.md`](slideir.md).
+- SlideIR (`emit-ir` / `from-ir`) round-trips P1/P2 structures. With `--layout-planner gemini`, successful plans write `pages[].plan_metadata` and apply roles / reading order; deck-level `plan_metadata` is written whenever the planner is enabled (including page fallbacks). Paragraph merges and `pages[].groups` are written **only** with `--layout-planner-apply-grouping`. Details: [`slideir.md`](slideir.md).
 - Bold and color restoration for OCR text are heuristic-based.
+
+### Known limitations (honest)
+
+- **Rotated pages (90/180/270°):** element boxes in SlideIR / overlays use unrotated page coordinates and may not align with the preview image (same as CLI PPTX). Prefer raster fallback.
+- **Wide non-wrapping text:** LibreOffice often ignores `wrap=none` on placeholders; title widening and OCR single-line heuristics mitigate but do not eliminate reflow vs PowerPoint.
+- **OCR timeout lane:** after a timeout the worker thread is replaced; Paddle is thread-affine so ~30–40% of replacements can raise native `std::exception`. The pipeline degrades to empty OCR / raster fallback for that page (not HTTP 502). Prefer the default 120s timeout so swaps stay rare.
+- **Refine time reserve:** trials will not start when remaining budget is below the issued soffice reserve (`max(5s, 3×` last single-page render)); default deck budget **90s**.
+- **Batch SIGINT during native OCR:** `summary.*` stays valid for `--resume`, but the process may exit with a non-zero abnormal code.
 
 ## Development
 
