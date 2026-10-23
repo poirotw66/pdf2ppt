@@ -117,9 +117,11 @@ from .text_style import (
     write_text_fit_debug_report,
 )
 from .timeouts import (
+    abandoned_calls_running,
     call_with_timeout,
     ocr_init_timeout_seconds,
     page_timeout_seconds_from_environ,
+    timeout_lane_generation,
 )
 from .vector_nativization import (
     apply_cell_fills,
@@ -492,6 +494,7 @@ def analyze_page(
             ocr_render_seconds = perf_counter() - ocr_render_started_at
 
             ocr_started_at = perf_counter()
+            page_start_generation = timeout_lane_generation()
             try:
                 ocr_page_data = call_with_timeout(
                     ocr_engine.extract_text_blocks,
@@ -507,6 +510,17 @@ def analyze_page(
                     error,
                 )
                 ocr_page_data = OcrPageData(blocks=[], image=page_image)
+            except OcrProcessingError as error:
+                if _ocr_error_after_lane_swap(error, start_generation=page_start_generation):
+                    logger.warning(
+                        "OCR failed on page %s after timeout lane replacement (%s); "
+                        "continuing with empty OCR / raster fallback",
+                        page.number + 1,
+                        error,
+                    )
+                    ocr_page_data = OcrPageData(blocks=[], image=page_image)
+                else:
+                    raise
             ocr_seconds = perf_counter() - ocr_started_at
         ocr_enrich_started_at = perf_counter()
         ocr_reference_image = ocr_page_data.image
@@ -961,6 +975,28 @@ def _merge_layout_figures(
     return merged
 
 
+def _engine_wedged(timeout_s: float) -> bool:
+    """True only when a *timed-out (abandoned)* call still holds the predict lock.
+
+    A lock held by the live lane worker (another job's legitimate, merely slow
+    predict) is queue wait, not a wedge.
+    """
+
+    if wait_for_predict_idle(timeout_s):
+        return False
+    return abandoned_calls_running() > 0
+
+
+def _ocr_error_after_lane_swap(
+    _error: OcrProcessingError,
+    *,
+    start_generation: int,
+) -> bool:
+    """Whether an OCR failure likely comes from Paddle thread-affinity after a timeout."""
+
+    return timeout_lane_generation() != start_generation or abandoned_calls_running() > 0
+
+
 def prepare_batched_ocr_page_data(
     document: fitz.Document,
     options: ConversionOptions,
@@ -984,6 +1020,7 @@ def prepare_batched_ocr_page_data(
     page_timeout = _page_timeout_s(options)
     timeout_enabled = page_timeout is not None and page_timeout > 0
     engine_wedged = False
+    start_generation = timeout_lane_generation()
 
     if pages_to_ocr:
         # Warm the engine on the shared timeout lane under a generous budget so
@@ -1004,12 +1041,13 @@ def prepare_batched_ocr_page_data(
                 page_image = render_page_image(page, dpi=render_dpi)
                 batched_results[page_number] = (page_image, OcrPageData(blocks=[], image=page_image))
             return batched_results
+        start_generation = timeout_lane_generation()
 
     for batch_start in range(0, len(pages_to_ocr), batch_size):
         batch = pages_to_ocr[batch_start : batch_start + batch_size]
         batch_images = [render_page_image(page, dpi=render_dpi) for page, _page_number in batch]
         batch_numbers = [page_number for _page, page_number in batch]
-        if timeout_enabled and not engine_wedged and not wait_for_predict_idle(float(page_timeout or 0.0)):
+        if timeout_enabled and not engine_wedged and _engine_wedged(float(page_timeout or 0.0)):
             # An abandoned worker is still inside a native predict() and holds the
             # predict lock: nothing can succeed until it returns. Stop feeding it.
             engine_wedged = True
@@ -1045,7 +1083,7 @@ def prepare_batched_ocr_page_data(
             )
             batch_ocr_results = []
             for image, page_number in zip(batch_images, batch_numbers):
-                if not engine_wedged and not wait_for_predict_idle(float(page_timeout or 0.0)):
+                if not engine_wedged and _engine_wedged(float(page_timeout or 0.0)):
                     engine_wedged = True
                     logger.error(
                         "OCR engine is wedged; skipping OCR for the remaining pages of this job"
@@ -1068,7 +1106,31 @@ def prepare_batched_ocr_page_data(
                         page_error,
                     )
                     page_data = OcrPageData(blocks=[], image=image)
+                except OcrProcessingError as page_error:
+                    if _ocr_error_after_lane_swap(page_error, start_generation=start_generation):
+                        logger.warning(
+                            "OCR failed on page %s after timeout lane replacement (%s); "
+                            "continuing with empty OCR / raster fallback",
+                            page_number,
+                            page_error,
+                        )
+                        page_data = OcrPageData(blocks=[], image=image)
+                    else:
+                        raise
                 batch_ocr_results.append(page_data)
+        except OcrProcessingError as error:
+            # After a timeout the lane may run on a new thread; Paddle can raise
+            # std::exception permanently on that thread — degrade instead of 502.
+            if _ocr_error_after_lane_swap(error, start_generation=start_generation):
+                logger.warning(
+                    "OCR batch failed after timeout lane replacement for pages %s (%s); "
+                    "continuing with empty OCR / raster fallback",
+                    batch_numbers,
+                    error,
+                )
+                batch_ocr_results = [OcrPageData(blocks=[], image=image) for image in batch_images]
+            else:
+                raise
         for (page, page_number), page_image, ocr_page_data in zip(batch, batch_images, batch_ocr_results):
             batched_results[page_number] = (page_image, ocr_page_data)
     return batched_results

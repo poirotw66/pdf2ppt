@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from PIL import Image
 
 from .core import OcrInitializationError, OcrPageData, OcrProcessingError
 from .models import TextBlock
+from .timeouts import abandoned_calls_running
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,23 @@ def wait_for_predict_idle(timeout_s: float) -> bool:
         return True
     return False
 
+
+EXIT_DRAIN_TIMEOUT_SECONDS = 15.0
+
+
+def _drain_abandoned_predict_at_exit() -> None:
+    """Let a timed-out (abandoned) native predict() finish before interpreter teardown.
+
+    Finalizing while a daemon thread is still inside native PaddleOCR code can
+    abort/segfault the process (exit -6/-11) after the output was written. A slow
+    predict returns within the grace period; a truly wedged one is abandoned.
+    """
+
+    if abandoned_calls_running() > 0:
+        wait_for_predict_idle(EXIT_DRAIN_TIMEOUT_SECONDS)
+
+
+atexit.register(_drain_abandoned_predict_at_exit)
 
 DEFAULT_PPOCR_VERSION = "PP-OCRv5"
 DEFAULT_DOC_ORIENTATION_MODEL_NAME = "PP-LCNet_x1_0_doc_ori"

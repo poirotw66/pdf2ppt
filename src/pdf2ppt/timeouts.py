@@ -18,6 +18,14 @@ Design constraints (verified against real PaddleOCR):
   and drops references to call arguments so page images are not pinned.
 - Nested ``call_with_timeout`` from the worker thread runs inline.
 
+Known limitation (PaddleOCR): after a timeout the lane gets a new worker
+thread. Predictors are thread-affine; ``predict`` on an engine built on a
+previous thread can raise ``std::exception`` on some replacements (~30–40%).
+Pipeline callers catch that as ``OcrProcessingError`` after a lane generation
+change and degrade to empty OCR for the page/job rather than aborting with
+HTTP 502. Prefer keeping ``PDF2PPT_PAGE_TIMEOUT_S`` generous (default 120) so
+timeouts (and thus thread swaps) stay rare.
+
 LibreOffice invocations should use
 :func:`pdf2ppt.render_compare.run_subprocess_with_process_group` so timeouts
 reap the process tree.
@@ -70,7 +78,17 @@ def ocr_init_timeout_seconds(page_timeout_s: float | None) -> float | None:
 class _Job:
     """One submitted call. ``started`` is set when a worker actually begins it."""
 
-    __slots__ = ("func", "args", "kwargs", "started", "done", "result", "error", "running")
+    __slots__ = (
+        "func",
+        "args",
+        "kwargs",
+        "started",
+        "done",
+        "result",
+        "error",
+        "running",
+        "abandoned",
+    )
 
     def __init__(
         self,
@@ -86,6 +104,7 @@ class _Job:
         self.result: object = None
         self.error: BaseException | None = None
         self.running = False
+        self.abandoned = False
 
 
 class _TimeoutLane:
@@ -100,6 +119,12 @@ class _TimeoutLane:
       call arguments/result so a hung call does not pin page images forever.
     * A call made *from* the worker thread (nesting) runs inline instead of
       deadlocking on its own lane.
+
+    Known limitation: after a timeout the lane gets a **new** worker thread.
+    PaddleOCR predictors are thread-affine; calling an engine constructed on a
+    previous thread can raise ``std::exception`` on some replacements. Callers
+    should catch ``OcrProcessingError`` after a lane generation change and
+    degrade (empty OCR) rather than abort the whole job.
     """
 
     def __init__(self, *, name: str = "pdf2ppt-timeout-lane") -> None:
@@ -108,6 +133,15 @@ class _TimeoutLane:
         self._pending: collections.deque[_Job] = collections.deque()
         self._worker: threading.Thread | None = None
         self._generation = 0
+        self._abandoned_running = 0  # timed-out calls whose worker has not returned yet
+
+    def abandoned_running(self) -> int:
+        with self._cv:
+            return self._abandoned_running
+
+    def generation(self) -> int:
+        with self._cv:
+            return self._generation
 
     def _spawn_locked(self) -> None:
         self._generation += 1
@@ -132,7 +166,10 @@ class _TimeoutLane:
                     job.error = error
                 finally:
                     del func, args, kwargs
-                    job.done.set()
+                    with self._cv:  # done+abandoned must change atomically w.r.t. the caller's check
+                        if job.abandoned:
+                            self._abandoned_running -= 1
+                        job.done.set()
 
         worker = threading.Thread(target=run, name=f"{self._name}-{generation}", daemon=True)
         self._worker = worker
@@ -165,6 +202,8 @@ class _TimeoutLane:
             with self._cv:
                 if not job.done.is_set():
                     # Abandon the hung worker; it retires when its call returns.
+                    job.abandoned = True
+                    self._abandoned_running += 1
                     self._spawn_locked()
                     self._cv.notify_all()
                     raise TimeoutError(f"{label} timed out after {float(timeout_s):.1f}s")
@@ -183,6 +222,7 @@ class _TimeoutLane:
             self._generation += 1  # retires the current worker
             self._pending.clear()
             self._worker = None
+            self._abandoned_running = 0
             self._cv.notify_all()
 
 
@@ -217,6 +257,18 @@ def call_with_timeout(
     return active.call(func, float(timeout_s), *args, label=label, **kwargs)
 
 
+def abandoned_calls_running() -> int:
+    """Number of timed-out calls whose abandoned worker is still inside the call."""
+
+    return _DEFAULT_LANE.abandoned_running()
+
+
+def timeout_lane_generation() -> int:
+    """Monotonic generation of the process-wide timeout lane (increments on spawn)."""
+
+    return _DEFAULT_LANE.generation()
+
+
 def reset_timeout_lane_for_tests() -> None:
     """Reset the process-wide timeout lane (tests only)."""
 
@@ -226,8 +278,10 @@ def reset_timeout_lane_for_tests() -> None:
 __all__ = [
     "DEFAULT_OCR_INIT_TIMEOUT_SECONDS",
     "DEFAULT_PAGE_TIMEOUT_SECONDS",
+    "abandoned_calls_running",
     "call_with_timeout",
     "ocr_init_timeout_seconds",
     "page_timeout_seconds_from_environ",
     "reset_timeout_lane_for_tests",
+    "timeout_lane_generation",
 ]

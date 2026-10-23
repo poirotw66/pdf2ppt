@@ -13,14 +13,16 @@ from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
-from pdf2ppt.core import ConversionOptions, OcrPageData
+from pdf2ppt.core import ConversionOptions, OcrPageData, OcrProcessingError
 from pdf2ppt.pipeline import analyze_page, prepare_batched_ocr_page_data
 from pdf2ppt.timeouts import (
     _TimeoutLane,
+    abandoned_calls_running,
     call_with_timeout,
     ocr_init_timeout_seconds,
     page_timeout_seconds_from_environ,
     reset_timeout_lane_for_tests,
+    timeout_lane_generation,
 )
 
 
@@ -270,7 +272,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
         document.close()
 
     def test_wedged_predict_skips_remaining_pages_quickly(self) -> None:
-        """If predict lock never frees, remaining pages skip OCR after one wait (problem 1)."""
+        """Abandoned timed-out predict holding the lock → skip remaining OCR after one wait."""
 
         import fitz
 
@@ -311,9 +313,10 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
                         return_value=Image.new("RGB", (8, 8)),
                     ):
                         with patch("pdf2ppt.pipeline.wait_for_predict_idle", side_effect=never_idle):
-                            t0 = time.perf_counter()
-                            results = prepare_batched_ocr_page_data(document, options, ocr_engine)
-                            elapsed = time.perf_counter() - t0
+                            with patch("pdf2ppt.pipeline.abandoned_calls_running", return_value=1):
+                                t0 = time.perf_counter()
+                                results = prepare_batched_ocr_page_data(document, options, ocr_engine)
+                                elapsed = time.perf_counter() - t0
 
         self.assertEqual(len(results), 4)
         self.assertTrue(all(data.blocks == [] for _img, data in results.values()))
@@ -321,6 +324,189 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
         self.assertLess(elapsed, 1.5)
         self.assertEqual(idle_calls["n"], 1)
         document.close()
+
+    def test_busy_lock_without_abandoned_call_is_not_wedged(self) -> None:
+        """N3: another job's slow-but-live predict must not blank this job's OCR."""
+
+        import fitz
+
+        document = fitz.open()
+        for _ in range(2):
+            document.new_page(width=80, height=80)
+        options = ConversionOptions(
+            input_path=MagicMock(),
+            output_path=MagicMock(),
+            report_path=MagicMock(),
+            page_timeout_s=0.2,
+            ocr_batch_size=2,
+            vector_mode="off",
+        )
+        ocr_engine = MagicMock()
+        ocr_engine.warm_up = MagicMock()
+        ocr_engine.extract_text_blocks_batch.side_effect = lambda images, numbers: [
+            OcrPageData(blocks=[], image=image) for image in images
+        ]
+
+        with patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], [])):
+            with patch(
+                "pdf2ppt.pipeline.compute_page_signals",
+                return_value=MagicMock(
+                    native_char_count=0,
+                    native_text_area_ratio=0.0,
+                    image_area_ratio=1.0,
+                    drawing_count=0,
+                ),
+            ):
+                with patch("pdf2ppt.pipeline.classify_page", return_value="scanned"):
+                    with patch(
+                        "pdf2ppt.pipeline.render_page_image",
+                        return_value=Image.new("RGB", (8, 8)),
+                    ):
+                        # Lock busy (queue wait) but no abandoned timed-out call.
+                        with patch("pdf2ppt.pipeline.wait_for_predict_idle", return_value=False):
+                            with patch("pdf2ppt.pipeline.abandoned_calls_running", return_value=0):
+                                results = prepare_batched_ocr_page_data(document, options, ocr_engine)
+
+        self.assertEqual(len(results), 2)
+        ocr_engine.extract_text_blocks_batch.assert_called()
+        document.close()
+
+    def test_ocr_processing_error_after_lane_swap_degrades(self) -> None:
+        """N1: OcrProcessingError after a timeout lane replacement → empty OCR, not abort."""
+
+        import fitz
+
+        document = fitz.open()
+        document.new_page(width=80, height=80)
+        options = ConversionOptions(
+            input_path=MagicMock(),
+            output_path=MagicMock(),
+            report_path=MagicMock(),
+            page_timeout_s=5.0,
+            ocr_batch_size=1,
+            vector_mode="off",
+        )
+        ocr_engine = MagicMock()
+        ocr_engine.warm_up = MagicMock()
+        ocr_engine.extract_text_blocks_batch.side_effect = OcrProcessingError(
+            "OCR batch prediction failed: std::exception"
+        )
+
+        with patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], [])):
+            with patch(
+                "pdf2ppt.pipeline.compute_page_signals",
+                return_value=MagicMock(
+                    native_char_count=0,
+                    native_text_area_ratio=0.0,
+                    image_area_ratio=1.0,
+                    drawing_count=0,
+                ),
+            ):
+                with patch("pdf2ppt.pipeline.classify_page", return_value="scanned"):
+                    with patch(
+                        "pdf2ppt.pipeline.render_page_image",
+                        return_value=Image.new("RGB", (8, 8)),
+                    ):
+                        with patch("pdf2ppt.pipeline.wait_for_predict_idle", return_value=True):
+                            # Simulate a prior timeout that replaced the worker.
+                            with patch("pdf2ppt.pipeline.timeout_lane_generation", side_effect=[1, 1, 2]):
+                                results = prepare_batched_ocr_page_data(document, options, ocr_engine)
+
+        self.assertEqual(len(results), 1)
+        _image, page_data = results[1]
+        self.assertEqual(page_data.blocks, [])
+        document.close()
+
+    def test_ocr_processing_error_without_lane_swap_still_raises(self) -> None:
+        """Genuine OCR failures (no timeout / generation change) must still abort."""
+
+        import fitz
+
+        document = fitz.open()
+        document.new_page(width=80, height=80)
+        options = ConversionOptions(
+            input_path=MagicMock(),
+            output_path=MagicMock(),
+            report_path=MagicMock(),
+            page_timeout_s=5.0,
+            ocr_batch_size=1,
+            vector_mode="off",
+        )
+        ocr_engine = MagicMock()
+        ocr_engine.warm_up = MagicMock()
+        ocr_engine.extract_text_blocks_batch.side_effect = OcrProcessingError("disk full")
+
+        with patch("pdf2ppt.pipeline.extract_native_text_blocks", return_value=([], [])):
+            with patch(
+                "pdf2ppt.pipeline.compute_page_signals",
+                return_value=MagicMock(
+                    native_char_count=0,
+                    native_text_area_ratio=0.0,
+                    image_area_ratio=1.0,
+                    drawing_count=0,
+                ),
+            ):
+                with patch("pdf2ppt.pipeline.classify_page", return_value="scanned"):
+                    with patch(
+                        "pdf2ppt.pipeline.render_page_image",
+                        return_value=Image.new("RGB", (8, 8)),
+                    ):
+                        with patch("pdf2ppt.pipeline.wait_for_predict_idle", return_value=True):
+                            with patch("pdf2ppt.pipeline.timeout_lane_generation", return_value=1):
+                                with patch("pdf2ppt.pipeline.abandoned_calls_running", return_value=0):
+                                    with self.assertRaises(OcrProcessingError):
+                                        prepare_batched_ocr_page_data(document, options, ocr_engine)
+        document.close()
+
+
+class AbandonedCallAndExitDrainTests(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_timeout_lane_for_tests()
+
+    def test_abandoned_calls_running_increments_on_timeout(self) -> None:
+        """N3 helper: timed-out in-flight work is counted until the worker returns."""
+
+        hang = threading.Event()
+
+        def blocked() -> None:
+            hang.wait(timeout=30.0)
+
+        self.assertEqual(abandoned_calls_running(), 0)
+        with self.assertRaises(TimeoutError):
+            call_with_timeout(blocked, 0.1, label="hang")
+        self.assertGreaterEqual(abandoned_calls_running(), 1)
+        hang.set()
+        deadline = time.perf_counter() + 3.0
+        while time.perf_counter() < deadline and abandoned_calls_running() > 0:
+            time.sleep(0.02)
+        self.assertEqual(abandoned_calls_running(), 0)
+
+    def test_timeout_lane_generation_bumps_on_timeout(self) -> None:
+        hang = threading.Event()
+        before = timeout_lane_generation()
+
+        def blocked() -> None:
+            hang.wait(timeout=30.0)
+
+        with self.assertRaises(TimeoutError):
+            call_with_timeout(blocked, 0.1, label="hang")
+        self.assertGreater(timeout_lane_generation(), before)
+        hang.set()
+
+    def test_exit_drain_waits_for_abandoned_predict(self) -> None:
+        """N2: atexit drain calls wait_for_predict_idle only when abandoned work remains."""
+
+        from pdf2ppt import ocr as ocr_mod
+
+        with patch("pdf2ppt.ocr.abandoned_calls_running", return_value=1):
+            with patch("pdf2ppt.ocr.wait_for_predict_idle", return_value=True) as wait_idle:
+                ocr_mod._drain_abandoned_predict_at_exit()
+                wait_idle.assert_called_once_with(ocr_mod.EXIT_DRAIN_TIMEOUT_SECONDS)
+
+        with patch("pdf2ppt.ocr.abandoned_calls_running", return_value=0):
+            with patch("pdf2ppt.ocr.wait_for_predict_idle") as wait_idle:
+                ocr_mod._drain_abandoned_predict_at_exit()
+                wait_idle.assert_not_called()
 
 
 class PredictLockOverlapTests(unittest.TestCase):
