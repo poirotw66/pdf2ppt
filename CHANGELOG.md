@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `pdf2ppt batch <input_dir> -o <output_dir>`: folder batch conversion with shared single-file options, failure isolation, `--fail-fast`, `--skip-existing` / `--resume` (retain prior ok metrics; validate pptx zip), per-file atomic summary flush + atomic `.pptx.partial` writes, optional `--jobs` (default 1; process pool; OCR memory warning), quality summaries (`summary.csv` / `summary.json` / `summary.md`), and optional `--measure-quality` (LibreOffice SSIM, skipped if missing).
+
 ## [0.1.1] - 2026-10-23
 
 ### Added

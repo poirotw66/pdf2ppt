@@ -1,5 +1,45 @@
 # CLI reference
 
+## Subcommands
+
+| Command | Purpose |
+| --- | --- |
+| `pdf2ppt INPUT.pdf OUTPUT.pptx [options]` | Single-file convert (default; also `pdf2ppt convert …`) |
+| `pdf2ppt emit-ir …` / `pdf2ppt from-ir …` | SlideIR export / render ([`slideir.md`](slideir.md)) |
+| `pdf2ppt batch INPUT_DIR -o OUTPUT_DIR [options]` | Folder batch convert (orchestrates the same pipeline) |
+
+Single-file conversion output is unchanged by the batch command: batch only discovers PDFs, calls the existing convert path per file, and writes summaries.
+
+### Batch mode
+
+```bash
+pdf2ppt batch ./pdfs -o ./pptx_out
+pdf2ppt batch ./pdfs -o ./pptx_out --recursive --skip-existing --resume
+pdf2ppt batch ./pdfs -o ./pptx_out --fail-fast --quiet
+pdf2ppt batch ./pdfs -o ./pptx_out --jobs 1   # default; keep 1 unless you have ample RAM
+```
+
+Behaviour:
+
+- Discovers `*.pdf` / `*.PDF` (case-insensitive). Non-recursive by default; `--recursive` keeps relative subfolders under the output dir and skips any PDFs already under the output directory. Hidden files/dirs (name starts with `.`) are skipped. Order is stable (case-folded relative path, then exact path) so collision suffixes do not depend on filesystem iteration order. Output-name collision detection is case-insensitive (safe on macOS/Windows).
+- Writes `<name>.pptx` per PDF (atomically via a `.pptx.partial` temp file + rename). If two inputs collide on the same output name (e.g. `a.pdf` and `a.PDF`), later files get a deterministic `__N` stem suffix (`a__2.pptx`, …).
+- Reuses the same conversion option flags as single-file mode (OCR, layout planner, refine, page timeout, inpaint, …) via shared option parsing — not a second copy of the pipeline.
+- Failure isolation: a corrupt/encrypted/OCR-init error on one PDF is recorded as `failed` and the batch continues. A **per-page** `--page-timeout-s` does **not** fail the file: that page degrades to empty OCR / raster fallback and the PDF stays `status=ok` (with higher `raster_fallback_pages` / warnings). Exit code **1** if any file failed; **0** if all succeeded or were skipped (including an empty input folder, which logs a warning); **2** for usage/validation errors. Use `--fail-fast` to stop at the first failure. `SIGINT`/`SIGTERM` leave a valid partial `summary.*` (flushed after every file) so `--resume` can continue; KeyboardInterrupt exits **130**.
+- `--jobs N` (default **1**, sequential). Parallel mode uses **processes**. **Warning:** PaddleOCR is memory-heavy; `--jobs > 1` has OOM'd 16 GB machines — raise only with ample RAM.
+- `--skip-existing` skips only when the output PPTX exists and is a complete valid OOXML zip; truncated/corrupt pptx files are reconverted. `--resume` keeps earlier `ok` rows (including pages/metrics/seconds) when the matching pptx is still valid; if the pptx was deleted or is invalid, that file is reconverted. Two resumes in a row keep the same ok count and pages.
+- Progress lines go to **stderr**; `--quiet` suppresses them. At the end, a markdown summary table (with totals) is printed to **stdout** (also written as `summary.md`) unless `--quiet`.
+- Quality summary files in the output dir: `summary.csv`, `summary.json`, `summary.md` — rewritten atomically after every file. Per PDF: file, pages, status (`ok` / `failed` / `skipped`), seconds, OCR used / OCR pages, raster-fallback pages, warnings count, planner cost (if used), and a cheap quality indicator (raster-fallback fraction, mean editable ratio / text confidence; no LibreOffice required). Optional `--measure-quality` renders with soffice and records mean SSIM when LibreOffice is available; skipped gracefully when missing.
+
+### Batch exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | All PDFs succeeded or were skipped |
+| `1` | One or more PDFs failed (others may have succeeded) |
+| `2` | Usage / validation error (bad args, missing input dir, …) |
+
+Single-file mode additionally uses exit code `3` for OCR initialization failures on a core install without `[ocr]`.
+
 ## Main arguments
 
 - `input_pdf`: input PDF path
@@ -122,5 +162,6 @@ LibreOffice vs PowerPoint caveat.
 ## Project entry points
 
 - CLI: `src/pdf2ppt/cli.py`
+- Batch orchestration: `src/pdf2ppt/batch.py`
 - Main pipeline: `src/pdf2ppt/pipeline.py`
 - Data models: `src/pdf2ppt/models.py`
