@@ -21,10 +21,11 @@ Design constraints (verified against real PaddleOCR):
 Known limitation (PaddleOCR): after a timeout the lane gets a new worker
 thread. Predictors are thread-affine; ``predict`` on an engine built on a
 previous thread can raise ``std::exception`` on some replacements (~30–40%).
-Pipeline callers catch that as ``OcrProcessingError`` after a lane generation
-change and degrade to empty OCR for the page/job rather than aborting with
-HTTP 502. Prefer keeping ``PDF2PPT_PAGE_TIMEOUT_S`` generous (default 120) so
-timeouts (and thus thread swaps) stay rare.
+Pipeline callers catch that as ``OcrProcessingError`` whenever the lane has
+ever been replaced (``timeout_lane_generation() > 1``), including later jobs
+that did not cause the swap, and degrade to empty OCR rather than aborting
+with HTTP 502. Prefer keeping ``PDF2PPT_PAGE_TIMEOUT_S`` generous (default
+120) so timeouts (and thus thread swaps) stay rare.
 
 LibreOffice invocations should use
 :func:`pdf2ppt.render_compare.run_subprocess_with_process_group` so timeouts
@@ -123,8 +124,9 @@ class _TimeoutLane:
     Known limitation: after a timeout the lane gets a **new** worker thread.
     PaddleOCR predictors are thread-affine; calling an engine constructed on a
     previous thread can raise ``std::exception`` on some replacements. Callers
-    should catch ``OcrProcessingError`` after a lane generation change and
-    degrade (empty OCR) rather than abort the whole job.
+    should catch ``OcrProcessingError`` once ``generation() > 1`` (lane has
+    ever been replaced) and degrade (empty OCR) rather than abort the whole
+    job — including subsequent jobs that share the process-wide lane.
     """
 
     def __init__(self, *, name: str = "pdf2ppt-timeout-lane") -> None:
@@ -168,7 +170,9 @@ class _TimeoutLane:
                     del func, args, kwargs
                     with self._cv:  # done+abandoned must change atomically w.r.t. the caller's check
                         if job.abandoned:
-                            self._abandoned_running -= 1
+                            # Clamp: reset_for_tests() may zero the counter while abandoned
+                            # workers are still finishing, which must not go negative.
+                            self._abandoned_running = max(0, self._abandoned_running - 1)
                         job.done.set()
 
         worker = threading.Thread(target=run, name=f"{self._name}-{generation}", daemon=True)

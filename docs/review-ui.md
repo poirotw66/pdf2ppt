@@ -58,8 +58,8 @@ Optional second mode (no Gemini / layout planner required):
 
 Notes:
 
-- Re-running **Build Preview** deletes `preview_edits.json` for that job (element ids are positional and go stale after OCR box edits). The UI also resets its local edit state.
-- Exclude only removes native SlideIR objects. On `overlay` / `full-page` pages (`baked_background: true`), content painted into the background raster is unchanged — use raster fallback for a full-page image.
+- Re-running **Build Preview** or **emit-ir** deletes `preview_edits.json` for that job (element ids are positional and go stale after OCR box edits). The UI also resets its local edit state.
+- Exclude removes native SlideIR objects. On `overlay` / `full-page` pages (`baked_background: true`), content painted into the background raster may stay visible — if the preview does not change, use raster fallback for a full-page image.
 - Thumbnails use `GET /jobs/{id}/pages/{n}.jpg?width=120`.
 - Rotated PDF pages may show overlay/image mismatch (pre-existing SlideIR/geometry issue on `main`); prefer raster fallback there.
 

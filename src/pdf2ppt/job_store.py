@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import threading
+import weakref
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,7 +48,8 @@ class JobStore:
         self.retention = timedelta(hours=configured_retention_hours) if configured_retention_hours > 0 else None
         self.root.mkdir(parents=True, exist_ok=True)
         self._locks_guard = threading.Lock()
-        self._job_locks: dict[str, threading.RLock] = {}
+        # Weak values: unknown / abandoned job ids do not retain lock objects forever.
+        self._job_locks: weakref.WeakValueDictionary[str, threading.RLock] = weakref.WeakValueDictionary()
 
     def job_lock(self, job_id: str) -> threading.RLock:
         """Return a re-entrant lock scoped to ``job_id`` (process-local)."""

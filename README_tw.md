@@ -159,7 +159,7 @@ npm run dev
 
 **限制說明**
 
-- **排除 vs 烘進背景：** `overlay`／`full-page` 頁的照片與許多形狀已畫進背景圖。排除 IR 的 shape／image 只會拿掉原生物件，背景像素仍在。若要整頁點陣圖，請用 **raster fallback**。這類頁面的預覽會帶 `baked_background: true`。
+- **排除 vs 烘進背景：** `overlay`／`full-page` 頁的照片與許多形狀可能已畫進背景圖。排除 IR 的 shape／image 只會拿掉原生物件，烘進的像素可能仍可見。若預覽沒變或需要整頁點陣圖，請用 **raster fallback**。這類頁面的預覽會帶 `baked_background: true`。
 - **重新分析會清空編輯：** 元素 id 依位置產生（`layout_text_1_N`）。再次 Build Preview 會刪除已存的 `preview_edits.json`，避免 OCR 框變更後 Convert 因未知 id 失敗。
 - **旋轉頁（既有問題）：** 旋轉 90／180／270° 的頁，SlideIR bbox 可能與預覽圖對不齊（與 `main` 上 CLI PPTX 相同）。短期可對這類頁使用 raster fallback。
 

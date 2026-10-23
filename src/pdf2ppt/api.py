@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import logging
@@ -118,13 +119,6 @@ def _cors_allow_origins() -> list[str]:
 
 
 app = FastAPI(title="pdf2ppt API", version="0.1.1")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_allow_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 job_store = JobStore()
 
 
@@ -175,7 +169,35 @@ class _PreviewEditsBodyLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+# Body-limit first, CORS last (= outermost) so 413 responses still carry CORS headers.
 app.add_middleware(_PreviewEditsBodyLimitMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allow_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+JOB_LOCK_WAIT_S = 5.0
+
+
+@contextlib.contextmanager
+def _job_lock_or_busy(job_id: str):  # type: ignore[no-untyped-def]
+    """Per-job lock with a bounded wait so queued requests cannot pin the whole threadpool."""
+    _load_job_or_404(job_id)  # unknown ids: 404 before any lock object is created
+    lock = job_store.job_lock(job_id)
+    if not lock.acquire(timeout=JOB_LOCK_WAIT_S):
+        raise _http_exception(
+            409,
+            "job-busy",
+            "Another request is still working on this job; retry shortly.",
+        )
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 COMMON_ERROR_RESPONSES = {
@@ -433,6 +455,8 @@ def emit_ir_job(job_id: str, request: ConvertRequest) -> EmitIrResponse:
         job_store.update_job(job_id, status="emit-ir-failed")
         raise _to_http_exception(PageConversionError(0, f"Emit-IR failed: {error}")) from error
 
+    # Element ids are positional: any re-analysis invalidates saved preview edits.
+    (job_dir / PREVIEW_EDITS_FILENAME).unlink(missing_ok=True)
     assets_dir = job_dir / default_assets_dir_name(slideir_path)
     job_store.update_job(job_id, status="ir-emitted", report_path=str(report_path))
     return EmitIrResponse(
@@ -661,11 +685,15 @@ def get_preview_edits(job_id: str) -> PreviewEditsResponse:
 @app.put(
     "/jobs/{job_id}/preview-edits",
     response_model=PreviewEditsResponse,
-    responses={400: COMMON_ERROR_RESPONSES[400], 404: COMMON_ERROR_RESPONSES[404]},
+    responses={
+        400: COMMON_ERROR_RESPONSES[400],
+        404: COMMON_ERROR_RESPONSES[404],
+        409: {"model": ErrorResponse, "description": "Job is busy with another request."},
+    },
 )
 def put_preview_edits(job_id: str, request: PreviewEditsRequest) -> PreviewEditsResponse:
     """Save light preview edits (exclude, role overrides, raster-fallback pages)."""
-    with job_store.job_lock(job_id):
+    with _job_lock_or_busy(job_id):
         record = _load_job_or_404(job_id)
         slideir_path = _resolve_job_slideir_path(record)
         if slideir_path is None or not slideir_path.exists():
@@ -755,12 +783,13 @@ def put_preview_edits(job_id: str, request: PreviewEditsRequest) -> PreviewEdits
     responses={
         400: COMMON_ERROR_RESPONSES[400],
         404: COMMON_ERROR_RESPONSES[404],
+        409: {"model": ErrorResponse, "description": "Job is busy with another request."},
         500: COMMON_ERROR_RESPONSES[500],
     },
 )
 def convert_job_from_ir(job_id: str) -> FromIrJobResponse:
     """Apply saved preview edits to job SlideIR and render PPTX via from-ir."""
-    with job_store.job_lock(job_id):
+    with _job_lock_or_busy(job_id):
         record = _load_job_or_404(job_id)
         slideir_path = _resolve_job_slideir_path(record)
         if slideir_path is None or not slideir_path.exists():
