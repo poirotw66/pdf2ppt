@@ -198,3 +198,105 @@ class EmitIrResponse(BaseModel):
     report_path: str
     page_count: int
 
+
+# --- Preview-before-convert (SlideIR overlays + light edits) ---------------
+
+PreviewBlockRole = Literal["title", "body", "header", "footer", "page_number"]
+
+
+class PreviewPageEdits(BaseModel):
+    page: int = Field(ge=1)
+    excluded_ids: list[str] = Field(default_factory=list, max_length=20_000)
+    role_overrides: dict[str, PreviewBlockRole] = Field(default_factory=dict, max_length=20_000)
+    raster_fallback: bool = False
+
+
+class PreviewEditsRequest(BaseModel):
+    pages: list[PreviewPageEdits] = Field(default_factory=list, max_length=10_000)
+
+
+class PreviewEditsResponse(BaseModel):
+    job_id: str
+    status: str
+    edits: PreviewEditsRequest
+
+
+class PreviewTextBlock(BaseModel):
+    id: str
+    kind: Literal["text"] = "text"
+    bbox: list[float]
+    text: str = ""
+    block_role: str = "body"
+    reading_order: int = 0
+    excluded: bool = False
+
+
+class PreviewTableCell(BaseModel):
+    row: int
+    col: int
+    text: str = ""
+    bbox: list[float]
+
+
+class PreviewTable(BaseModel):
+    id: str
+    kind: Literal["table"] = "table"
+    bbox: list[float]
+    row_count: int = 0
+    col_count: int = 0
+    cells: list[PreviewTableCell] = Field(default_factory=list)
+    excluded: bool = False
+
+
+class PreviewImage(BaseModel):
+    id: str
+    kind: Literal["image"] = "image"
+    bbox: list[float]
+    excluded: bool = False
+
+
+class PreviewShape(BaseModel):
+    id: str
+    kind: Literal["shape"] = "shape"
+    shape_kind: str = "rect"
+    bbox: list[float]
+    excluded: bool = False
+
+
+class PreviewPageResponse(BaseModel):
+    page: int
+    image_url: str
+    thumbnail_url: str | None = None
+    width_pt: float
+    height_pt: float
+    page_kind: str = "digital"
+    background_mode: str = "elements"
+    baked_background: bool = False
+    raster_fallback: bool = False
+    text_blocks: list[PreviewTextBlock] = Field(default_factory=list)
+    tables: list[PreviewTable] = Field(default_factory=list)
+    images: list[PreviewImage] = Field(default_factory=list)
+    shapes: list[PreviewShape] = Field(default_factory=list)
+
+
+class PreviewResponse(BaseModel):
+    job_id: str
+    status: str
+    page_count: int
+    slide_width_pt: float
+    slide_height_pt: float
+    pages: list[PreviewPageResponse]
+    edits: PreviewEditsRequest
+    slideir_path: str | None = None
+    slideir_assets_dir: str | None = None
+
+
+class FromIrJobResponse(BaseModel):
+    job_id: str
+    status: str
+    output_pptx_path: str
+    report_path: str
+    page_count: int
+    slideir_path: str | None = None
+    edited_slideir_path: str | None = None
+

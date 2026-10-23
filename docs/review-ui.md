@@ -40,6 +40,21 @@ Notes:
 4. Save the approved boxes back to the backend.
 5. Run conversion so the pipeline uses approved boxes first, fills missing text with per-box recognition when needed, then generates the PPTX and report.
 
+### Preview before convert
+
+Optional second mode (no Gemini / layout planner required):
+
+1. After upload, switch to **Preview before convert** and click **Build Preview** (`POST /jobs/{id}/preview`).
+2. Inspect per-page source images with SlideIR overlays (text roles / reading order, tables, images, shapes). Toggle layers, exclude elements, change text roles, or mark a page as raster fallback (`PUT /jobs/{id}/preview-edits`).
+3. Click **Convert** (`POST /jobs/{id}/from-ir`) to apply edits and download the PPTX built from the edited IR.
+
+Notes:
+
+- Re-running **Build Preview** deletes `preview_edits.json` for that job (element ids are positional and go stale after OCR box edits). The UI also resets its local edit state.
+- Exclude only removes native SlideIR objects. On `overlay` / `full-page` pages (`baked_background: true`), content painted into the background raster is unchanged — use raster fallback for a full-page image.
+- Thumbnails use `GET /jobs/{id}/pages/{n}.jpg?width=120`.
+- Rotated PDF pages may show overlay/image mismatch (pre-existing SlideIR/geometry issue on `main`); prefer raster fallback there.
+
 ## Job storage and cleanup
 
 - Uploaded PDFs, OCR detection payloads, approved box payloads, and conversion outputs are stored under `.pdf2ppt_jobs/` by default.
@@ -65,6 +80,10 @@ Notes:
 - `POST /jobs/{job_id}/detect` with optional `ocr_batch_size` and `confidence_threshold`
 - `PUT /jobs/{job_id}/boxes`
 - `POST /jobs/{job_id}/convert` with optional `ocr_batch_size`
+- `POST /jobs/{job_id}/preview` — analyze → SlideIR (planner forced off) + overlay preview
+- `GET /jobs/{job_id}/preview` — overlay preview from existing SlideIR + edits
+- `PUT /jobs/{job_id}/preview-edits` — save exclude / role / raster-fallback edits
+- `POST /jobs/{job_id}/from-ir` — apply edits and render PPTX from job SlideIR
 - `GET /jobs/{job_id}/pages/{page_number}.jpg`
 - `GET /jobs/{job_id}/output.pptx`
 - `GET /jobs/{job_id}/report.json`

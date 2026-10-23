@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,17 @@ class JobStore:
         configured_retention_hours = int(retention_hours or DEFAULT_JOB_RETENTION_HOURS)
         self.retention = timedelta(hours=configured_retention_hours) if configured_retention_hours > 0 else None
         self.root.mkdir(parents=True, exist_ok=True)
+        self._locks_guard = threading.Lock()
+        self._job_locks: dict[str, threading.RLock] = {}
+
+    def job_lock(self, job_id: str) -> threading.RLock:
+        """Return a re-entrant lock scoped to ``job_id`` (process-local)."""
+        with self._locks_guard:
+            lock = self._job_locks.get(job_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._job_locks[job_id] = lock
+            return lock
 
     def create_job(self, *, filename: str, pdf_bytes: bytes) -> JobRecord:
         self.delete_expired_jobs()
@@ -75,35 +87,43 @@ class JobStore:
         return JobRecord.from_dict(payload)
 
     def save_job(self, record: JobRecord) -> JobRecord:
-        record.updated_at = _utc_now_iso()
-        metadata_path = self.metadata_path(record.job_id)
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        metadata_path.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-        return record
+        with self.job_lock(record.job_id):
+            record.updated_at = _utc_now_iso()
+            metadata_path = self.metadata_path(record.job_id)
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(
+                metadata_path,
+                json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            )
+            return record
 
     def update_job(self, job_id: str, **changes: object) -> JobRecord:
-        record = self.get_job(job_id)
-        for key, value in changes.items():
-            setattr(record, key, value)
-        return self.save_job(record)
+        with self.job_lock(job_id):
+            record = self.get_job(job_id)
+            for key, value in changes.items():
+                setattr(record, key, value)
+            return self.save_job(record)
 
     def save_detection_payload(self, job_id: str, payload: dict[str, object]) -> Path:
-        output_path = self.job_dir(job_id) / "detection.json"
-        output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.update_job(job_id, detection_path=str(output_path), status="detected")
-        return output_path
+        with self.job_lock(job_id):
+            output_path = self.job_dir(job_id) / "detection.json"
+            _atomic_write_text(output_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            self.update_job(job_id, detection_path=str(output_path), status="detected")
+            return output_path
 
     def save_approved_boxes_payload(self, job_id: str, payload: dict[str, object]) -> Path:
-        output_path = self.job_dir(job_id) / "approved_boxes.json"
-        output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.update_job(job_id, approved_boxes_path=str(output_path), status="boxes-approved")
-        return output_path
+        with self.job_lock(job_id):
+            output_path = self.job_dir(job_id) / "approved_boxes.json"
+            _atomic_write_text(output_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            self.update_job(job_id, approved_boxes_path=str(output_path), status="boxes-approved")
+            return output_path
 
     def delete_job(self, job_id: str) -> None:
-        job_dir = self.job_dir(job_id)
-        if not job_dir.exists():
-            raise FileNotFoundError(job_id)
-        shutil.rmtree(job_dir)
+        with self.job_lock(job_id):
+            job_dir = self.job_dir(job_id)
+            if not job_dir.exists():
+                raise FileNotFoundError(job_id)
+            shutil.rmtree(job_dir)
 
     def delete_expired_jobs(self, *, now: datetime | None = None) -> int:
         if self.retention is None:
@@ -143,6 +163,17 @@ class JobStore:
 
     def preview_image_path(self, job_id: str, page_number: int) -> Path:
         return self.preview_dir(job_id) / f"page_{page_number:03d}.png"
+
+
+def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding=encoding)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def _utc_now_iso() -> str:

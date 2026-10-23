@@ -48,6 +48,16 @@ class JobStoreTests(unittest.TestCase):
         self.assertEqual(deleted_count, 0)
         self.assertTrue(self.job_store.job_dir(stale_record.job_id).exists())
 
+    def test_save_job_is_atomic_and_readable(self) -> None:
+        record = self.job_store.create_job(filename="sample.pdf", pdf_bytes=build_sample_pdf_bytes())
+        updated = self.job_store.update_job(record.job_id, status="detected")
+        self.assertEqual(updated.status, "detected")
+        metadata_path = self.job_store.metadata_path(record.job_id)
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "detected")
+        leftovers = list(metadata_path.parent.glob(".job.json.*.tmp"))
+        self.assertEqual(leftovers, [])
+
 
 def build_sample_pdf_bytes() -> bytes:
     return (
