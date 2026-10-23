@@ -12,16 +12,14 @@ which roles those boxes get.
 | `heuristic` (**default**) | Geometric grouping of existing native/OCR lines. No model download. Used in CI and on CPU-only paths. |
 | `ppstructure` | Opt-in PaddleOCR **LayoutDetection** (PP-DocLayout family — the layout stage of **PP-StructureV3**). Soft-falls back to `heuristic` when the model cannot start. |
 
-PaddleOCR is already a core dependency. The `ppstructure` path needs a working
-PaddlePaddle runtime and will download DocLayout weights on first use into
-`--layout-model-root` (default `./model`). Keep the default `heuristic` unless
-you explicitly want neural layout.
-
-Optional install group (discoverability only — no extra pip packages beyond the
-Paddle stack you already use for OCR):
+Core `pip install .` is lean: PaddleOCR lives under the optional `[ocr]` extra
+(or `[layout]`, which currently resolves to the same stack). The `ppstructure`
+path needs a working PaddlePaddle runtime and will download DocLayout weights
+on first use into `--layout-model-root` (default `./model`). Keep the default
+`heuristic` unless you explicitly want neural layout.
 
 ```bash
-python -m pip install -e ".[layout]"
+python -m pip install -e ".[ocr]"      # or ".[layout]"
 ```
 
 ## What layout changes

@@ -36,6 +36,7 @@ Extras:
 | `[dev]` | OCR + server + ruff + mypy + pytest |
 | `[all]` | OCR + server + CPU ONNX Runtime |
 | `[cpu]` / `[gpu]` | ONNX Runtime for `lama-onnx` |
+| `[layout]` | Same Paddle stack as `[ocr]` (PP-Structure discoverability) |
 
 Editable checkout for development:
 
@@ -127,6 +128,16 @@ pdf2ppt from-ir /tmp/deck.slideir.json /tmp/deck.pptx
 
 Full schema and agent rules: [slideir.md](slideir.md).
 
+## Batch
+
+```bash
+pdf2ppt batch ./pdfs -o ./pptx_out
+pdf2ppt batch ./pdfs -o ./pptx_out --recursive --resume --skip-existing
+```
+
+Exit codes: **0** all ok/skipped, **1** ≥1 failed, **2** usage. After interrupt,
+rerun with `--resume` (`summary.*` stays valid). Details: [cli-reference.md](cli-reference.md).
+
 ## Troubleshooting
 
 | Symptom | What to try |
@@ -134,7 +145,13 @@ Full schema and agent rules: [slideir.md](slideir.md).
 | `Failed to import PaddleOCR` | `pip install 'pdf2ppt[ocr]'` and keep `numpy<2` |
 | OCR crashes / `NotImplementedError` with paddle 3.3.x | Pin `paddlepaddle==3.2.0` (declared in `[ocr]`) |
 | CJK glyphs wrong in refine / quality benches | Install `fonts-noto-cjk`; pin family is Noto Sans CJK |
-| `--refine` skipped | Install LibreOffice Impress (`soffice` on PATH) |
+| `--refine` skipped | Install LibreOffice Impress (`soffice` on PATH); Docker `INSTALL_LIBREOFFICE=1` |
+| Page / OCR timeouts or empty OCR after a hang | Raise `--page-timeout-s` / `PDF2PPT_PAGE_TIMEOUT_S` (default 120) |
+| Review UI `409 job-busy` | Wait; UI retries preview-edits at 1/2/4s. Retry Convert manually |
+| Review UI `413` on preview-edits | Body exceeds 1 MiB — shrink the edit payload |
+| Docker model dir not writable | Use named volume `pdf2ppt-models`, or `chown 10001:10001` host bind |
 | Review UI API will not start / `pdf2ppt-api` hints for `[server]` | `pip install 'pdf2ppt[server]'` in a clean venv |
 | `PDF2PPT_CORS_ORIGINS` of only commas / `*` | Falls back to Vite defaults; `*` is rejected with credentials enabled |
 | Stale `build/lib` imports | Use `pip install -e .` — never point `PYTHONPATH` at `build/lib/` |
+
+More FAQs and known limitations: root [README](../README.md). Index: [README.md](README.md).
