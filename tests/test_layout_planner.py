@@ -420,6 +420,108 @@ class GeminiPlannerMockTests(unittest.TestCase):
         self.assertEqual(calls["n"], 2)
         self.assertTrue(budget.circuit_open)
 
+    def test_circuit_cancels_queued_reserved_calls(self) -> None:
+        """Once the breaker trips, reserved-but-not-started calls must not dispatch."""
+
+        import threading
+        import time
+
+        calls_lock = threading.Lock()
+        http_calls: list[int] = []
+        release_first = threading.Event()
+
+        def transport(_body: dict) -> dict:
+            with calls_lock:
+                http_calls.append(1)
+                ordinal = len(http_calls)
+            if ordinal == 1:
+                # Hold the concurrency slot until siblings have reserved + queued.
+                release_first.wait(timeout=3.0)
+                raise TimeoutError("fail-open-circuit")
+            raise AssertionError("queued call was dispatched after circuit open")
+
+        budget = LayoutPlannerBudget(
+            max_calls=50,
+            concurrency=1,
+            max_consecutive_failures=1,
+            max_cost_usd=10.0,
+        )
+        service = LayoutPlannerService(
+            GeminiLayoutPlanner(transport=transport, timeout_s=5.0),
+            budget=budget,
+            cache_dir=None,
+        )
+        image = Image.new("RGB", (16, 16))
+        barrier = threading.Barrier(3)
+        errors: list[BaseException] = []
+
+        def worker(page_number: int) -> None:
+            try:
+                barrier.wait(timeout=3.0)
+                service.try_plan_page(
+                    page_image=image,
+                    text_blocks=_blocks(),
+                    page_number=page_number,
+                    page_height=540.0,
+                )
+            except BaseException as error:  # noqa: BLE001 — collect for assertion
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker, args=(index + 1,)) for index in range(3)]
+        for thread in threads:
+            thread.start()
+        for _ in range(80):
+            with calls_lock:
+                if http_calls:
+                    break
+            time.sleep(0.025)
+        # Give the other two workers time to reserve and block on the slot.
+        time.sleep(0.35)
+        release_first.set()
+        for thread in threads:
+            thread.join(timeout=5.0)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(http_calls), 1)
+        self.assertTrue(budget.circuit_open)
+        # Only the in-flight HTTP attempt remains counted; queued reserves refunded.
+        self.assertEqual(budget.calls, 1)
+        self.assertEqual(budget.http_attempts, 1)
+        self.assertAlmostEqual(budget.estimated_cost_usd, 0.0, places=6)
+        cancelled = [record for record in budget.records if record.fallback_kind == "circuit"]
+        self.assertGreaterEqual(len(cancelled), 2)
+        self.assertTrue(all(not record.http_attempted for record in cancelled))
+
+    def test_cancel_reservation_refunds_call_and_cost(self) -> None:
+        from pdf2ppt.layout_planner.budget import (
+            DEFAULT_WORST_CASE_CALL_COST_USD,
+            LayoutPlannerCallRecord,
+        )
+
+        budget = LayoutPlannerBudget(
+            max_calls=5,
+            max_cost_usd=1.0,
+            worst_case_call_cost_usd=DEFAULT_WORST_CASE_CALL_COST_USD,
+        )
+        self.assertTrue(budget.try_reserve())
+        self.assertEqual(budget.calls, 1)
+        self.assertAlmostEqual(budget.estimated_cost_usd, DEFAULT_WORST_CASE_CALL_COST_USD, places=6)
+        budget.cancel_reservation(
+            LayoutPlannerCallRecord(
+                model="t",
+                page_number=1,
+                cache_hit=False,
+                success=False,
+                latency_ms=1.0,
+                estimated_cost_usd=0.0,
+                fallback_kind="circuit",
+                note="test cancel",
+            )
+        )
+        self.assertEqual(budget.calls, 0)
+        self.assertEqual(budget.http_attempts, 0)
+        self.assertAlmostEqual(budget.estimated_cost_usd, 0.0, places=6)
+        self.assertFalse(budget.records[0].http_attempted)
+
     def test_atomic_reserve_prevents_overshoot(self) -> None:
         budget = LayoutPlannerBudget(max_calls=3, concurrency=8)
         reserved = sum(1 for _ in range(8) if budget.try_reserve())

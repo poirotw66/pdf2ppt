@@ -94,6 +94,14 @@ downloaded from the API names its assets folder `output.slideir.json.assets`,
 so CLI `from-ir` users must unzip into a folder of that name
 (`POST /from-ir` handles it automatically).
 
+`assets_zip` is extracted with zip-bomb / path-traversal / symlink guards.
+Limits (env overrides, defaults in parentheses):
+`PDF2PPT_ZIP_MAX_COMPRESSED_BYTES` (50 MiB),
+`PDF2PPT_ZIP_MAX_UNCOMPRESSED_BYTES` (200 MiB),
+`PDF2PPT_ZIP_MAX_ENTRIES` (10 000),
+`PDF2PPT_ZIP_MAX_ENTRY_BYTES` (50 MiB),
+`PDF2PPT_ZIP_MAX_COMPRESSION_RATIO` (100). Oversized or unsafe zips return 4xx.
+
 Defaults leave existing convert behavior unchanged.
 
 ## Agent workflow
