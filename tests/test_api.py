@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import io
 import tempfile
+import threading
+import time
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -13,6 +16,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from pptx import Presentation
 
+from pdf2ppt import api as api_module
 from pdf2ppt.api import app
 from pdf2ppt.core import InputValidationError, OcrInitializationError, PageConversionError
 from pdf2ppt.ir_io import default_assets_dir_name, write_slide_ir
@@ -31,6 +35,8 @@ class ApiTests(unittest.TestCase):
         self.job_store_patcher = patch("pdf2ppt.api.job_store", self.job_store)
         self.job_store_patcher.start()
         self.addCleanup(self.job_store_patcher.stop)
+        with api_module._job_waiters_guard:
+            api_module._job_waiters.clear()
 
     def test_health_endpoint(self) -> None:
         response = self.client.get("/health")
@@ -1067,6 +1073,115 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(response.json()["detail"]["code"], "job-busy")
         finally:
             held.release()
+        self.assertEqual(api_module._job_waiter_count(job_id), 0)
+
+    def test_job_lock_waiter_cap_keeps_unrelated_job_fast(self) -> None:
+        """Cap waiters per job so a burst cannot pin the threadpool for 5s waves."""
+        pdf_bytes = build_sample_pdf_bytes()
+        busy = self.client.post(
+            "/jobs",
+            files={"file": ("busy.pdf", pdf_bytes, "application/pdf")},
+        ).json()["job_id"]
+        other = self.client.post(
+            "/jobs",
+            files={"file": ("other.pdf", pdf_bytes, "application/pdf")},
+        ).json()["job_id"]
+        busy_dir = self.job_store.job_dir(busy)
+        write_slide_ir(
+            [_api_slideir_page()],
+            busy_dir / "output.slideir.json",
+            slide_width_pt=320.0,
+            slide_height_pt=240.0,
+        )
+        self.job_store.update_job(busy, status="ir-emitted")
+
+        held = self.job_store.job_lock(busy)
+        self.assertTrue(held.acquire(blocking=False))
+        edits = {"pages": [{"page": 1, "excluded_ids": [], "role_overrides": {}}]}
+        statuses: list[int] = []
+        other_elapsed = 0.0
+        other_status = 0
+        try:
+            # Shared pool mimics uvicorn's limited threadpool: without a waiter
+            # cap, blocking waits would starve the unrelated GET.
+            with (
+                patch("pdf2ppt.api.JOB_LOCK_WAIT_S", 0.5),
+                ThreadPoolExecutor(max_workers=8) as pool,
+            ):
+                busy_futures = [
+                    pool.submit(self.client.put, f"/jobs/{busy}/preview-edits", json=edits)
+                    for _ in range(200)
+                ]
+                time.sleep(0.05)  # let capped waiters claim pool threads first
+
+                def timed_other_get() -> tuple[float, int]:
+                    started = time.perf_counter()
+                    response = self.client.get(f"/jobs/{other}")
+                    return time.perf_counter() - started, response.status_code
+
+                other_future = pool.submit(timed_other_get)
+                other_elapsed, other_status = other_future.result(timeout=2.0)
+                for future in as_completed(busy_futures):
+                    statuses.append(future.result().status_code)
+        finally:
+            held.release()
+
+        self.assertEqual(other_status, 200)
+        self.assertLess(other_elapsed, 1.0)
+        self.assertEqual(len(statuses), 200)
+        self.assertTrue(all(status == 409 for status in statuses))
+        self.assertEqual(api_module._job_waiter_count(busy), 0)
+        self.assertEqual(api_module._job_waiter_count(other), 0)
+        # Lock must be free again: a follow-up PUT succeeds without waiting out.
+        after = self.client.put(f"/jobs/{busy}/preview-edits", json=edits)
+        self.assertEqual(after.status_code, 200)
+
+    def test_job_lock_low_concurrency_does_not_spurious_409(self) -> None:
+        """Sequential / low-concurrency callers wait for the lock and succeed."""
+        pdf_bytes = build_sample_pdf_bytes()
+        job_id = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        ).json()["job_id"]
+        job_dir = self.job_store.job_dir(job_id)
+        write_slide_ir(
+            [_api_slideir_page()],
+            job_dir / "output.slideir.json",
+            slide_width_pt=320.0,
+            slide_height_pt=240.0,
+        )
+        self.job_store.update_job(job_id, status="ir-emitted")
+        edits = {"pages": [{"page": 1, "excluded_ids": [], "role_overrides": {}}]}
+
+        for _ in range(3):
+            response = self.client.put(f"/jobs/{job_id}/preview-edits", json=edits)
+            self.assertEqual(response.status_code, 200)
+
+        # Two concurrent PUTs (one holder + one waiter) stay under the waiter cap.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(self.client.put, f"/jobs/{job_id}/preview-edits", json=edits)
+                for _ in range(2)
+            ]
+            results = [future.result().status_code for future in futures]
+        self.assertEqual(sorted(results), [200, 200])
+
+        # A short hold that releases before JOB_LOCK_WAIT_S must not yield a spurious 409.
+        lock = self.job_store.job_lock(job_id)
+        holding = threading.Event()
+
+        def hold_briefly() -> None:
+            with lock:
+                holding.set()
+                time.sleep(0.1)
+
+        holder = threading.Thread(target=hold_briefly, daemon=True)
+        holder.start()
+        self.assertTrue(holding.wait(timeout=2.0))
+        waited = self.client.put(f"/jobs/{job_id}/preview-edits", json=edits)
+        holder.join(timeout=2.0)
+        self.assertEqual(waited.status_code, 200)
+        self.assertEqual(api_module._job_waiter_count(job_id), 0)
 
     def test_preview_edits_rejects_oversized_body(self) -> None:
         pdf_bytes = build_sample_pdf_bytes()
