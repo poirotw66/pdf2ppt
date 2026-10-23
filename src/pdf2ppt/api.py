@@ -11,11 +11,12 @@ from typing import Any
 
 import fitz
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 from starlette.background import BackgroundTask
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .api_models import (
     ApprovedBoxesRequest,
@@ -27,8 +28,12 @@ from .api_models import (
     DetectResponse,
     EmitIrResponse,
     ErrorResponse,
+    FromIrJobResponse,
     JobResponse,
     OcrBoxResponse,
+    PreviewEditsRequest,
+    PreviewEditsResponse,
+    PreviewResponse,
 )
 from .background import OpenCvFastInpaintingEngine, build_text_mask_image
 from .core import (
@@ -46,6 +51,18 @@ from .models import TextBlock
 from .ocr import OcrEngine
 from .paths import resolve_repo_relative_path
 from .pipeline import build_notebooklm_watermark_mask_block, convert_from_ir, convert_pdf
+from .preview_edits import (
+    EDITED_SLIDEIR_FILENAME,
+    PREVIEW_EDITS_FILENAME,
+    THUMBNAIL_WIDTH_PX,
+    apply_preview_edits_to_slideir,
+    atomic_write_text,
+    build_preview_payload,
+    empty_preview_edits,
+    load_preview_edits,
+    materialize_raster_fallback_backgrounds,
+    save_preview_edits,
+)
 from .safe_zip import (
     DEFAULT_ZIP_MAX_COMPRESSED_BYTES,
     DEFAULT_ZIP_MAX_ENTRIES,
@@ -61,6 +78,8 @@ logger = logging.getLogger(__name__)
 MAX_FROM_IR_FILE_BYTES = DEFAULT_ZIP_MAX_COMPRESSED_BYTES
 # Back-compat alias for tests / callers that imported the old constant.
 MAX_FROM_IR_ZIP_MEMBERS = DEFAULT_ZIP_MAX_ENTRIES
+# Preview-edits PUT body cap (deduped storage is much smaller; reject oversized floods).
+MAX_PREVIEW_EDITS_BODY_BYTES = 1 * 1024 * 1024
 
 app = FastAPI(title="pdf2ppt API", version="0.1.0")
 app.add_middleware(
@@ -71,6 +90,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 job_store = JobStore()
+
+
+class _PreviewEditsBodyLimitMiddleware(BaseHTTPMiddleware):
+    """Reject oversized PUT /jobs/{id}/preview-edits bodies before parsing JSON."""
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+        path = request.url.path
+        if request.method == "PUT" and path.endswith("/preview-edits"):
+            content_length = request.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    length = int(content_length)
+                except ValueError:
+                    length = -1
+                if length > MAX_PREVIEW_EDITS_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "detail": {
+                                "code": "input-error",
+                                "message": (
+                                    f"preview-edits body exceeds the "
+                                    f"{MAX_PREVIEW_EDITS_BODY_BYTES // (1024 * 1024)} MiB limit."
+                                ),
+                            }
+                        },
+                    )
+            body = await request.body()
+            if len(body) > MAX_PREVIEW_EDITS_BODY_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": {
+                            "code": "input-error",
+                            "message": (
+                                f"preview-edits body exceeds the "
+                                f"{MAX_PREVIEW_EDITS_BODY_BYTES // (1024 * 1024)} MiB limit."
+                            ),
+                        }
+                    },
+                )
+
+            async def receive() -> dict[str, Any]:
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            request = Request(request.scope, receive)
+        return await call_next(request)
+
+
+app.add_middleware(_PreviewEditsBodyLimitMiddleware)
 
 
 COMMON_ERROR_RESPONSES = {
@@ -455,25 +524,322 @@ def download_slideir_assets_zip(job_id: str) -> FileResponse:
     )
 
 
+@app.post(
+    "/jobs/{job_id}/preview",
+    response_model=PreviewResponse,
+    responses={
+        400: COMMON_ERROR_RESPONSES[400],
+        404: COMMON_ERROR_RESPONSES[404],
+        500: COMMON_ERROR_RESPONSES[500],
+        502: COMMON_ERROR_RESPONSES[502],
+        503: COMMON_ERROR_RESPONSES[503],
+    },
+)
+def build_job_preview(job_id: str, request: ConvertRequest) -> PreviewResponse:
+    """Analyze PDF → SlideIR (planner off by default), then return overlay preview data.
+
+    Does not require Gemini/API keys. Reuses ``emit-ir`` analysis; no PPTX is built.
+    Pass ``{}`` for defaults (layout planner forced off).
+    """
+    # Preview path must work with the layout planner off.
+    convert_request = (
+        request.model_copy(update={"layout_planner": None})
+        if request.layout_planner is not None
+        else request
+    )
+    emit_ir_job(job_id, convert_request)
+    # Element ids are positional (layout_text_1_N, ...) and change when the job is
+    # re-analyzed (e.g. after OCR boxes were edited), so saved edits are stale now.
+    (job_store.job_dir(job_id) / PREVIEW_EDITS_FILENAME).unlink(missing_ok=True)
+    return get_job_preview(job_id)
+
+
+@app.get(
+    "/jobs/{job_id}/preview",
+    response_model=PreviewResponse,
+    responses={400: COMMON_ERROR_RESPONSES[400], 404: COMMON_ERROR_RESPONSES[404]},
+)
+def get_job_preview(job_id: str) -> PreviewResponse:
+    """Return SlideIR-derived overlay preview for the Review UI (no PPTX render)."""
+    record = _load_job_or_404(job_id)
+    slideir_path = _resolve_job_slideir_path(record)
+    if slideir_path is None or not slideir_path.exists():
+        raise _http_exception(
+            404,
+            "not-found",
+            "SlideIR not found. POST /jobs/{id}/preview (or /emit-ir) first.",
+        )
+    try:
+        slideir = json.loads(slideir_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise _to_http_exception(InputValidationError(f"Failed to read SlideIR: {error}")) from error
+    if not isinstance(slideir, dict):
+        raise _to_http_exception(InputValidationError("SlideIR root must be a JSON object."))
+
+    edits_path = job_store.job_dir(job_id) / PREVIEW_EDITS_FILENAME
+    try:
+        edits = load_preview_edits(edits_path)
+        payload = build_preview_payload(slideir, job_id=job_id, edits=edits)
+    except SlideIrError as error:
+        raise _to_http_exception(_scrub_slideir_error(error)) from error
+
+    assets_dir = job_store.job_dir(job_id) / default_assets_dir_name(slideir_path)
+    return PreviewResponse(
+        job_id=job_id,
+        status=record.status,
+        page_count=int(payload["page_count"]),
+        slide_width_pt=float(payload["slide_width_pt"]),
+        slide_height_pt=float(payload["slide_height_pt"]),
+        pages=payload["pages"],
+        edits=PreviewEditsRequest.model_validate(payload["edits"]),
+        slideir_path=str(slideir_path),
+        slideir_assets_dir=str(assets_dir) if assets_dir.is_dir() else None,
+    )
+
+
+@app.get(
+    "/jobs/{job_id}/preview-edits",
+    response_model=PreviewEditsResponse,
+    responses={404: COMMON_ERROR_RESPONSES[404]},
+)
+def get_preview_edits(job_id: str) -> PreviewEditsResponse:
+    record = _load_job_or_404(job_id)
+    edits_path = job_store.job_dir(job_id) / PREVIEW_EDITS_FILENAME
+    try:
+        edits = load_preview_edits(edits_path)
+    except SlideIrError as error:
+        raise _to_http_exception(_scrub_slideir_error(error)) from error
+    return PreviewEditsResponse(
+        job_id=job_id,
+        status=record.status,
+        edits=PreviewEditsRequest.model_validate(edits),
+    )
+
+
+@app.put(
+    "/jobs/{job_id}/preview-edits",
+    response_model=PreviewEditsResponse,
+    responses={400: COMMON_ERROR_RESPONSES[400], 404: COMMON_ERROR_RESPONSES[404]},
+)
+def put_preview_edits(job_id: str, request: PreviewEditsRequest) -> PreviewEditsResponse:
+    """Save light preview edits (exclude, role overrides, raster-fallback pages)."""
+    with job_store.job_lock(job_id):
+        record = _load_job_or_404(job_id)
+        slideir_path = _resolve_job_slideir_path(record)
+        if slideir_path is None or not slideir_path.exists():
+            raise _http_exception(404, "not-found", "SlideIR not found. Build preview first.")
+
+        try:
+            slideir = json.loads(slideir_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise _to_http_exception(InputValidationError(f"Failed to read SlideIR: {error}")) from error
+        if not isinstance(slideir, dict):
+            raise _to_http_exception(InputValidationError("SlideIR root must be a JSON object."))
+
+        known_pages = {
+            int(page["page_number"])
+            for page in (slideir.get("pages") or [])
+            if isinstance(page, dict) and "page_number" in page
+        }
+        known_ids_by_page: dict[int, set[str]] = {}
+        for page in slideir.get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            page_number = int(page["page_number"])
+            ids: set[str] = set()
+            for key in ("text_blocks", "tables", "images", "shapes"):
+                for item in page.get(key) or []:
+                    if isinstance(item, dict) and item.get("id"):
+                        ids.add(str(item["id"]))
+            known_ids_by_page[page_number] = ids
+
+        for page_edit in request.pages:
+            if page_edit.page not in known_pages:
+                raise _http_exception(
+                    400,
+                    "input-error",
+                    f"Unknown page {page_edit.page} in preview edits.",
+                    page=page_edit.page,
+                )
+            known_ids = known_ids_by_page.get(page_edit.page, set())
+            # Deduplicate before validating so repeated ids do not inflate work.
+            excluded_unique = list(dict.fromkeys(page_edit.excluded_ids))
+            for excluded_id in excluded_unique:
+                if excluded_id not in known_ids:
+                    raise _http_exception(
+                        400,
+                        "input-error",
+                        f"Unknown element id {excluded_id!r} on page {page_edit.page}.",
+                        page=page_edit.page,
+                    )
+            text_ids = {
+                str(item["id"])
+                for item in next(
+                    (
+                        page.get("text_blocks") or []
+                        for page in slideir.get("pages") or []
+                        if isinstance(page, dict) and int(page.get("page_number", -1)) == page_edit.page
+                    ),
+                    [],
+                )
+                if isinstance(item, dict) and item.get("id")
+            }
+            for block_id in page_edit.role_overrides:
+                if block_id not in text_ids:
+                    raise _http_exception(
+                        400,
+                        "input-error",
+                        f"role_overrides key {block_id!r} is not a text block on page {page_edit.page}.",
+                        page=page_edit.page,
+                    )
+
+        edits_path = job_store.job_dir(job_id) / PREVIEW_EDITS_FILENAME
+        try:
+            saved = save_preview_edits(edits_path, request.model_dump())
+        except SlideIrError as error:
+            raise _to_http_exception(_scrub_slideir_error(error)) from error
+
+        job_store.update_job(job_id, status="preview-edited")
+        return PreviewEditsResponse(
+            job_id=job_id,
+            status="preview-edited",
+            edits=PreviewEditsRequest.model_validate(saved),
+        )
+
+
+@app.post(
+    "/jobs/{job_id}/from-ir",
+    response_model=FromIrJobResponse,
+    responses={
+        400: COMMON_ERROR_RESPONSES[400],
+        404: COMMON_ERROR_RESPONSES[404],
+        500: COMMON_ERROR_RESPONSES[500],
+    },
+)
+def convert_job_from_ir(job_id: str) -> FromIrJobResponse:
+    """Apply saved preview edits to job SlideIR and render PPTX via from-ir."""
+    with job_store.job_lock(job_id):
+        record = _load_job_or_404(job_id)
+        slideir_path = _resolve_job_slideir_path(record)
+        if slideir_path is None or not slideir_path.exists():
+            raise _http_exception(404, "not-found", "SlideIR not found. Build preview first.")
+
+        try:
+            slideir = json.loads(slideir_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise _to_http_exception(InputValidationError(f"Failed to read SlideIR: {error}")) from error
+        if not isinstance(slideir, dict):
+            raise _to_http_exception(InputValidationError("SlideIR root must be a JSON object."))
+
+        edits_path = job_store.job_dir(job_id) / PREVIEW_EDITS_FILENAME
+        try:
+            edits = load_preview_edits(edits_path) if edits_path.exists() else empty_preview_edits()
+        except SlideIrError as error:
+            raise _to_http_exception(_scrub_slideir_error(error)) from error
+
+        raster_pages = {
+            int(page["page"])
+            for page in edits.get("pages") or []
+            if isinstance(page, dict) and page.get("raster_fallback")
+        }
+        page_images: dict[int, bytes] = {}
+        if raster_pages:
+            page_images = _render_page_jpegs_for_pages(
+                Path(record.input_pdf_path),
+                raster_pages,
+                apply_notebooklm_fallback=_should_apply_notebooklm_watermark_fallback(
+                    record.original_filename
+                ),
+            )
+
+        try:
+            edited = apply_preview_edits_to_slideir(
+                slideir,
+                edits,
+                ensure_full_page_background=page_images,
+            )
+        except SlideIrError as error:
+            raise _to_http_exception(_scrub_slideir_error(error)) from error
+
+        job_dir = job_store.job_dir(job_id)
+        edited_path = job_dir / EDITED_SLIDEIR_FILENAME
+        # Keep assets next to the original IR; edited IR references the same assets_dir name.
+        assets_name = str(slideir.get("assets_dir") or default_assets_dir_name(slideir_path))
+        edited["assets_dir"] = assets_name
+        assets_root = job_dir / assets_name
+        if raster_pages:
+            materialize_raster_fallback_backgrounds(
+                edited, assets_root=assets_root, page_images=page_images
+            )
+
+        atomic_write_text(edited_path, json.dumps(edited, ensure_ascii=False, indent=2) + "\n")
+
+        output_pptx = job_dir / "output.pptx"
+        report_path = job_dir / "output.from_ir.report.json"
+        job_store.update_job(job_id, status="converting")
+        try:
+            report = convert_from_ir(edited_path, output_pptx, report_path=report_path)
+        except SlideIrError as error:
+            job_store.update_job(job_id, status="from-ir-failed")
+            raise _to_http_exception(_scrub_slideir_error(error)) from error
+        except Exception as error:
+            job_store.update_job(job_id, status="from-ir-failed")
+            raise _to_http_exception(PageConversionError(0, f"from-ir failed: {error}")) from error
+
+        job_store.update_job(
+            job_id,
+            status="converted",
+            output_pptx_path=str(output_pptx),
+            report_path=str(report_path),
+        )
+        return FromIrJobResponse(
+            job_id=job_id,
+            status="converted",
+            output_pptx_path=str(output_pptx),
+            report_path=str(report_path),
+            page_count=len(report.pages),
+            slideir_path=str(slideir_path),
+            edited_slideir_path=str(edited_path),
+        )
+
+
 @app.get("/jobs/{job_id}/pages/{page_number}.jpg", responses={404: COMMON_ERROR_RESPONSES[404]})
-def get_job_page_preview(job_id: str, page_number: int) -> Response:
+def get_job_page_preview(
+    job_id: str,
+    page_number: int,
+    width: int | None = Query(
+        default=None,
+        ge=16,
+        le=4096,
+        description="Optional max width in pixels (e.g. 120 for thumbnails).",
+    ),
+) -> Response:
     record = _load_job_or_404(job_id)
     try:
         with fitz.open(record.input_pdf_path) as document:
             if page_number < 1 or page_number > document.page_count:
                 raise _http_exception(404, "not-found", "Preview page not found.")
+            dpi = 72 if width is not None and width <= THUMBNAIL_WIDTH_PX else 144
             preview_image = _render_page_preview(
                 document[page_number - 1],
-                dpi=144,
-                apply_notebooklm_fallback=_should_apply_notebooklm_watermark_fallback(record.original_filename),
+                dpi=dpi,
+                apply_notebooklm_fallback=_should_apply_notebooklm_watermark_fallback(
+                    record.original_filename
+                ),
             )
     except HTTPException:
         raise
     except Exception as error:
         raise _to_http_exception(InputValidationError(f"Failed to render preview image: {error}")) from error
 
+    if width is not None and preview_image.width > width:
+        ratio = width / float(preview_image.width)
+        height = max(1, int(round(preview_image.height * ratio)))
+        preview_image = preview_image.resize((width, height), Image.Resampling.LANCZOS)
+
     buffer = io.BytesIO()
-    preview_image.save(buffer, format="JPEG", quality=85, optimize=True)
+    quality = 70 if width is not None and width <= THUMBNAIL_WIDTH_PX else 85
+    preview_image.save(buffer, format="JPEG", quality=quality, optimize=True)
     buffer.seek(0)
     return Response(content=buffer.getvalue(), media_type="image/jpeg")
 
@@ -587,6 +953,30 @@ def _resolve_job_slideir_path(record: JobRecord) -> Path | None:
         if candidate is not None and candidate.exists():
             return candidate
     return None
+
+
+def _render_page_jpegs_for_pages(
+    pdf_path: Path,
+    page_numbers: set[int],
+    *,
+    apply_notebooklm_fallback: bool,
+    dpi: int = 144,
+) -> dict[int, bytes]:
+    """Render selected PDF pages to JPEG bytes for raster-fallback backgrounds."""
+    images: dict[int, bytes] = {}
+    with fitz.open(pdf_path) as document:
+        for page_number in sorted(page_numbers):
+            if page_number < 1 or page_number > document.page_count:
+                continue
+            preview = _render_page_preview(
+                document[page_number - 1],
+                dpi=dpi,
+                apply_notebooklm_fallback=apply_notebooklm_fallback,
+            )
+            buffer = io.BytesIO()
+            preview.save(buffer, format="JPEG", quality=90, optimize=True)
+            images[page_number] = buffer.getvalue()
+    return images
 
 
 def _zip_directory(source_dir: Path, zip_path: Path) -> None:

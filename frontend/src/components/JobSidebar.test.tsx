@@ -12,6 +12,38 @@ const defaultJob = {
   updated_at: "2026-05-13T00:00:00Z",
 } as const;
 
+function renderSidebar(overrides: Partial<Parameters<typeof JobSidebar>[0]> = {}) {
+  const props = {
+    apiBase: "",
+    busyAction: null,
+    convertResult: null,
+    detectConfidenceThreshold: 0.75,
+    inpaintEngine: "opencv-fast" as const,
+    layoutPlanner: "" as const,
+    file: new File(["pdf"], "sample.pdf", { type: "application/pdf" }),
+    isBusy: false,
+    job: defaultJob,
+    workflowMode: "ocr" as const,
+    onWorkflowModeChange: vi.fn(),
+    onConvert: vi.fn(),
+    onBuildPreview: vi.fn(),
+    onConvertFromPreview: vi.fn(),
+    onDetectConfidenceThresholdChange: vi.fn(),
+    onInpaintEngineChange: vi.fn(),
+    onLayoutPlannerChange: vi.fn(),
+    onFileChange: vi.fn(),
+    onRunDetect: vi.fn(),
+    onSaveBoxes: vi.fn(),
+    onSelectPage: vi.fn(),
+    pages: [],
+    previewPageCount: 0,
+    selectedPageIndex: 0,
+    statusText: "ready",
+    ...overrides,
+  };
+  return render(<JobSidebar {...props} />);
+}
+
 afterEach(() => {
   cleanup();
 });
@@ -19,31 +51,7 @@ afterEach(() => {
 describe("JobSidebar", () => {
   it("lets users adjust detect confidence threshold before running OCR detect", () => {
     const onDetectConfidenceThresholdChange = vi.fn();
-
-    render(
-      <JobSidebar
-        apiBase=""
-        busyAction={null}
-        convertResult={null}
-        detectConfidenceThreshold={0.75}
-        inpaintEngine="opencv-fast"
-        layoutPlanner=""
-        file={new File(["pdf"], "sample.pdf", { type: "application/pdf" })}
-        isBusy={false}
-        job={defaultJob}
-        onConvert={vi.fn()}
-        onDetectConfidenceThresholdChange={onDetectConfidenceThresholdChange}
-        onInpaintEngineChange={vi.fn()}
-        onLayoutPlannerChange={vi.fn()}
-        onFileChange={vi.fn()}
-        onRunDetect={vi.fn()}
-        onSaveBoxes={vi.fn()}
-        onSelectPage={vi.fn()}
-        pages={[]}
-        selectedPageIndex={0}
-        statusText="ready"
-      />,
-    );
+    renderSidebar({ onDetectConfidenceThresholdChange });
 
     fireEvent.change(screen.getByLabelText("Detect Confidence Threshold"), { target: { value: "0.61" } });
 
@@ -51,30 +59,7 @@ describe("JobSidebar", () => {
   });
 
   it("shows inpaint engine choices for conversion", () => {
-    render(
-      <JobSidebar
-        apiBase=""
-        busyAction={null}
-        convertResult={null}
-        detectConfidenceThreshold={0.75}
-        inpaintEngine="lama-pytorch"
-        layoutPlanner=""
-        file={new File(["pdf"], "sample.pdf", { type: "application/pdf" })}
-        isBusy={false}
-        job={defaultJob}
-        onConvert={vi.fn()}
-        onDetectConfidenceThresholdChange={vi.fn()}
-        onInpaintEngineChange={vi.fn()}
-        onLayoutPlannerChange={vi.fn()}
-        onFileChange={vi.fn()}
-        onRunDetect={vi.fn()}
-        onSaveBoxes={vi.fn()}
-        onSelectPage={vi.fn()}
-        pages={[]}
-        selectedPageIndex={0}
-        statusText="ready"
-      />,
-    );
+    renderSidebar({ inpaintEngine: "lama-pytorch" });
 
     const inpaintSelects = screen.getAllByTestId("inpaint-engine-select") as HTMLSelectElement[];
     expect(inpaintSelects.some((select) => select.value === "lama-pytorch")).toBe(true);
@@ -91,30 +76,7 @@ describe("JobSidebar", () => {
   });
 
   it("shows workflow guidance and keeps later actions disabled until prerequisites exist", () => {
-    render(
-      <JobSidebar
-        apiBase=""
-        busyAction={null}
-        convertResult={null}
-        detectConfidenceThreshold={0.75}
-        inpaintEngine="opencv-fast"
-        layoutPlanner=""
-        file={null}
-        isBusy={false}
-        job={null}
-        onConvert={vi.fn()}
-        onDetectConfidenceThresholdChange={vi.fn()}
-        onInpaintEngineChange={vi.fn()}
-        onLayoutPlannerChange={vi.fn()}
-        onFileChange={vi.fn()}
-        onRunDetect={vi.fn()}
-        onSaveBoxes={vi.fn()}
-        onSelectPage={vi.fn()}
-        pages={[]}
-        selectedPageIndex={0}
-        statusText="idle"
-      />,
-    );
+    renderSidebar({ file: null, job: null, statusText: "idle" });
 
     expect(screen.getByText("No source file selected yet")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Create Job" })).not.toBeInTheDocument();
@@ -125,31 +87,7 @@ describe("JobSidebar", () => {
 
   it("passes the selected file upward immediately", () => {
     const onFileChange = vi.fn();
-
-    render(
-      <JobSidebar
-        apiBase=""
-        busyAction={null}
-        convertResult={null}
-        detectConfidenceThreshold={0.75}
-        inpaintEngine="opencv-fast"
-        layoutPlanner=""
-        file={null}
-        isBusy={false}
-        job={null}
-        onConvert={vi.fn()}
-        onDetectConfidenceThresholdChange={vi.fn()}
-        onInpaintEngineChange={vi.fn()}
-        onLayoutPlannerChange={vi.fn()}
-        onFileChange={onFileChange}
-        onRunDetect={vi.fn()}
-        onSaveBoxes={vi.fn()}
-        onSelectPage={vi.fn()}
-        pages={[]}
-        selectedPageIndex={0}
-        statusText="idle"
-      />,
-    );
+    renderSidebar({ file: null, job: null, statusText: "idle", onFileChange });
 
     const fileInput = screen.getByLabelText(/upload source file/i) as HTMLInputElement | null;
     const file = new File(["pdf"], "deck.pdf", { type: "application/pdf" });
@@ -157,5 +95,27 @@ describe("JobSidebar", () => {
     fireEvent.change(fileInput ?? screen.getByRole("textbox", { hidden: true }), { target: { files: [file] } });
 
     expect(onFileChange).toHaveBeenCalledWith(file);
+  });
+
+  it("switches into preview-before-convert mode with build and convert actions", () => {
+    const onWorkflowModeChange = vi.fn();
+    const onBuildPreview = vi.fn();
+    const onConvertFromPreview = vi.fn();
+
+    renderSidebar({
+      workflowMode: "preview",
+      previewPageCount: 2,
+      onWorkflowModeChange,
+      onBuildPreview,
+      onConvertFromPreview,
+    });
+
+    expect(screen.getByTestId("build-preview")).toBeEnabled();
+    expect(screen.getByTestId("convert-from-preview")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("convert-from-preview"));
+    expect(onConvertFromPreview).toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("mode-ocr"));
+    expect(onWorkflowModeChange).toHaveBeenCalledWith("ocr");
   });
 });

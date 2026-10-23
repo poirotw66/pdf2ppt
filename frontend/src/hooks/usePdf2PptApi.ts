@@ -5,7 +5,16 @@ import {
   detectConfidenceThreshold,
   type InpaintEngine,
 } from "../config";
-import type { ApiErrorResponse, ConvertResponse, DetectResponse, JobResponse, PagePayload } from "../types";
+import type {
+  ApiErrorResponse,
+  ConvertResponse,
+  DetectResponse,
+  FromIrJobResponse,
+  JobResponse,
+  PagePayload,
+  PreviewEdits,
+  PreviewResponse,
+} from "../types";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -150,17 +159,116 @@ export function usePdf2PptApi() {
     return payload;
   }
 
+  async function buildPreview(jobId: string): Promise<PreviewResponse | null> {
+    setIsBusy(true);
+    setBusyAction("Building SlideIR preview...");
+    setStatusText(`Analyzing job ${jobId} for preview (planner off)...`);
+    try {
+      const response = await fetch(`${apiBase}/jobs/${jobId}/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      const payload = (await response.json()) as PreviewResponse;
+      await refreshJob(jobId);
+      setStatusText(`Preview ready for ${payload.page_count} page(s).`);
+      return payload;
+    } catch (error) {
+      setStatusText(`Build preview failed: ${stringifyError(error)}`);
+      return null;
+    } finally {
+      setIsBusy(false);
+      setBusyAction(null);
+    }
+  }
+
+  async function fetchPreview(jobId: string): Promise<PreviewResponse | null> {
+    try {
+      const response = await fetch(`${apiBase}/jobs/${jobId}/preview`);
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      return (await response.json()) as PreviewResponse;
+    } catch (error) {
+      setStatusText(`Load preview failed: ${stringifyError(error)}`);
+      return null;
+    }
+  }
+
+  async function savePreviewEdits(jobId: string, edits: PreviewEdits): Promise<boolean> {
+    setIsBusy(true);
+    setBusyAction("Saving preview edits...");
+    setStatusText("Saving preview edits...");
+    try {
+      const response = await fetch(`${apiBase}/jobs/${jobId}/preview-edits`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(edits),
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      await refreshJob(jobId);
+      setStatusText("Preview edits saved.");
+      return true;
+    } catch (error) {
+      setStatusText(`Save preview edits failed: ${stringifyError(error)}`);
+      return false;
+    } finally {
+      setIsBusy(false);
+      setBusyAction(null);
+    }
+  }
+
+  async function convertFromIr(jobId: string): Promise<FromIrJobResponse | null> {
+    setIsBusy(true);
+    setBusyAction("Converting from SlideIR...");
+    setStatusText(`Building PPTX from preview IR for job ${jobId}...`);
+    try {
+      const response = await fetch(`${apiBase}/jobs/${jobId}/from-ir`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      const payload = (await response.json()) as FromIrJobResponse;
+      setConvertResult({
+        job_id: payload.job_id,
+        status: payload.status,
+        output_pptx_path: payload.output_pptx_path,
+        report_path: payload.report_path,
+        page_count: payload.page_count,
+      });
+      await refreshJob(jobId);
+      setStatusText(`Convert finished for ${payload.page_count} page(s) (from-ir).`);
+      return payload;
+    } catch (error) {
+      setStatusText(`Convert from-ir failed: ${stringifyError(error)}`);
+      return null;
+    } finally {
+      setIsBusy(false);
+      setBusyAction(null);
+    }
+  }
+
   return {
     apiBase,
     busyAction,
+    buildPreview,
+    convertFromIr,
     convertResult,
     createJob,
     convertJob,
+    fetchPreview,
     isBusy,
     job,
     refreshJob,
     runDetect,
     saveBoxes,
+    savePreviewEdits,
     setJob,
     setStatusText,
     statusText,

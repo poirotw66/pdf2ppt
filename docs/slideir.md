@@ -80,6 +80,10 @@ apply to `emit-ir` the same way as `convert`.
 |----------|-----------|
 | `POST /jobs/{id}/convert` with `emit_ir` / `ir_only` | Same convert options; optionally write SlideIR |
 | `POST /jobs/{id}/emit-ir` | Analysis → SlideIR only (approved boxes optional) |
+| `POST /jobs/{id}/preview` | Analysis → SlideIR (planner forced off) + overlay preview JSON |
+| `GET /jobs/{id}/preview` | Overlay preview from existing SlideIR + saved edits |
+| `PUT /jobs/{id}/preview-edits` | Save exclude / role / raster-fallback overlay edits |
+| `POST /jobs/{id}/from-ir` | Apply edits → render job SlideIR to PPTX |
 | `GET /jobs/{id}/slideir.json` | Download emitted SlideIR JSON |
 | `GET /jobs/{id}/slideir-assets.zip` | Download the sibling assets directory as a zip |
 | `POST /from-ir` | Multipart: `ir_file` + optional `assets_zip` → PPTX download |
