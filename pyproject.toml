@@ -116,6 +116,7 @@ pdf2ppt = ["schemas/*.json", "py.typed"]
 line-length = 120
 target-version = "py311"
 exclude = [
+  ".venv",
   "frontend",
   "tests/fixtures",
   "lama",

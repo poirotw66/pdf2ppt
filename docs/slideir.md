@@ -102,6 +102,11 @@ Limits (env overrides, defaults in parentheses):
 `PDF2PPT_ZIP_MAX_ENTRY_BYTES` (50 MiB),
 `PDF2PPT_ZIP_MAX_COMPRESSION_RATIO` (100). Oversized or unsafe zips return 4xx.
 
+`PUT /jobs/{id}/preview-edits` and `POST /jobs/{id}/from-ir` take a short
+per-job lock. If another request is still working on the same job, they return
+`409` with code `job-busy` (retry shortly). Re-running `POST /preview` or
+`POST /emit-ir` also clears saved `preview_edits.json` for that job.
+
 Defaults leave existing convert behavior unchanged.
 
 ## Agent workflow

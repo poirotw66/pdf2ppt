@@ -15,6 +15,10 @@ import type {
   PreviewEdits,
   PreviewResponse,
 } from "../types";
+import {
+  JOB_BUSY_STATUS_MESSAGE,
+  fetchWithJobBusyRetry,
+} from "../utils/jobBusyRetry";
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -25,6 +29,10 @@ export function usePdf2PptApi() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [convertResult, setConvertResult] = useState<ConvertResponse | null>(null);
 
+  function onJobBusyRetry(): void {
+    setStatusText(JOB_BUSY_STATUS_MESSAGE);
+  }
+
   async function createJob(file: File): Promise<JobResponse | null> {
     setIsBusy(true);
     setBusyAction("Creating job...");
@@ -33,6 +41,7 @@ export function usePdf2PptApi() {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      // Upload creates a new job — do not auto-retry on conflict/busy.
       const response = await fetch(`${apiBase}/jobs`, {
         method: "POST",
         body: formData,
@@ -58,6 +67,7 @@ export function usePdf2PptApi() {
     setBusyAction("Running OCR detect...");
     setStatusText(`Running OCR detect for job ${jobId}...`);
     try {
+      // Detect re-runs OCR; a duplicate would be expensive and is not locked with job-busy today.
       const response = await fetch(`${apiBase}/jobs/${jobId}/detect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -87,18 +97,22 @@ export function usePdf2PptApi() {
     setBusyAction("Saving boxes...");
     setStatusText("Saving approved boxes...");
     try {
-      const response = await fetch(`${apiBase}/jobs/${jobId}/boxes`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pages: pages.map((page) => ({
-            page: page.page,
-            width: page.width,
-            height: page.height,
-            boxes: page.boxes,
-          })),
-        }),
-      });
+      const response = await fetchWithJobBusyRetry(
+        `${apiBase}/jobs/${jobId}/boxes`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pages: pages.map((page) => ({
+              page: page.page,
+              width: page.width,
+              height: page.height,
+              boxes: page.boxes,
+            })),
+          }),
+        },
+        { onBusyRetry: onJobBusyRetry },
+      );
       if (!response.ok) {
         throw new Error(await readError(response));
       }
@@ -127,6 +141,7 @@ export function usePdf2PptApi() {
         : "";
     setStatusText(`Converting job ${jobId} into PPTX...${lamaHint}`);
     try {
+      // Final convert must not auto-retry: a duplicate run is expensive and not clearly safe.
       const response = await fetch(`${apiBase}/jobs/${jobId}/convert`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -150,7 +165,9 @@ export function usePdf2PptApi() {
   }
 
   async function refreshJob(jobId: string): Promise<JobResponse | null> {
-    const response = await fetch(`${apiBase}/jobs/${jobId}`);
+    const response = await fetchWithJobBusyRetry(`${apiBase}/jobs/${jobId}`, undefined, {
+      onBusyRetry: onJobBusyRetry,
+    });
     if (!response.ok) {
       return null;
     }
@@ -164,11 +181,15 @@ export function usePdf2PptApi() {
     setBusyAction("Building SlideIR preview...");
     setStatusText(`Analyzing job ${jobId} for preview (planner off)...`);
     try {
-      const response = await fetch(`${apiBase}/jobs/${jobId}/preview`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
+      const response = await fetchWithJobBusyRetry(
+        `${apiBase}/jobs/${jobId}/preview`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+        { onBusyRetry: onJobBusyRetry },
+      );
       if (!response.ok) {
         throw new Error(await readError(response));
       }
@@ -187,7 +208,9 @@ export function usePdf2PptApi() {
 
   async function fetchPreview(jobId: string): Promise<PreviewResponse | null> {
     try {
-      const response = await fetch(`${apiBase}/jobs/${jobId}/preview`);
+      const response = await fetchWithJobBusyRetry(`${apiBase}/jobs/${jobId}/preview`, undefined, {
+        onBusyRetry: onJobBusyRetry,
+      });
       if (!response.ok) {
         throw new Error(await readError(response));
       }
@@ -203,11 +226,15 @@ export function usePdf2PptApi() {
     setBusyAction("Saving preview edits...");
     setStatusText("Saving preview edits...");
     try {
-      const response = await fetch(`${apiBase}/jobs/${jobId}/preview-edits`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(edits),
-      });
+      const response = await fetchWithJobBusyRetry(
+        `${apiBase}/jobs/${jobId}/preview-edits`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(edits),
+        },
+        { onBusyRetry: onJobBusyRetry },
+      );
       if (!response.ok) {
         throw new Error(await readError(response));
       }
@@ -228,6 +255,7 @@ export function usePdf2PptApi() {
     setBusyAction("Converting from SlideIR...");
     setStatusText(`Building PPTX from preview IR for job ${jobId}...`);
     try {
+      // Final from-ir Convert/download: do not auto-retry (duplicate render is harmful/expensive).
       const response = await fetch(`${apiBase}/jobs/${jobId}/from-ir`, {
         method: "POST",
       });

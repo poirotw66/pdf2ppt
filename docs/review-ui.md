@@ -59,6 +59,7 @@ Optional second mode (no Gemini / layout planner required):
 Notes:
 
 - Re-running **Build Preview** or **emit-ir** deletes `preview_edits.json` for that job (element ids are positional and go stale after OCR box edits). The UI also resets its local edit state.
+- Contended `PUT /preview-edits` and `POST /from-ir` may return `409` with code `job-busy` when another request is still working on the same job; retry shortly.
 - Exclude removes native SlideIR objects. On `overlay` / `full-page` pages (`baked_background: true`), content painted into the background raster may stay visible — if the preview does not change, use raster fallback for a full-page image.
 - Thumbnails use `GET /jobs/{id}/pages/{n}.jpg?width=120`.
 - Rotated PDF pages may show overlay/image mismatch (pre-existing SlideIR/geometry issue on `main`); prefer raster fallback there.
@@ -124,6 +125,7 @@ Common error codes:
 - `ocr-processing-error`: OCR runtime failed while processing the request
 - `page-conversion-error`: a page failed during conversion
 - `not-found`: unknown job id or missing generated artifact
+- `job-busy`: another request is still working on this job; retry shortly (`409`)
 
 Typical endpoint status codes:
 
@@ -131,6 +133,8 @@ Typical endpoint status codes:
 - `POST /jobs/{job_id}/detect`: `200`, `404`, `502`, `503`
 - `PUT /jobs/{job_id}/boxes`: `200`, `400`, `404`
 - `POST /jobs/{job_id}/convert`: `200`, `400`, `404`, `500`, `502`, `503`
+- `PUT /jobs/{job_id}/preview-edits`: `200`, `400`, `404`, `409`, `413`
+- `POST /jobs/{job_id}/from-ir`: `200`, `400`, `404`, `409`, `500`
 
 ## Related source files
 

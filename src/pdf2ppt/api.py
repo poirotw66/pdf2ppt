@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -181,6 +182,17 @@ app.add_middleware(
 
 
 JOB_LOCK_WAIT_S = 5.0
+# Cap how many threadpool threads may block waiting on one job. Beyond this,
+# further requests return 409 immediately so unrelated jobs stay responsive.
+JOB_MAX_WAITERS = 4
+_job_waiters: dict[str, int] = {}
+_job_waiters_guard = threading.Lock()
+
+
+def _job_waiter_count(job_id: str) -> int:
+    """Return the current waiter count for ``job_id`` (tests / diagnostics)."""
+    with _job_waiters_guard:
+        return _job_waiters.get(job_id, 0)
 
 
 @contextlib.contextmanager
@@ -188,12 +200,32 @@ def _job_lock_or_busy(job_id: str):  # type: ignore[no-untyped-def]
     """Per-job lock with a bounded wait so queued requests cannot pin the whole threadpool."""
     _load_job_or_404(job_id)  # unknown ids: 404 before any lock object is created
     lock = job_store.job_lock(job_id)
-    if not lock.acquire(timeout=JOB_LOCK_WAIT_S):
-        raise _http_exception(
-            409,
-            "job-busy",
-            "Another request is still working on this job; retry shortly.",
-        )
+    # Fast path: uncontended. Otherwise cap the number of threadpool threads that may
+    # block on one job so a burst of requests cannot pin the whole pool for 5 s per wave.
+    if not lock.acquire(blocking=False):
+        with _job_waiters_guard:
+            if _job_waiters.get(job_id, 0) >= JOB_MAX_WAITERS:
+                waiting = False
+            else:
+                _job_waiters[job_id] = _job_waiters.get(job_id, 0) + 1
+                waiting = True
+        acquired = False
+        if waiting:
+            try:
+                acquired = lock.acquire(timeout=JOB_LOCK_WAIT_S)
+            finally:
+                with _job_waiters_guard:
+                    left = _job_waiters.get(job_id, 1) - 1
+                    if left <= 0:
+                        _job_waiters.pop(job_id, None)
+                    else:
+                        _job_waiters[job_id] = left
+        if not acquired:
+            raise _http_exception(
+                409,
+                "job-busy",
+                "Another request is still working on this job; retry shortly.",
+            )
     try:
         yield
     finally:
