@@ -133,10 +133,10 @@ pdf2ppt batch ./pdfs -o ./pptx_out --fail-fast --jobs 1 --measure-quality
 | 隔離 | 單一壞檔不中止整批（除非 `--fail-fast`） |
 | 續跑 | `--skip-existing`／`--resume` 保留有效 PPTX；中斷後請加 `--resume` 重跑 |
 | 摘要 | `summary.csv`／`summary.json`／`summary.md`（每檔後原子寫入） |
-| 平行 | `--jobs` 預設 **1**；`>1` 使用行程（OCR 很吃記憶體） |
+| 平行 | `--jobs` 預設 **1**；`>1` 使用處理程序（OCR 很吃記憶體） |
 | 結束碼 | **0** 全成功／略過 · **1** 至少一檔失敗 · **2** 用法／驗證錯誤 · **130** KeyboardInterrupt（部分摘要仍保留） |
 
-單一 PDF 輸出與單檔模式一致，但同一行程連續轉多個 OCR 檔時，PaddleOCR 暖機可能造成文字色約 ±2/255 差異。**注意：** 原生 OCR 期間收到 SIGINT 時，行程可能以非零異常碼結束；`summary.*` 仍有效，請用 `--resume` 重跑。
+單一 PDF 輸出與單檔模式一致，但同一處理程序連續轉多個 OCR 檔時，PaddleOCR 暖機可能造成文字色約 ±2/255 差異。**注意：** 原生 OCR 期間收到 SIGINT 時，處理程序可能以非零異常碼結束；`summary.*` 仍有效，請用 `--resume` 重跑。
 
 ## Review UI／API 概要
 
@@ -165,27 +165,32 @@ cd frontend && npm install && npm run dev   # http://127.0.0.1:5173
 
 ## 設定（環境變數）
 
+Compose 只會轉發 `docker-compose.yml` 裡 `api.environment` 列出的變數。
+`PDF2PPT_PAGE_TIMEOUT_S`、`PDF2PPT_ZIP_MAX_*`、`PDF2PPT_LAYOUT_PLANNER_*_USD_PER_MTOK`
+等適用於 pip／CLI；若要在 Compose 容器內生效，需自行加進 compose。範本：
+[`.env.example`](.env.example)。
+
 | 變數 | 預設 | 用途 |
 | --- | --- | --- |
 | `PDF2PPT_ROOT` | 自動（repo）／Docker `/data` | 專案根目錄（模型／相對路徑） |
 | `PDF2PPT_JOB_ROOT` | `.pdf2ppt_jobs` | Review UI job 儲存 |
 | `PDF2PPT_JOB_RETENTION_HOURS` | `24` | Job 保留時數（`<=0` 不逾期） |
 | `PDF2PPT_CORS_ORIGINS` | Vite `5173` | 逗號分隔；`*` 會被拒絕（有 credentials）；僅逗號則回退預設 |
-| `PDF2PPT_PAGE_TIMEOUT_S` | `120` | 分頁 OCR／版面逾時（`<=0` 關閉） |
-| `PDF2PPT_ZIP_MAX_COMPRESSED_BYTES` | `50 MiB` | `from-ir` 資產 zip |
+| `PDF2PPT_PAGE_TIMEOUT_S` | `120` | 分頁 OCR／版面逾時（`<=0` 關閉）；pip／CLI（除非加進 compose） |
+| `PDF2PPT_ZIP_MAX_COMPRESSED_BYTES` | `50 MiB` | `from-ir` 資產 zip；pip／CLI（除非加進 compose） |
 | `PDF2PPT_ZIP_MAX_UNCOMPRESSED_BYTES` | `200 MiB` | … |
 | `PDF2PPT_ZIP_MAX_ENTRIES` | `10000` | … |
 | `PDF2PPT_ZIP_MAX_ENTRY_BYTES` | `50 MiB` | … |
 | `PDF2PPT_ZIP_MAX_COMPRESSION_RATIO` | `100` | … |
-| `PDF2PPT_LAYOUT_PLANNER_MODEL` | `gemini-3.1-flash-lite` | 規劃器模型覆寫 |
-| `PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK`／`_OUTPUT_…` | `0.25`／`1.50` | 成本計算 |
+| `PDF2PPT_LAYOUT_PLANNER_MODEL` | `gemini-3.1-flash-lite` | 規劃器模型覆寫（compose 會轉發） |
+| `PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK`／`_OUTPUT_…` | `0.25`／`1.50` | 成本計算；pip／CLI（除非加進 compose） |
 | `GEMINI_API_KEY`／`GOOGLE_API_KEY` | 未設 | 規劃器／生成式 Gemini |
 | `OPENAI_API_KEY` | 未設 | 生成式 OpenAI |
 | `PDF2PPT_GEMINI_IMAGE_MODEL`／`PDF2PPT_OPENAI_IMAGE_MODEL` | 產品預設 | 生成式影像模型 |
 | `PDF2PPT_API_PORT`／`PDF2PPT_UI_PORT` | `8008`／`8080` | Compose 主機埠 |
 | `PDF2PPT_MODEL_DIR` | 具名 volume `pdf2ppt-models` | Compose 模型掛載 |
 
-請勿提交真實金鑰。範本：[`.env.example`](.env.example)。
+請勿提交真實金鑰。
 
 **版面規劃器煞車（CLI 預設）：** 最多呼叫 **30** 次、成本上限 **$1.0**、逾時 **45 秒**、並行 **2**、連續失敗 **2** 次斷路（認證失敗立即斷路）。細節：[`docs/layout-planner.md`](docs/layout-planner.md)。
 
@@ -193,9 +198,10 @@ cd frontend && npm install && npm run dev   # http://127.0.0.1:5173
 
 ```bash
 python -m pip install -e ".[dev]"
-make lint          # ruff + mypy
+make lint          # ruff
+make typecheck     # mypy
 make test          # pytest
-make test-frontend # 前端單元測試
+make test-all      # lint + typecheck + pytest + 前端
 make help          # 所有快捷指令
 ```
 
@@ -207,7 +213,7 @@ CI（`.github/workflows/ci.yml`）：pytest、ruff + mypy、前端測試／建�
 - **寬而不換行的文字：** LibreOffice 常忽略 placeholder 的 `wrap=none`；標題加寬與 OCR 單行啟發式可緩解，但無法完全對齊 PowerPoint 重排行為。
 - **OCR 逾時通道：** 分頁逾時後會更換 OCR worker 執行緒；Paddle 具執行緒親和性，約 30–40% 的更換可能拋出原生 `std::exception`。pipeline 會對該頁降級為空 OCR／raster fallback，而不是整份失敗。建議維持預設 120 秒逾時。
 - **Refine 時間預留：** 剩餘預算低於已核發的 soffice 預留（`max(5s, 3×` 最近單頁渲染））時不啟動 trial，避免極短殘餘時間拖垮健康轉檔。預設整份預算 **90 秒**；次數因機器而異。
-- **批次在原生 OCR 期間收到 SIGINT：** 摘要檔仍有效；行程可能以非零異常碼結束 — 請用 `--resume` 重跑。
+- **批次在原生 OCR 期間收到 SIGINT：** 摘要檔仍有效；處理程序可能以非零異常碼結束 — 請用 `--resume` 重跑。
 
 ## 疑難排解／FAQ
 
@@ -230,6 +236,7 @@ CI（`.github/workflows/ci.yml`）：pytest、ruff + mypy、前端測試／建�
 | --- | --- |
 | [`docs/README.md`](docs/README.md) | **所有文件索引** |
 | [`docs/quickstart.md`](docs/quickstart.md) | 安裝、首次轉檔、Docker |
+| [`docs/architecture.md`](docs/architecture.md) | 管線圖與模組對照 |
 | [`docs/cli-reference.md`](docs/cli-reference.md) | 旗標、批次、結束碼、OCR 逾時 |
 | [`docs/review-ui.md`](docs/review-ui.md) | Review UI + API + 預覽 |
 | [`docs/slideir.md`](docs/slideir.md) | SlideIR emit-ir／from-ir |

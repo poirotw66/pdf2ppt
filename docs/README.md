@@ -7,6 +7,7 @@ Start here if you are new: [quickstart.md](quickstart.md) · root [README](../RE
 | Doc | Contents |
 | --- | --- |
 | [quickstart.md](quickstart.md) | Install (pip / pipx / Docker), first convert, troubleshooting |
+| [architecture.md](architecture.md) | Pipeline diagram and module map |
 | [cli-reference.md](cli-reference.md) | All CLI flags, batch mode, exit codes, OCR timeout lane |
 | [review-ui.md](review-ui.md) | OCR review + Preview before convert, API endpoints, 409/413 |
 | [slideir.md](slideir.md) | SlideIR schema, `emit-ir` / `from-ir`, safe zip limits |

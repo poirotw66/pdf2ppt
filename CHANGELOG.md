@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Optional packaging extras: `[ocr]`, `[server]`, `[dev]`, `[all]`, plus existing `[cpu]` / `[gpu]` / `[lint]` / `[layout]`.
-- Explicit `paddlepaddle==3.2.0` pin under `[ocr]` (3.3.x breaks PP-OCRv5 OCR on CPU).
+- Explicit `paddlepaddle==3.2.0` pin under `[ocr]` (3.3.x breaks PP-OCRv5 on CPU; use 3.2.0).
 - `python -m pdf2ppt` module entry (via `__main__`) documented alongside the `pdf2ppt` console script.
 - Docker support: `Dockerfile`, `Dockerfile.frontend`, `docker-compose.yml`, `.dockerignore`, `.env.example`.
 - API `GET /health` liveness endpoint for container healthchecks.

@@ -113,6 +113,11 @@ Detect request options:
 - `return_word_box`: mirrors CLI `--ocr-return-word-box`, default `false`.
 - The API applies the same line-merge post-processing as the CLI before returning boxes. Restart the API after code changes and rerun detect; existing job detection payloads are not refreshed automatically.
 
+ConvertRequest layout-planner fields: the API exposes only `layout_planner`,
+`layout_planner_max_calls` (0–100), `layout_planner_timeout_s` (1–120),
+`layout_planner_apply_grouping`, and `layout_planner_apply_fonts`. The planner
+model, USD cap, and cache dir are server-side only (not client-settable).
+
 ## Error response model
 
 API errors return structured JSON under `detail`:

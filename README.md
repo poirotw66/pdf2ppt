@@ -176,27 +176,32 @@ Full workflow: [`docs/review-ui.md`](docs/review-ui.md).
 
 ## Configuration (environment)
 
+Compose forwards only the variables listed under `api.environment` in
+`docker-compose.yml`. Vars such as `PDF2PPT_PAGE_TIMEOUT_S`, `PDF2PPT_ZIP_MAX_*`,
+and `PDF2PPT_LAYOUT_PLANNER_*_USD_PER_MTOK` apply to pip/CLI runs unless you add
+them to compose. Template: [`.env.example`](.env.example).
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PDF2PPT_ROOT` | auto (repo) / Docker `/data` | Project root for models / relative paths |
 | `PDF2PPT_JOB_ROOT` | `.pdf2ppt_jobs` | Review UI job store |
 | `PDF2PPT_JOB_RETENTION_HOURS` | `24` | Job TTL (`<=0` disables expiry) |
 | `PDF2PPT_CORS_ORIGINS` | Vite `5173` origins | Comma-separated; `*` rejected (credentials on); comma-only → defaults |
-| `PDF2PPT_PAGE_TIMEOUT_S` | `120` | Per-page OCR/layout timeout (`<=0` disables) |
-| `PDF2PPT_ZIP_MAX_COMPRESSED_BYTES` | `50 MiB` | `from-ir` assets zip |
+| `PDF2PPT_PAGE_TIMEOUT_S` | `120` | Per-page OCR/layout timeout (`<=0` disables); pip/CLI unless added to compose |
+| `PDF2PPT_ZIP_MAX_COMPRESSED_BYTES` | `50 MiB` | `from-ir` assets zip; pip/CLI unless added to compose |
 | `PDF2PPT_ZIP_MAX_UNCOMPRESSED_BYTES` | `200 MiB` | … |
 | `PDF2PPT_ZIP_MAX_ENTRIES` | `10000` | … |
 | `PDF2PPT_ZIP_MAX_ENTRY_BYTES` | `50 MiB` | … |
 | `PDF2PPT_ZIP_MAX_COMPRESSION_RATIO` | `100` | … |
-| `PDF2PPT_LAYOUT_PLANNER_MODEL` | `gemini-3.1-flash-lite` | Planner model override |
-| `PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK` / `_OUTPUT_…` | `0.25` / `1.50` | Cost accounting |
+| `PDF2PPT_LAYOUT_PLANNER_MODEL` | `gemini-3.1-flash-lite` | Planner model override (compose-forwarded) |
+| `PDF2PPT_LAYOUT_PLANNER_INPUT_USD_PER_MTOK` / `_OUTPUT_…` | `0.25` / `1.50` | Cost accounting; pip/CLI unless added to compose |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | unset | Planner / generative Gemini |
 | `OPENAI_API_KEY` | unset | Generative OpenAI |
 | `PDF2PPT_GEMINI_IMAGE_MODEL` / `PDF2PPT_OPENAI_IMAGE_MODEL` | product defaults | Generative image models |
 | `PDF2PPT_API_PORT` / `PDF2PPT_UI_PORT` | `8008` / `8080` | Compose host ports |
 | `PDF2PPT_MODEL_DIR` | named volume `pdf2ppt-models` | Compose model mount |
 
-Never commit real keys. Template: [`.env.example`](.env.example).
+Never commit real keys.
 
 **Layout planner brakes (CLI defaults):** max calls **30**, max cost **$1.0**,
 timeout **45s**, concurrency **2**, circuit after **2** consecutive failures
@@ -206,9 +211,10 @@ timeout **45s**, concurrency **2**, circuit after **2** consecutive failures
 
 ```bash
 python -m pip install -e ".[dev]"
-make lint          # ruff + mypy
+make lint          # ruff
+make typecheck     # mypy
 make test          # pytest
-make test-frontend # frontend unit tests
+make test-all      # lint + typecheck + pytest + frontend
 make help          # all shortcuts
 ```
 
@@ -255,6 +261,7 @@ wheel smoke test, report-only slide-quality bench.
 | --- | --- |
 | [`docs/README.md`](docs/README.md) | **Index** of all docs |
 | [`docs/quickstart.md`](docs/quickstart.md) | Install, first convert, Docker |
+| [`docs/architecture.md`](docs/architecture.md) | Pipeline diagram + module map |
 | [`docs/cli-reference.md`](docs/cli-reference.md) | Flags, batch, exits, OCR timeout |
 | [`docs/review-ui.md`](docs/review-ui.md) | Review UI + API + preview |
 | [`docs/slideir.md`](docs/slideir.md) | SlideIR emit-ir / from-ir |
