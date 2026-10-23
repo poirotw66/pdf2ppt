@@ -78,6 +78,12 @@ docker compose up --build
 # API health: http://127.0.0.1:8008/health
 ```
 
+OCR models default to the named volume `pdf2ppt-models` (writable by
+container uid 10001). To bind a host directory instead, set
+`PDF2PPT_MODEL_DIR=./model` and `chown 10001:10001` it — a plain host-owned
+`./model` is not writable by the container user on Linux. Job outputs use the
+`pdf2ppt-jobs` volume (no `./output` bind).
+
 One-shot CLI (mount inputs/outputs):
 
 ```bash

@@ -11,9 +11,9 @@
 # LibreOffice (optional --refine): rebuild the API image with
 #   docker compose build --build-arg INSTALL_LIBREOFFICE=1 api
 #
-# OCR models persist on the host via PDF2PPT_MODEL_DIR (default ./model).
-# Pre-create the directory so Docker does not make it root-owned:
-#   mkdir -p model
+# OCR models persist in the `pdf2ppt-models` named volume (uid 10001-owned).
+# To use a host directory instead set PDF2PPT_MODEL_DIR=./model and make it
+# writable by uid 10001: mkdir -p model && sudo chown 10001:10001 model
 # Conversion outputs are served over HTTP / stored under the jobs volume;
 # there is no separate ./output bind mount.
 
@@ -42,7 +42,10 @@ services:
       PDF2PPT_OPENAI_IMAGE_MODEL: ${PDF2PPT_OPENAI_IMAGE_MODEL:-}
     volumes:
       - pdf2ppt-jobs:/data/jobs
-      - ${PDF2PPT_MODEL_DIR:-./model}:/data/model
+      # Named volume by default (inherits the image's uid-10001 ownership).
+      # Set PDF2PPT_MODEL_DIR to a host path only if it is writable by uid 10001
+      # (e.g. `sudo chown 10001:10001 model`), or add `user: "$(id -u):$(id -g)"`.
+      - ${PDF2PPT_MODEL_DIR:-pdf2ppt-models}:/data/model
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8008/health"]
       interval: 30s
@@ -71,3 +74,4 @@ services:
 
 volumes:
   pdf2ppt-jobs:
+  pdf2ppt-models:

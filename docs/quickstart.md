@@ -104,9 +104,11 @@ docker compose up --build
 
 Env vars (see `.env.example`): `PDF2PPT_ROOT` (image default `/data` so OCR models
 land on `/data/model`), `PDF2PPT_JOB_ROOT`, `PDF2PPT_JOB_RETENTION_HOURS`,
-`PDF2PPT_CORS_ORIGINS`, optional `GEMINI_API_KEY` / `OPENAI_API_KEY`. Persist models
-with `PDF2PPT_MODEL_DIR=./model` (pre-create the directory so it is not root-owned).
-Job artifacts live on the `pdf2ppt-jobs` volume; conversion downloads go over HTTP.
+`PDF2PPT_CORS_ORIGINS`, optional `GEMINI_API_KEY` / `OPENAI_API_KEY`. Models default
+to the named volume `pdf2ppt-models` (owned by container uid 10001). A host path
+needs `PDF2PPT_MODEL_DIR=./model` plus `chown 10001:10001` (a plain `./model`
+bind is not writable by the container user on Linux). Job artifacts live on
+`pdf2ppt-jobs`; conversion downloads go over HTTP (no `./output` bind mount).
 
 One-shot CLI (match host uid so bind-mount writes succeed):
 

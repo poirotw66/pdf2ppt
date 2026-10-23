@@ -73,6 +73,10 @@ docker compose up --build
 # API health：http://127.0.0.1:8008/health
 ```
 
+OCR 模型預設寫入具名 volume `pdf2ppt-models`（容器 uid 10001 可寫）。若改掛主機目錄，請設
+`PDF2PPT_MODEL_DIR=./model` 並 `chown 10001:10001`——在 Linux 上主機使用者擁有的
+`./model` 對容器使用者通常不可寫。Job 產物在 `pdf2ppt-jobs` volume（沒有 `./output` bind）。
+
 一次性 CLI（掛載工作目錄）：
 
 ```bash

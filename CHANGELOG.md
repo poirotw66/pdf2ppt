@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pdf2ppt-api` without `[server]` exits 3 with an install hint (via `pdf2ppt.api_entry`) instead of `ModuleNotFoundError: uvicorn`.
 - Docker image sets `PDF2PPT_ROOT=/data` so OCR models cache on the `/data/model` volume (not `/app/model`).
 - `PDF2PPT_CORS_ORIGINS` of only commas / whitespace falls back to Vite defaults; `*` is rejected while credentials are enabled.
-- Compose drops the unused `./output` bind mount; models persist via `PDF2PPT_MODEL_DIR` → `/data/model`.
+- Compose drops the unused `./output` bind mount; OCR models default to the named volume `pdf2ppt-models` (uid 10001). Host bind mounts via `PDF2PPT_MODEL_DIR` need `chown 10001:10001`.
 
 ## [0.1.0] - 2026-10-22
 
