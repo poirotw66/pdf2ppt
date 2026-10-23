@@ -21,6 +21,7 @@ REQUIRED_SNIPPETS = {
         r"INSTALL_LIBREOFFICE",
         r"USER\s+pdf2ppt",
         r"EXPOSE\s+8008",
+        r"PDF2PPT_ROOT=/data",
     ],
     "Dockerfile.frontend": [
         r"^FROM\s+node:",
@@ -59,7 +60,7 @@ def main() -> int:
         all_errors.append("missing docker-compose.yml")
     else:
         compose_text = compose.read_text(encoding="utf-8")
-        for needle in ("healthcheck:", "GEMINI_API_KEY", "/data/output", "pdf2ppt-jobs"):
+        for needle in ("healthcheck:", "GEMINI_API_KEY", "/data/model", "pdf2ppt-jobs", "PDF2PPT_ROOT"):
             if needle not in compose_text:
                 all_errors.append(f"docker-compose.yml: missing {needle!r}")
     ignore = ROOT / ".dockerignore"

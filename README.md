@@ -82,7 +82,8 @@ One-shot CLI (mount inputs/outputs):
 
 ```bash
 docker build -t pdf2ppt .
-docker run --rm -v "$PWD:/work" -w /work pdf2ppt \
+# Match the host uid so writes under the bind mount succeed (image USER is 10001).
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work" -w /work pdf2ppt \
   pdf2ppt tests/fixtures/solid_background.pdf /work/output.pptx
 ```
 

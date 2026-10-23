@@ -10,11 +10,14 @@
 
 FROM python:3.12-slim-bookworm
 
+# PDF2PPT_ROOT=/data so relative model paths (./model) resolve to the
+# /data/model volume, not /app/model under site-packages installs.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     PDF2PPT_JOB_ROOT=/data/jobs \
+    PDF2PPT_ROOT=/data \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
 WORKDIR /app

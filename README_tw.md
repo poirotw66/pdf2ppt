@@ -77,7 +77,8 @@ docker compose up --build
 
 ```bash
 docker build -t pdf2ppt .
-docker run --rm -v "$PWD:/work" -w /work pdf2ppt \
+# 對齊主機 uid，才能寫入 bind mount（映像內預設 USER 為 10001）。
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work" -w /work pdf2ppt \
   pdf2ppt tests/fixtures/solid_background.pdf /work/output.pptx
 ```
 

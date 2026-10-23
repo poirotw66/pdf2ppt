@@ -75,16 +75,38 @@ MAX_FROM_IR_ZIP_MEMBERS = 10_000
 MAX_PREVIEW_EDITS_BODY_BYTES = 1 * 1024 * 1024
 
 
+_DEFAULT_CORS_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
+
+
 def _cors_allow_origins() -> list[str]:
     """Browser origins allowed to call the API.
 
     Default matches the Vite Review UI. Override with comma-separated
     ``PDF2PPT_CORS_ORIGINS`` (for example Docker Compose frontends).
+
+    Whitespace-only / comma-only values fall back to the defaults. ``*`` is
+    rejected because ``allow_credentials=True`` must not reflect arbitrary
+    origins (browsers also forbid ``*`` with credentials).
     """
+    defaults = list(_DEFAULT_CORS_ORIGINS)
     raw = os.environ.get("PDF2PPT_CORS_ORIGINS", "").strip()
-    if raw:
-        return [origin.strip() for origin in raw.split(",") if origin.strip()]
-    return ["http://localhost:5173", "http://127.0.0.1:5173"]
+    if not raw:
+        return defaults
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    if not origins:
+        logger.warning(
+            "PDF2PPT_CORS_ORIGINS is empty after parsing (%r); using defaults %s",
+            raw,
+            defaults,
+        )
+        return defaults
+    if any(origin == "*" for origin in origins):
+        logger.warning(
+            "PDF2PPT_CORS_ORIGINS must not include '*' when credentials are enabled; using defaults %s",
+            defaults,
+        )
+        return defaults
+    return origins
 
 
 app = FastAPI(title="pdf2ppt API", version="0.1.1")

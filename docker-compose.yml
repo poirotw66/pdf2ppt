@@ -10,6 +10,12 @@
 #
 # LibreOffice (optional --refine): rebuild the API image with
 #   docker compose build --build-arg INSTALL_LIBREOFFICE=1 api
+#
+# OCR models persist on the host via PDF2PPT_MODEL_DIR (default ./model).
+# Pre-create the directory so Docker does not make it root-owned:
+#   mkdir -p model
+# Conversion outputs are served over HTTP / stored under the jobs volume;
+# there is no separate ./output bind mount.
 
 services:
   api:
@@ -22,6 +28,8 @@ services:
     ports:
       - "${PDF2PPT_API_PORT:-8008}:8008"
     environment:
+      # Matches Dockerfile; keeps relative ./model → /data/model on the volume.
+      PDF2PPT_ROOT: /data
       PDF2PPT_JOB_ROOT: /data/jobs
       PDF2PPT_JOB_RETENTION_HOURS: ${PDF2PPT_JOB_RETENTION_HOURS:-24}
       PDF2PPT_CORS_ORIGINS: ${PDF2PPT_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173}
@@ -34,7 +42,6 @@ services:
       PDF2PPT_OPENAI_IMAGE_MODEL: ${PDF2PPT_OPENAI_IMAGE_MODEL:-}
     volumes:
       - pdf2ppt-jobs:/data/jobs
-      - ${PDF2PPT_OUTPUT_DIR:-./output}:/data/output
       - ${PDF2PPT_MODEL_DIR:-./model}:/data/model
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8008/health"]

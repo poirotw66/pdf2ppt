@@ -70,9 +70,10 @@ Notes:
 - Automatic cleanup runs when a new job is created and removes job directories whose `updated_at` is older than the configured retention window.
 - Configure the job root with `PDF2PPT_JOB_ROOT=/path/to/jobs`.
 - Configure retention with `PDF2PPT_JOB_RETENTION_HOURS=24`. Set it to `0` to disable automatic cleanup.
-- Optional browser CORS origins: `PDF2PPT_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080` (defaults to the Vite ports).
+- Optional browser CORS origins: `PDF2PPT_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080` (defaults to the Vite ports). Comma-/whitespace-only values fall back to defaults. Do not set `*` — credentials are enabled, so reflecting any origin is rejected.
 - `GEMINI_API_KEY` / `OPENAI_API_KEY` are optional and only used for the layout planner / generative engines.
 - Liveness: `GET /health` → `{"status":"ok"}`.
+- Without `[server]`, `pdf2ppt-api` exits with a short install hint (`pip install 'pdf2ppt[server]'`) instead of a raw `ModuleNotFoundError`.
 - Use `DELETE /jobs/{job_id}` to remove a single job and all of its stored artifacts immediately.
 
 ## Editor capabilities

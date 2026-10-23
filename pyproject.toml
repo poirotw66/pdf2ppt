@@ -94,7 +94,7 @@ Changelog = "https://github.com/poirotw66/pdf2ppt/blob/main/CHANGELOG.md"
 
 [project.scripts]
 pdf2ppt = "pdf2ppt.cli:main"
-pdf2ppt-api = "pdf2ppt.api:run"
+pdf2ppt-api = "pdf2ppt.api_entry:run"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

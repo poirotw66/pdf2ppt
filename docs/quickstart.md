@@ -102,9 +102,19 @@ docker compose up --build
 # UI http://127.0.0.1:8080  API http://127.0.0.1:8008/health
 ```
 
-Env vars (see `.env.example`): `PDF2PPT_JOB_ROOT`, `PDF2PPT_JOB_RETENTION_HOURS`,
-`PDF2PPT_CORS_ORIGINS`, optional `GEMINI_API_KEY` / `OPENAI_API_KEY`. Outputs mount
-at `./output` by default.
+Env vars (see `.env.example`): `PDF2PPT_ROOT` (image default `/data` so OCR models
+land on `/data/model`), `PDF2PPT_JOB_ROOT`, `PDF2PPT_JOB_RETENTION_HOURS`,
+`PDF2PPT_CORS_ORIGINS`, optional `GEMINI_API_KEY` / `OPENAI_API_KEY`. Persist models
+with `PDF2PPT_MODEL_DIR=./model` (pre-create the directory so it is not root-owned).
+Job artifacts live on the `pdf2ppt-jobs` volume; conversion downloads go over HTTP.
+
+One-shot CLI (match host uid so bind-mount writes succeed):
+
+```bash
+docker build -t pdf2ppt .
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work" -w /work pdf2ppt \
+  pdf2ppt tests/fixtures/solid_background.pdf /work/output.pptx
+```
 
 ## SlideIR
 
@@ -123,5 +133,6 @@ Full schema and agent rules: [slideir.md](slideir.md).
 | OCR crashes / `NotImplementedError` with paddle 3.3.x | Pin `paddlepaddle==3.2.0` (declared in `[ocr]`) |
 | CJK glyphs wrong in refine / quality benches | Install `fonts-noto-cjk`; pin family is Noto Sans CJK |
 | `--refine` skipped | Install LibreOffice Impress (`soffice` on PATH) |
-| Review UI API will not start | Use a clean venv with `[server]`; avoid conflicting older fastapi/pydantic stacks |
+| Review UI API will not start / `pdf2ppt-api` hints for `[server]` | `pip install 'pdf2ppt[server]'` in a clean venv |
+| `PDF2PPT_CORS_ORIGINS` of only commas / `*` | Falls back to Vite defaults; `*` is rejected with credentials enabled |
 | Stale `build/lib` imports | Use `pip install -e .` — never point `PYTHONPATH` at `build/lib/` |
