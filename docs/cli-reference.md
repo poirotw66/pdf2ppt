@@ -1,5 +1,45 @@
 # CLI reference
 
+## Subcommands
+
+| Command | Purpose |
+| --- | --- |
+| `pdf2ppt INPUT.pdf OUTPUT.pptx [options]` | Single-file convert (default; also `pdf2ppt convert …`) |
+| `pdf2ppt emit-ir …` / `pdf2ppt from-ir …` | SlideIR export / render ([`slideir.md`](slideir.md)) |
+| `pdf2ppt batch INPUT_DIR -o OUTPUT_DIR [options]` | Folder batch convert (orchestrates the same pipeline) |
+
+Single-file conversion output is unchanged by the batch command: batch only discovers PDFs, calls the existing convert path per file, and writes summaries.
+
+### Batch mode
+
+```bash
+pdf2ppt batch ./pdfs -o ./pptx_out
+pdf2ppt batch ./pdfs -o ./pptx_out --recursive --skip-existing --resume
+pdf2ppt batch ./pdfs -o ./pptx_out --fail-fast --quiet
+pdf2ppt batch ./pdfs -o ./pptx_out --jobs 1   # default; keep 1 unless you have ample RAM
+```
+
+Behaviour:
+
+- Discovers `*.pdf` / `*.PDF` (case-insensitive). Non-recursive by default; `--recursive` keeps relative subfolders under the output dir. Hidden files/dirs (name starts with `.`) are skipped. Order is stable (case-folded relative path).
+- Writes `<name>.pptx` per PDF. If two inputs collide on the same output name (e.g. `a.pdf` and `a.PDF`), later files get a deterministic `__N` stem suffix (`a__2.pptx`, …).
+- Reuses the same conversion option flags as single-file mode (OCR, layout planner, refine, page timeout, inpaint, …) via shared option parsing — not a second copy of the pipeline.
+- Failure isolation: a corrupt/encrypted/timeout/OCR error on one PDF is recorded and the batch continues. Exit code **1** if any file failed; **0** if all succeeded or were skipped; **2** for usage/validation errors. Use `--fail-fast` to stop at the first failure.
+- `--jobs N` (default **1**, sequential). Parallel mode uses **processes**. **Warning:** PaddleOCR is memory-heavy; `--jobs > 1` has OOM'd 16 GB machines — raise only with ample RAM.
+- `--skip-existing` skips when the output PPTX already exists; `--resume` skips files marked `ok` in an existing `summary.json`.
+- Progress lines go to **stderr**; `--quiet` suppresses them. At the end, a markdown summary table (with totals) is printed to **stdout** (also written as `summary.md`) unless `--quiet`.
+- Quality summary files in the output dir: `summary.csv`, `summary.json`, `summary.md` — per PDF: file, pages, status (`ok` / `failed` / `skipped`), seconds, OCR used / OCR pages, raster-fallback pages, warnings count, planner cost (if used), and a cheap quality indicator (raster-fallback fraction, mean editable ratio / text confidence; no LibreOffice required). Optional `--measure-quality` renders with soffice and records mean SSIM when LibreOffice is available; skipped gracefully when missing.
+
+### Batch exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | All PDFs succeeded or were skipped |
+| `1` | One or more PDFs failed (others may have succeeded) |
+| `2` | Usage / validation error (bad args, missing input dir, …) |
+
+Single-file mode additionally uses exit code `3` for OCR initialization failures on a core install without `[ocr]`.
+
 ## Main arguments
 
 - `input_pdf`: input PDF path
@@ -122,5 +162,6 @@ LibreOffice vs PowerPoint caveat.
 ## Project entry points
 
 - CLI: `src/pdf2ppt/cli.py`
+- Batch orchestration: `src/pdf2ppt/batch.py`
 - Main pipeline: `src/pdf2ppt/pipeline.py`
 - Data models: `src/pdf2ppt/models.py`

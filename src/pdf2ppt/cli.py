@@ -7,6 +7,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
+from .batch import (
+    EXIT_USAGE,
+    format_summary_markdown,
+    run_batch,
+)
 from .core import (
     DEFAULT_OCR_BATCH_SIZE,
     DEFAULT_PAGE_TIMEOUT_SECONDS,
@@ -85,59 +90,12 @@ def positive_font_pt(value: str) -> float:
     return parsed
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Convert PDF files into editable PPTX decks, or round-trip via SlideIR "
-            "(--emit-ir / --from-ir). Subcommands: emit-ir, from-ir, convert."
-        )
-    )
-    parser.add_argument(
-        "input_pdf",
-        type=Path,
-        nargs="?",
-        help="Input PDF file path (omit when using --from-ir).",
-    )
-    parser.add_argument(
-        "output_pptx",
-        type=Path,
-        nargs="?",
-        help="Output PPTX file path (omit with --emit-ir --ir-only).",
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        dest="output_override",
-        help="Explicit output PPTX path (useful with --from-ir).",
-    )
-    parser.add_argument(
-        "--report",
-        type=Path,
-        help="Path to write the JSON conversion report. Defaults next to the PPTX or IR output.",
-    )
-    parser.add_argument(
-        "--emit-ir",
-        type=Path,
-        help=(
-            "Write SlideIR JSON (plus a sibling {ir_filename}.assets/ directory for "
-            "backgrounds and cropped images). Can be combined with PPTX output, or used "
-            "alone with --ir-only."
-        ),
-    )
-    parser.add_argument(
-        "--ir-only",
-        action="store_true",
-        help="With --emit-ir, skip PPTX generation (analysis + SlideIR only).",
-    )
-    parser.add_argument(
-        "--from-ir",
-        type=Path,
-        help=(
-            "Load SlideIR JSON and render PPTX (no PDF). Assets are resolved from the "
-            "assets_dir next to the IR file. Output path: positional or -o/--output."
-        ),
-    )
+def add_conversion_option_arguments(parser: argparse.ArgumentParser) -> None:
+    """Shared conversion flags for single-file and ``batch`` commands.
+
+    Keep option names/defaults identical so batch only orchestrates the same
+    pipeline the single-file CLI uses.
+    """
     parser.add_argument(
         "--mode",
         choices=("editable", "fidelity", "fast"),
@@ -658,6 +616,130 @@ def build_parser() -> argparse.ArgumentParser:
         default="INFO",
         help="Logging verbosity for conversion diagnostics.",
     )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Convert PDF files into editable PPTX decks, or round-trip via SlideIR "
+            "(--emit-ir / --from-ir). Subcommands: emit-ir, from-ir, convert, batch."
+        )
+    )
+    parser.add_argument(
+        "input_pdf",
+        type=Path,
+        nargs="?",
+        help="Input PDF file path (omit when using --from-ir).",
+    )
+    parser.add_argument(
+        "output_pptx",
+        type=Path,
+        nargs="?",
+        help="Output PPTX file path (omit with --emit-ir --ir-only).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        dest="output_override",
+        help="Explicit output PPTX path (useful with --from-ir).",
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Path to write the JSON conversion report. Defaults next to the PPTX or IR output.",
+    )
+    parser.add_argument(
+        "--emit-ir",
+        type=Path,
+        help=(
+            "Write SlideIR JSON (plus a sibling {ir_filename}.assets/ directory for "
+            "backgrounds and cropped images). Can be combined with PPTX output, or used "
+            "alone with --ir-only."
+        ),
+    )
+    parser.add_argument(
+        "--ir-only",
+        action="store_true",
+        help="With --emit-ir, skip PPTX generation (analysis + SlideIR only).",
+    )
+    parser.add_argument(
+        "--from-ir",
+        type=Path,
+        help=(
+            "Load SlideIR JSON and render PPTX (no PDF). Assets are resolved from the "
+            "assets_dir next to the IR file. Output path: positional or -o/--output."
+        ),
+    )
+    add_conversion_option_arguments(parser)
+    return parser
+
+
+def build_batch_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="pdf2ppt batch",
+        description=(
+            "Convert every PDF in a directory to PPTX. Reuses the same conversion "
+            "options as single-file mode. Default is sequential (--jobs 1); parallel "
+            "jobs use processes and can OOM on ≤16 GB machines when OCR is enabled."
+        ),
+    )
+    parser.add_argument(
+        "input_dir",
+        type=Path,
+        help="Directory containing PDF files (non-recursive by default).",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        required=True,
+        dest="output_dir",
+        help="Output directory for PPTX files and summary.{csv,json,md}.",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Discover PDFs under subfolders; preserve relative paths in the output dir.",
+    )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop after the first failed PDF (default: record the error and continue).",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=positive_int,
+        default=1,
+        help=(
+            "Parallel worker processes (default 1 = sequential). PaddleOCR is "
+            "memory-heavy; values >1 have OOM'd 16 GB boxes — raise only with ample RAM."
+        ),
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip PDFs whose output PPTX already exists.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip files marked ok in an existing output summary.json.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-file progress on stderr (summary files are still written).",
+    )
+    parser.add_argument(
+        "--measure-quality",
+        action="store_true",
+        help=(
+            "Optionally render each PPTX with LibreOffice and record mean SSIM. "
+            "Skipped gracefully when soffice is missing."
+        ),
+    )
+    add_conversion_option_arguments(parser)
     return parser
 
 
@@ -774,8 +856,52 @@ def _build_conversion_options(
     )
 
 
+def _main_batch(argv: list[str]) -> int:
+    parser = build_batch_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        code = error.code
+        return EXIT_USAGE if code is None else int(code)
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    try:
+        # Placeholder paths; run_batch replaces them per file via options_factory.
+        options_template = _build_conversion_options(
+            args,
+            input_path=args.input_dir,
+            output_path=args.output_dir / "_batch_placeholder.pptx",
+            report_path=args.output_dir / "_batch_placeholder.report.json",
+        )
+        summary, exit_code = run_batch(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            options_template=options_template,
+            recursive=bool(args.recursive),
+            fail_fast=bool(args.fail_fast),
+            jobs=int(args.jobs),
+            skip_existing=bool(args.skip_existing),
+            resume=bool(args.resume),
+            measure_quality=bool(args.measure_quality),
+            quiet=bool(args.quiet),
+            progress_stream=None if args.quiet else sys.stderr,
+        )
+        if not args.quiet:
+            print(format_summary_markdown(summary))
+        return exit_code
+    except InputValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return EXIT_USAGE
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv and raw_argv[0] == "batch":
+        return _main_batch(raw_argv[1:])
+
     try:
         raw_argv = _rewrite_subcommand_argv(raw_argv)
     except SystemExit as error:

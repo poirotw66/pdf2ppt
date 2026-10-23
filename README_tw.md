@@ -117,7 +117,15 @@ pdf2ppt input.pdf output.pptx --layout-planner gemini
 # Agent / SlideIR round-trip（先不產生 PPTX，再用 from-ir 重建）
 pdf2ppt emit-ir input.pdf deck.slideir.json
 pdf2ppt from-ir deck.slideir.json rebuilt.pptx
+
+# 資料夾批次轉檔（選項與單檔相同；失敗隔離 + summary.*）
+pdf2ppt batch ./pdfs -o ./pptx_out
+pdf2ppt batch ./pdfs -o ./pptx_out --recursive --resume --skip-existing
 ```
+
+批次模式只編排既有單檔 pipeline（單一 PDF 的輸出位元組與單檔模式相同）。
+預設 `--jobs 1`（循序）；平行行程為選用，搭配 OCR 時記憶體負擔很大。
+探索規則、結束碼與摘要欄位見 [`docs/cli-reference.md`](docs/cli-reference.md)。
 
 ### Review UI（選用）
 
@@ -267,6 +275,7 @@ PDF → 頁面分類（digital / scanned / hybrid）
 | 元件 | 角色 |
 | --- | --- |
 | `src/pdf2ppt/cli.py` | CLI 入口 |
+| `src/pdf2ppt/batch.py` | 資料夾批次轉檔 |
 | `src/pdf2ppt/pipeline.py` | 轉換編排 |
 | `src/pdf2ppt/ir_io.py` | SlideIR 序列化／反序列化 |
 | `src/pdf2ppt/api.py` | Review UI 後端 |

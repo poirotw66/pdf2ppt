@@ -124,7 +124,15 @@ pdf2ppt input.pdf output.pptx --layout-planner gemini
 # Agent / SlideIR round-trip (no PPTX until from-ir)
 pdf2ppt emit-ir input.pdf deck.slideir.json
 pdf2ppt from-ir deck.slideir.json rebuilt.pptx
+
+# Batch folder convert (same options as single-file; failure isolation + summary.*)
+pdf2ppt batch ./pdfs -o ./pptx_out
+pdf2ppt batch ./pdfs -o ./pptx_out --recursive --resume --skip-existing
 ```
+
+Batch mode reuses the single-file pipeline (output for one PDF stays byte-identical).
+Default `--jobs 1` (sequential); parallel processes are optional and memory-heavy with OCR.
+See [`docs/cli-reference.md`](docs/cli-reference.md) for discovery rules, exit codes, and summary columns.
 
 ### Review UI (optional)
 
@@ -290,6 +298,7 @@ PDF → page classify (digital / scanned / hybrid)
 | Piece | Role |
 | --- | --- |
 | `src/pdf2ppt/cli.py` | CLI entry |
+| `src/pdf2ppt/batch.py` | Batch folder convert |
 | `src/pdf2ppt/pipeline.py` | Conversion orchestration |
 | `src/pdf2ppt/ir_io.py` | SlideIR serialize / deserialize |
 | `src/pdf2ppt/api.py` | Review UI backend |
