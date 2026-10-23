@@ -4,25 +4,49 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf2ppt"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hybrid PDF to editable PPTX converter"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
+authors = [{ name = "pdf2ppt contributors" }]
+keywords = ["pdf", "pptx", "ocr", "paddleocr", "slides"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics :: Presentation",
+]
+# Core conversion (digital / native PDF paths). OCR and the Review UI API are
+# optional extras so `pip install .` stays lean; install `[ocr]` for scanned
+# pages and `[server]` for the FastAPI backend.
 dependencies = [
   "PyMuPDF>=1.27.0,<2.0",
   "python-pptx>=1.0.0",
-  "paddleocr>=3.4.0",
   "chardet<6",
   "opencv-python-headless>=4.10.0",
   "Pillow>=10.0.0",
   "numpy>=1.26.0,<2.0",
+]
+
+[project.optional-dependencies]
+# PaddleOCR stack. Pin paddlepaddle to 3.2.0: 3.3.1 breaks PP-OCRv5 on CPU
+# (oneDNN / PIR NotImplementedError). Do not float to >=3.3 without re-testing OCR.
+ocr = [
+  "paddleocr>=3.4.0,<4.0",
+  "paddlepaddle==3.2.0",
+]
+# Review UI / HTTP API (pdf2ppt-api, `python -m uvicorn pdf2ppt.api:app`).
+server = [
   "fastapi>=0.115.0",
   "pydantic>=2.13.2,<2.14",
   "uvicorn>=0.32.0",
   "python-multipart>=0.0.12",
 ]
-
-[project.optional-dependencies]
 # CPU-only ONNX Runtime for the lama-onnx engine (Phase 1.1: this engine no longer requires a
 # GPU -- it falls back to CPUExecutionProvider automatically). Use `gpu` instead when a CUDA
 # provider is available and desired.
@@ -40,6 +64,16 @@ lint = [
   "ruff==0.16.2",
   "mypy==2.3.0",
 ]
+# Local development: OCR + API + lint + pytest.
+dev = [
+  "pdf2ppt[ocr,server,lint]",
+  "pytest>=8.0,<9",
+  "httpx>=0.27.0",
+]
+# Convenience meta-extra for a full local/CLI+API install (CPU LaMa optional).
+all = [
+  "pdf2ppt[ocr,server,cpu]",
+]
 # Slide-quality evaluation (docs/slide-quality.md) needs LibreOffice + fonts
 # on the host; there is no extra pip package. Declared here so installers see
 # the optional group name next to cpu/gpu/lint.
@@ -47,7 +81,16 @@ slide-quality = []
 # P2 layout analysis (docs/layout-analysis.md). Neural layout uses the same
 # paddleocr stack as OCR (LayoutDetection / PP-StructureV3); the heuristic
 # engine needs no extra packages. Declared for discoverability.
-layout = []
+layout = [
+  "pdf2ppt[ocr]",
+]
+
+[project.urls]
+Homepage = "https://github.com/poirotw66/pdf2ppt"
+Documentation = "https://github.com/poirotw66/pdf2ppt#readme"
+Repository = "https://github.com/poirotw66/pdf2ppt"
+Issues = "https://github.com/poirotw66/pdf2ppt/issues"
+Changelog = "https://github.com/poirotw66/pdf2ppt/blob/main/CHANGELOG.md"
 
 [project.scripts]
 pdf2ppt = "pdf2ppt.cli:main"
@@ -55,12 +98,13 @@ pdf2ppt-api = "pdf2ppt.api:run"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-pdf2ppt = ["schemas/*.json"]
+pdf2ppt = ["schemas/*.json", "py.typed"]
 
 # --- Phase 2 static analysis gate -------------------------------------
 # Both tools are now blocking in CI (see .github/workflows/ci.yml). The

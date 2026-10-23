@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import shutil
 import tempfile
 import zipfile
@@ -54,10 +55,23 @@ logger = logging.getLogger(__name__)
 MAX_FROM_IR_FILE_BYTES = 50 * 1024 * 1024
 MAX_FROM_IR_ZIP_MEMBERS = 10_000
 
-app = FastAPI(title="pdf2ppt API", version="0.1.0")
+
+def _cors_allow_origins() -> list[str]:
+    """Browser origins allowed to call the API.
+
+    Default matches the Vite Review UI. Override with comma-separated
+    ``PDF2PPT_CORS_ORIGINS`` (for example Docker Compose frontends).
+    """
+    raw = os.environ.get("PDF2PPT_CORS_ORIGINS", "").strip()
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
+app = FastAPI(title="pdf2ppt API", version="0.1.1")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,6 +86,12 @@ COMMON_ERROR_RESPONSES = {
     502: {"model": ErrorResponse, "description": "OCR runtime failed while processing a request."},
     503: {"model": ErrorResponse, "description": "OCR runtime is unavailable or misconfigured."},
 }
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    """Liveness probe for Docker / load balancers (no OCR or job I/O)."""
+    return {"status": "ok"}
 
 
 @app.post("/jobs", response_model=JobResponse, responses={400: COMMON_ERROR_RESPONSES[400]})

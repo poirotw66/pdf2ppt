@@ -13,8 +13,9 @@ Install the project into your active environment if you have not already
 ```bash
 # Terminal 1 — API
 cd pdf2ppt
-conda activate ppocr   # or: source .venv/bin/activate
-python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
+python -m pip install -e ".[ocr,server]"   # once
+pdf2ppt-api
+# or: python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
 ```
 
 ```bash
@@ -22,6 +23,13 @@ python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
 cd pdf2ppt/frontend
 npm install            # first time, or after dependency changes
 npm run dev
+```
+
+Docker Compose alternative (API + static UI, output volume, healthchecks):
+
+```bash
+docker compose up --build
+# UI http://127.0.0.1:8080  — optional GEMINI_API_KEY via .env (never baked into images)
 ```
 
 Open `http://127.0.0.1:5173` in the browser. The Vite dev server proxies
@@ -47,6 +55,9 @@ Notes:
 - Automatic cleanup runs when a new job is created and removes job directories whose `updated_at` is older than the configured retention window.
 - Configure the job root with `PDF2PPT_JOB_ROOT=/path/to/jobs`.
 - Configure retention with `PDF2PPT_JOB_RETENTION_HOURS=24`. Set it to `0` to disable automatic cleanup.
+- Optional browser CORS origins: `PDF2PPT_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080` (defaults to the Vite ports).
+- `GEMINI_API_KEY` / `OPENAI_API_KEY` are optional and only used for the layout planner / generative engines.
+- Liveness: `GET /health` → `{"status":"ok"}`.
 - Use `DELETE /jobs/{job_id}` to remove a single job and all of its stored artifacts immediately.
 
 ## Editor capabilities

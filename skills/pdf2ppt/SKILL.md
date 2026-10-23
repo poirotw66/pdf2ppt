@@ -21,8 +21,9 @@ strings.
 ## Prerequisites
 
 ```bash
-python -m pip install -e .
-# optional: same OCR/layout models as normal convert
+python -m pip install -e ".[ocr]"
+# optional Review UI API: pip install -e ".[ocr,server]"
+# optional: same OCR/layout models as normal convert under ./model
 ```
 
 Schema: `src/pdf2ppt/schemas/slideir.schema.json`  

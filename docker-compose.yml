@@ -1,0 +1,66 @@
+# Review UI: API (pdf2ppt-api) + static frontend.
+#
+# Usage:
+#   docker compose up --build
+#   open http://127.0.0.1:8080
+#
+# Optional secrets (never bake into images):
+#   GEMINI_API_KEY=... docker compose up
+# or copy .env.example → .env
+#
+# LibreOffice (optional --refine): rebuild the API image with
+#   docker compose build --build-arg INSTALL_LIBREOFFICE=1 api
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_LIBREOFFICE: ${INSTALL_LIBREOFFICE:-0}
+    image: pdf2ppt-api:local
+    ports:
+      - "${PDF2PPT_API_PORT:-8008}:8008"
+    environment:
+      PDF2PPT_JOB_ROOT: /data/jobs
+      PDF2PPT_JOB_RETENTION_HOURS: ${PDF2PPT_JOB_RETENTION_HOURS:-24}
+      PDF2PPT_CORS_ORIGINS: ${PDF2PPT_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173}
+      # Optional — layout planner / generative Gemini only; leave unset for default convert.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      PDF2PPT_LAYOUT_PLANNER_MODEL: ${PDF2PPT_LAYOUT_PLANNER_MODEL:-}
+      PDF2PPT_GEMINI_IMAGE_MODEL: ${PDF2PPT_GEMINI_IMAGE_MODEL:-}
+      PDF2PPT_OPENAI_IMAGE_MODEL: ${PDF2PPT_OPENAI_IMAGE_MODEL:-}
+    volumes:
+      - pdf2ppt-jobs:/data/jobs
+      - ${PDF2PPT_OUTPUT_DIR:-./output}:/data/output
+      - ${PDF2PPT_MODEL_DIR:-./model}:/data/model
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8008/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: pdf2ppt-frontend:local
+    ports:
+      - "${PDF2PPT_UI_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  pdf2ppt-jobs:

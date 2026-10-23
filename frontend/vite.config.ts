@@ -14,6 +14,14 @@ export default defineConfig({
         target: "http://127.0.0.1:8008",
         changeOrigin: true,
       },
+      "/from-ir": {
+        target: "http://127.0.0.1:8008",
+        changeOrigin: true,
+      },
+      "/health": {
+        target: "http://127.0.0.1:8008",
+        changeOrigin: true,
+      },
     },
   },
 });
