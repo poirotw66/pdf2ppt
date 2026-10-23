@@ -3,6 +3,8 @@ output_debug/
 rag_diffusion_debug/
 rag_opencv_debug/
 __pycache__/
+.venv/
+venv/
 output/
 model/
 .pdf2ppt_jobs/
