@@ -129,7 +129,9 @@ server environment and are **never** logged or printed.
   page cannot inflate the request past the reserved worst case.
 - After `max_consecutive_failures` consecutive failures, or any auth error,
   the **circuit opens** and remaining pages fall back without waiting on the
-  full timeout.
+  full timeout. Reserved-but-not-yet-started calls waiting on the concurrency
+  semaphore are **cancelled** (full call + USD reserve refund) and are not
+  dispatched after the breaker trips.
 - Text-regression fallback allows intended OCR header/footer/page_number
   removals by matching heuristic frames back to plan source ids (`ocr_*` /
   `native_*`); only non-HF body loss triggers a per-page fallback.

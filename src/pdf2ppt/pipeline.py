@@ -88,7 +88,7 @@ from .native_extraction import (
     promote_ocr_bold_blocks,
     sort_text_blocks,
 )
-from .ocr import OcrEngine
+from .ocr import OcrEngine, wait_for_predict_idle
 from .page_analysis import render_page_image
 from .ppt_render import (
     add_text_block,
@@ -115,6 +115,13 @@ from .text_style import (
     script_target_width_ratio,
     single_line_fit_width_ratio,
     write_text_fit_debug_report,
+)
+from .timeouts import (
+    abandoned_calls_running,
+    call_with_timeout,
+    ocr_init_timeout_seconds,
+    page_timeout_seconds_from_environ,
+    timeout_lane_generation,
 )
 from .vector_nativization import (
     apply_cell_fills,
@@ -487,7 +494,33 @@ def analyze_page(
             ocr_render_seconds = perf_counter() - ocr_render_started_at
 
             ocr_started_at = perf_counter()
-            ocr_page_data = ocr_engine.extract_text_blocks(page_image, page.number + 1)
+            page_start_generation = timeout_lane_generation()
+            try:
+                ocr_page_data = call_with_timeout(
+                    ocr_engine.extract_text_blocks,
+                    _page_timeout_s(options),
+                    page_image,
+                    page.number + 1,
+                    label=f"OCR page {page.number + 1}",
+                )
+            except TimeoutError as error:
+                logger.warning(
+                    "OCR timed out on page %s (%s); continuing with empty OCR / raster fallback",
+                    page.number + 1,
+                    error,
+                )
+                ocr_page_data = OcrPageData(blocks=[], image=page_image)
+            except OcrProcessingError as error:
+                if _ocr_error_after_lane_swap(error, start_generation=page_start_generation):
+                    logger.warning(
+                        "OCR failed on page %s after timeout lane replacement (%s); "
+                        "continuing with empty OCR / raster fallback",
+                        page.number + 1,
+                        error,
+                    )
+                    ocr_page_data = OcrPageData(blocks=[], image=page_image)
+                else:
+                    raise
             ocr_seconds = perf_counter() - ocr_started_at
         ocr_enrich_started_at = perf_counter()
         ocr_reference_image = ocr_page_data.image
@@ -566,17 +599,30 @@ def analyze_page(
                 # Default: keep heuristic paragraph/list grouping; overlay roles later.
                 pending_planner_plan = planned.plan
 
-    layout_page = layout_engine.analyze(
-        layout_image,
-        page_width=float(page.rect.width),
-        page_height=float(page.rect.height),
-        # Figure/region detection still uses pre-merge geometry when the planner
-        # already produced text frames.
-        text_blocks=layout_input_blocks if used_layout_planner else text_blocks,
-        page_number=page_number,
-        shape_bboxes=[shape.bbox for shape in vector_result.shapes],
-        table_bboxes=[table.bbox for table in vector_result.tables],
-    )
+    try:
+        layout_page = call_with_timeout(
+            layout_engine.analyze,
+            _page_timeout_s(options),
+            layout_image,
+            page_width=float(page.rect.width),
+            page_height=float(page.rect.height),
+            # Figure/region detection still uses pre-merge geometry when the planner
+            # already produced text frames.
+            text_blocks=layout_input_blocks if used_layout_planner else text_blocks,
+            page_number=page_number,
+            shape_bboxes=[shape.bbox for shape in vector_result.shapes],
+            table_bboxes=[table.bbox for table in vector_result.tables],
+            label=f"layout page {page_number}",
+        )
+    except TimeoutError as error:
+        logger.warning(
+            "Layout analysis timed out on page %s (%s); falling back to empty heuristic regions",
+            page_number,
+            error,
+        )
+        from .layout import LayoutPageResult
+
+        layout_page = LayoutPageResult(regions=[], engine="heuristic", fallback_reason=str(error))
     if used_layout_planner:
         # Keep geometric figure crops; text boxes already come from the planner.
         layout_figure_images = extract_figure_image_placements(
@@ -929,6 +975,28 @@ def _merge_layout_figures(
     return merged
 
 
+def _engine_wedged(timeout_s: float) -> bool:
+    """True only when a *timed-out (abandoned)* call still holds the predict lock.
+
+    A lock held by the live lane worker (another job's legitimate, merely slow
+    predict) is queue wait, not a wedge.
+    """
+
+    if wait_for_predict_idle(timeout_s):
+        return False
+    return abandoned_calls_running() > 0
+
+
+def _ocr_error_after_lane_swap(
+    _error: OcrProcessingError,
+    *,
+    start_generation: int,
+) -> bool:
+    """Whether an OCR failure likely comes from Paddle thread-affinity after a timeout."""
+
+    return timeout_lane_generation() != start_generation or abandoned_calls_running() > 0
+
+
 def prepare_batched_ocr_page_data(
     document: fitz.Document,
     options: ConversionOptions,
@@ -949,14 +1017,136 @@ def prepare_batched_ocr_page_data(
 
     render_dpi = resolve_render_dpi(options)
     batch_size = max(1, options.ocr_batch_size or DEFAULT_OCR_BATCH_SIZE)
+    page_timeout = _page_timeout_s(options)
+    timeout_enabled = page_timeout is not None and page_timeout > 0
+    engine_wedged = False
+    start_generation = timeout_lane_generation()
+
+    if pages_to_ocr:
+        # Warm the engine on the shared timeout lane under a generous budget so
+        # model load is not charged against the first timed OCR batch.
+        init_timeout = ocr_init_timeout_seconds(page_timeout)
+        try:
+            call_with_timeout(
+                ocr_engine.warm_up,
+                init_timeout,
+                label="OCR engine init",
+            )
+        except TimeoutError as error:
+            logger.error(
+                "OCR engine initialization timed out (%s); skipping OCR for this job",
+                error,
+            )
+            for page, page_number in pages_to_ocr:
+                page_image = render_page_image(page, dpi=render_dpi)
+                batched_results[page_number] = (page_image, OcrPageData(blocks=[], image=page_image))
+            return batched_results
+        start_generation = timeout_lane_generation()
+
     for batch_start in range(0, len(pages_to_ocr), batch_size):
         batch = pages_to_ocr[batch_start : batch_start + batch_size]
         batch_images = [render_page_image(page, dpi=render_dpi) for page, _page_number in batch]
         batch_numbers = [page_number for _page, page_number in batch]
-        batch_ocr_results = ocr_engine.extract_text_blocks_batch(batch_images, batch_numbers)
+        if timeout_enabled and not engine_wedged and _engine_wedged(float(page_timeout or 0.0)):
+            # An abandoned worker is still inside a native predict() and holds the
+            # predict lock: nothing can succeed until it returns. Stop feeding it.
+            engine_wedged = True
+            logger.error(
+                "OCR engine is wedged (a timed-out predict() never returned); "
+                "skipping OCR for the remaining pages of this job"
+            )
+        if engine_wedged:
+            for (page, page_number), page_image in zip(batch, batch_images):
+                batched_results[page_number] = (page_image, OcrPageData(blocks=[], image=page_image))
+            continue
+        # Scale the per-page budget across the batch so one hung page cannot
+        # block siblings for longer than page_timeout_s each (approx).
+        batch_timeout = (
+            float(page_timeout or 0.0) * max(1, len(batch)) if timeout_enabled else None
+        )
+        try:
+            batch_ocr_results = call_with_timeout(
+                ocr_engine.extract_text_blocks_batch,
+                batch_timeout,
+                batch_images,
+                batch_numbers,
+                label=f"OCR batch pages {batch_numbers}",
+            )
+        except TimeoutError as error:
+            # Do not blank the whole batch: retry each page so only a hung page
+            # loses OCR (siblings that finish under page_timeout_s are kept).
+            logger.warning(
+                "OCR batch timed out for pages %s (%s); retrying per-page with timeout %.1fs",
+                batch_numbers,
+                error,
+                float(page_timeout or 0.0),
+            )
+            batch_ocr_results = []
+            for image, page_number in zip(batch_images, batch_numbers):
+                if not engine_wedged and _engine_wedged(float(page_timeout or 0.0)):
+                    engine_wedged = True
+                    logger.error(
+                        "OCR engine is wedged; skipping OCR for the remaining pages of this job"
+                    )
+                if engine_wedged:
+                    batch_ocr_results.append(OcrPageData(blocks=[], image=image))
+                    continue
+                try:
+                    page_data = call_with_timeout(
+                        ocr_engine.extract_text_blocks,
+                        page_timeout,
+                        image,
+                        page_number,
+                        label=f"OCR page {page_number}",
+                    )
+                except TimeoutError as page_error:
+                    logger.warning(
+                        "OCR timed out on page %s (%s); continuing with empty OCR / raster fallback",
+                        page_number,
+                        page_error,
+                    )
+                    page_data = OcrPageData(blocks=[], image=image)
+                except OcrProcessingError as page_error:
+                    if _ocr_error_after_lane_swap(page_error, start_generation=start_generation):
+                        logger.warning(
+                            "OCR failed on page %s after timeout lane replacement (%s); "
+                            "continuing with empty OCR / raster fallback",
+                            page_number,
+                            page_error,
+                        )
+                        page_data = OcrPageData(blocks=[], image=image)
+                    else:
+                        raise
+                batch_ocr_results.append(page_data)
+        except OcrProcessingError as error:
+            # After a timeout the lane may run on a new thread; Paddle can raise
+            # std::exception permanently on that thread — degrade instead of 502.
+            if _ocr_error_after_lane_swap(error, start_generation=start_generation):
+                logger.warning(
+                    "OCR batch failed after timeout lane replacement for pages %s (%s); "
+                    "continuing with empty OCR / raster fallback",
+                    batch_numbers,
+                    error,
+                )
+                batch_ocr_results = [OcrPageData(blocks=[], image=image) for image in batch_images]
+            else:
+                raise
         for (page, page_number), page_image, ocr_page_data in zip(batch, batch_images, batch_ocr_results):
             batched_results[page_number] = (page_image, ocr_page_data)
     return batched_results
+
+
+def _page_timeout_s(options: ConversionOptions) -> float | None:
+    """Resolve the per-page OCR/layout timeout.
+
+    ``ConversionOptions.page_timeout_s is None`` (API / library default) reads
+    ``PDF2PPT_PAGE_TIMEOUT_S``; an explicit float from CLI/API wins.
+    """
+
+    configured = getattr(options, "page_timeout_s", None)
+    if configured is None:
+        return page_timeout_seconds_from_environ()
+    return float(configured)
 
 
 def resolve_approved_ocr_blocks(

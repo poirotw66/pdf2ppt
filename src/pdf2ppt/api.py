@@ -63,13 +63,21 @@ from .preview_edits import (
     materialize_raster_fallback_backgrounds,
     save_preview_edits,
 )
+from .safe_zip import (
+    DEFAULT_ZIP_MAX_COMPRESSED_BYTES,
+    DEFAULT_ZIP_MAX_ENTRIES,
+    ZipSafetyLimits,
+    reject_oversized_compressed,
+    safe_extract_zip,
+)
 from .upload_input import SUPPORTED_UPLOAD_SUFFIXES, is_raster_image_upload, normalize_upload_to_pdf_bytes
 
 logger = logging.getLogger(__name__)
 
-# Caps for POST /from-ir uploads (agent-facing; keep modest for local job store).
-MAX_FROM_IR_FILE_BYTES = 50 * 1024 * 1024
-MAX_FROM_IR_ZIP_MEMBERS = 10_000
+# Caps for POST /from-ir JSON uploads (assets zip uses ZipSafetyLimits / env vars).
+MAX_FROM_IR_FILE_BYTES = DEFAULT_ZIP_MAX_COMPRESSED_BYTES
+# Back-compat alias for tests / callers that imported the old constant.
+MAX_FROM_IR_ZIP_MEMBERS = DEFAULT_ZIP_MAX_ENTRIES
 # Preview-edits PUT body cap (deduped storage is much smaller; reject oversized floods).
 MAX_PREVIEW_EDITS_BODY_BYTES = 1 * 1024 * 1024
 
@@ -413,18 +421,34 @@ async def from_ir_upload(
     work = Path(tempfile.mkdtemp(prefix="pdf2ppt-from-ir-", dir=str(job_store.root)))
     try:
         ir_path = work / Path(ir_file.filename).name
-        ir_bytes = await ir_file.read()
-        _reject_oversized_upload(len(ir_bytes), label="SlideIR JSON")
+        try:
+            ir_bytes = await _read_upload_capped(
+                ir_file,
+                max_bytes=MAX_FROM_IR_FILE_BYTES,
+                label="SlideIR JSON",
+            )
+        except InputValidationError as error:
+            raise _to_http_exception(error) from error
         ir_path.write_bytes(ir_bytes)
 
         if assets_zip is not None and assets_zip.filename:
-            zip_bytes = await assets_zip.read()
-            _reject_oversized_upload(len(zip_bytes), label="assets zip")
+            zip_limits = ZipSafetyLimits.from_environ()
+            try:
+                zip_bytes = await _read_upload_capped(
+                    assets_zip,
+                    max_bytes=zip_limits.max_compressed_bytes,
+                    label="assets zip",
+                    size_checker=lambda size: reject_oversized_compressed(
+                        size, limits=zip_limits, label="assets zip"
+                    ),
+                )
+            except InputValidationError as error:
+                raise _to_http_exception(error) from error
             zip_path = work / "assets.zip"
             zip_path.write_bytes(zip_bytes)
             try:
                 with zipfile.ZipFile(zip_path) as archive:
-                    _safe_extract_zip(archive, work)
+                    safe_extract_zip(archive, work, limits=zip_limits)
             except zipfile.BadZipFile as error:
                 raise _to_http_exception(InputValidationError(f"Invalid assets zip: {error}")) from error
             except InputValidationError as error:
@@ -853,34 +877,56 @@ def run() -> None:
 
 def _reject_oversized_upload(size: int, *, label: str) -> None:
     if size > MAX_FROM_IR_FILE_BYTES:
-        raise _to_http_exception(
-            InputValidationError(
-                f"{label} exceeds the {MAX_FROM_IR_FILE_BYTES // (1024 * 1024)} MiB upload limit."
-            )
+        raise InputValidationError(
+            f"{label} exceeds the {MAX_FROM_IR_FILE_BYTES // (1024 * 1024)} MiB upload limit."
         )
+
+
+async def _read_upload_capped(
+    upload: UploadFile,
+    *,
+    max_bytes: int,
+    label: str,
+    size_checker: Any | None = None,
+) -> bytes:
+    """Reject oversized uploads before / while reading so RSS stays bounded."""
+
+    declared = getattr(upload, "size", None)
+    if declared is not None:
+        try:
+            declared_size = int(declared)
+        except (TypeError, ValueError):
+            declared_size = None
+        if declared_size is not None:
+            if size_checker is not None:
+                size_checker(declared_size)
+            elif declared_size > max_bytes:
+                _reject_oversized_upload(declared_size, label=label)
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise InputValidationError(
+                f"{label} exceeds the {max_bytes // (1024 * 1024)} MiB upload limit."
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if size_checker is not None:
+        size_checker(len(data))
+    else:
+        _reject_oversized_upload(len(data), label=label)
+    return data
 
 
 def _safe_extract_zip(archive: zipfile.ZipFile, dest: Path) -> None:
-    """Extract a zip into ``dest``, rejecting path-traversal members."""
-    dest_resolved = dest.resolve()
-    members = archive.infolist()
-    if len(members) > MAX_FROM_IR_ZIP_MEMBERS:
-        raise InputValidationError(
-            f"assets zip has too many members (limit {MAX_FROM_IR_ZIP_MEMBERS})."
-        )
-    for info in members:
-        name = info.filename
-        if not name or name.endswith("/"):
-            continue
-        path = Path(name)
-        if path.is_absolute() or ".." in path.parts:
-            raise InputValidationError("Unsafe path in assets zip.")
-        target = (dest / path).resolve()
-        try:
-            target.relative_to(dest_resolved)
-        except ValueError as error:
-            raise InputValidationError("Unsafe path in assets zip.") from error
-    archive.extractall(dest)
+    """Extract a zip into ``dest`` with traversal / bomb / symlink guards."""
+
+    safe_extract_zip(archive, dest, limits=ZipSafetyLimits.from_environ())
 
 
 def _scrub_slideir_error(error: SlideIrError) -> SlideIrError:
@@ -965,6 +1011,11 @@ def _conversion_options_from_request(
         ocr_drop_score=request.drop_score,
         ocr_return_word_box=request.return_word_box,
         ocr_batch_size=request.ocr_batch_size,
+        page_timeout_s=(
+            float(request.page_timeout_s)
+            if request.page_timeout_s is not None
+            else None
+        ),
         render_dpi=request.dpi,
         background_dpi=request.background_dpi,
         background_image_format=request.background_format,

@@ -7,9 +7,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
-from .core import DEFAULT_OCR_BATCH_SIZE, ConversionOptions, InputValidationError
+from .core import (
+    DEFAULT_OCR_BATCH_SIZE,
+    DEFAULT_PAGE_TIMEOUT_SECONDS,
+    ConversionOptions,
+    InputValidationError,
+)
 from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
 from .pipeline import convert_from_ir, convert_pdf
+from .timeouts import page_timeout_seconds_from_environ
 
 GENERATIVE_INPAINT_ENGINE_CHOICES = (
     "generative-openai",
@@ -186,6 +192,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_int,
         default=DEFAULT_OCR_BATCH_SIZE,
         help="Number of pages processed together for full-page OCR. Defaults to 3.",
+    )
+    parser.add_argument(
+        "--page-timeout-s",
+        type=float,
+        default=page_timeout_seconds_from_environ(default=DEFAULT_PAGE_TIMEOUT_SECONDS),
+        help=(
+            "Wall-clock seconds for per-page OCR/layout before abandoning that page "
+            f"(default {DEFAULT_PAGE_TIMEOUT_SECONDS:.0f}; env PDF2PPT_PAGE_TIMEOUT_S). "
+            "<=0 disables. Hung pages continue with empty OCR / raster fallback."
+        ),
     )
     parser.add_argument(
         "--dpi",
@@ -694,6 +710,7 @@ def _build_conversion_options(
         ocr_drop_score=args.ocr_drop_score,
         ocr_return_word_box=args.ocr_return_word_box,
         ocr_batch_size=args.ocr_batch_size,
+        page_timeout_s=float(args.page_timeout_s),
         render_dpi=args.dpi,
         background_dpi=args.background_dpi,
         background_image_format=args.background_format,

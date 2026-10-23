@@ -8,6 +8,8 @@ Invariants:
   cap cannot be overshot when real usage exceeds the flat estimate.
 - After ``max_consecutive_failures`` consecutive failures, or an auth error,
   the circuit opens and further pages fall back without calling.
+- Reserved-but-not-yet-started calls must use ``cancel_reservation`` when the
+  circuit opens (full call + cost refund); they must not be dispatched.
 """
 
 from __future__ import annotations
@@ -146,8 +148,8 @@ class LayoutPlannerBudget:
 
         Reserves ``worst_case_call_cost_usd`` (or the provided estimate) so the
         dollar cap cannot be overshot when real usage is higher than average.
-        On True the caller MUST complete with ``commit_success`` or
-        ``commit_failure`` (which already counted the call).
+        On True the caller MUST complete with ``commit_success``,
+        ``commit_failure``, or ``cancel_reservation`` (no HTTP started).
         """
 
         reserve_cost = (
@@ -168,6 +170,30 @@ class LayoutPlannerBudget:
             self.estimated_cost_usd += reserve_cost
             self._pending_reservations.append(reserve_cost)
             return True
+
+    def cancel_reservation(self, record: LayoutPlannerCallRecord) -> None:
+        """Drop a reserved slot that never started HTTP (circuit / queue cancel).
+
+        Refunds the worst-case reserve, decrements ``calls`` / ``http_attempts``,
+        and records a non-HTTP fallback. Does **not** increment consecutive
+        failures (cancellation is not an API failure).
+        """
+
+        with self._lock:
+            reserved = self._pop_reservation()
+            self.estimated_cost_usd -= reserved
+            if abs(self.estimated_cost_usd) < 1e-12:
+                self.estimated_cost_usd = 0.0
+            self.calls = max(0, int(self.calls) - 1)
+            self.http_attempts = max(0, int(self.http_attempts) - 1)
+            self.fallbacks += 1
+            self.total_latency_ms += record.latency_ms
+            record.http_attempted = False
+            record.reserved_cost_usd = reserved
+            record.estimated_cost_usd = 0.0
+            if record.fallback_kind is None:
+                record.fallback_kind = "circuit"
+            self.records.append(record)
 
     def acquire_slot(self, timeout_s: float | None = None) -> bool:
         assert self._semaphore is not None

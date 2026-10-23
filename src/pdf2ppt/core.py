@@ -7,6 +7,8 @@ from typing import Any
 from PIL import Image
 
 DEFAULT_OCR_BATCH_SIZE = 3
+# Generous default so normal pages are unaffected; hung OCR/layout is abandoned.
+DEFAULT_PAGE_TIMEOUT_SECONDS = 120.0
 
 
 class Pdf2PptError(RuntimeError):
@@ -86,6 +88,10 @@ class ConversionOptions:
     ocr_drop_score: float | None = None
     ocr_return_word_box: bool = False
     ocr_batch_size: int = DEFAULT_OCR_BATCH_SIZE
+    # Wall-clock bound for per-page OCR + layout (and batched OCR). ``None``
+    # defers to ``PDF2PPT_PAGE_TIMEOUT_S`` (default 120). ``<= 0`` disables.
+    # On timeout the page continues with empty OCR / raster fallback.
+    page_timeout_s: float | None = None
     render_dpi: int = 144
     background_dpi: int = 110
     background_image_format: str = "jpeg"

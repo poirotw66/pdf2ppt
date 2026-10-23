@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
 import re
 import shutil
 import statistics
+import threading
 import warnings
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -17,9 +19,54 @@ from PIL import Image
 
 from .core import OcrInitializationError, OcrPageData, OcrProcessingError
 from .models import TextBlock
+from .timeouts import abandoned_calls_running
 
 logger = logging.getLogger(__name__)
 
+# Process-level PaddleOCR cache + lock: PDX allows only one init per process, and
+# abandoned timeout workers must not race a second constructor.
+_PADDLE_OCR_INIT_LOCK = threading.RLock()
+# Serialize predict() so an abandoned timed-out worker cannot overlap the next
+# call (heap corruption / SIGSEGV when two threads share one Paddle engine).
+_PADDLE_PREDICT_LOCK = threading.RLock()
+_PADDLE_OCR_ENGINE_CACHE: dict[tuple[tuple[str, object], ...], Any] = {}
+_PDX_ALREADY_INITIALIZED_MARKERS = (
+    "PDX has already been initialized",
+    "pdx has already been initialized",
+    "already been initialized",
+)
+
+
+def wait_for_predict_idle(timeout_s: float) -> bool:
+    """Return True once no ``predict`` is running in any thread (False after ``timeout_s``).
+
+    A timed-out (abandoned) worker may still be inside a native ``predict`` that
+    never returns; it keeps ``_PADDLE_PREDICT_LOCK`` forever. Callers use this to
+    stop feeding OCR work to a wedged engine instead of waiting ``timeout`` per page.
+    """
+
+    if _PADDLE_PREDICT_LOCK.acquire(timeout=max(0.0, float(timeout_s))):
+        _PADDLE_PREDICT_LOCK.release()
+        return True
+    return False
+
+
+EXIT_DRAIN_TIMEOUT_SECONDS = 15.0
+
+
+def _drain_abandoned_predict_at_exit() -> None:
+    """Let a timed-out (abandoned) native predict() finish before interpreter teardown.
+
+    Finalizing while a daemon thread is still inside native PaddleOCR code can
+    abort/segfault the process (exit -6/-11) after the output was written. A slow
+    predict returns within the grace period; a truly wedged one is abandoned.
+    """
+
+    if abandoned_calls_running() > 0:
+        wait_for_predict_idle(EXIT_DRAIN_TIMEOUT_SECONDS)
+
+
+atexit.register(_drain_abandoned_predict_at_exit)
 
 DEFAULT_PPOCR_VERSION = "PP-OCRv5"
 DEFAULT_DOC_ORIENTATION_MODEL_NAME = "PP-LCNet_x1_0_doc_ori"
@@ -129,8 +176,22 @@ class OcrEngine:
         self.return_word_box = return_word_box
         self._engine: Any | None = None
 
+    def _engine_cache_key(self, engine_kwargs: dict[str, Any]) -> tuple[tuple[str, object], ...]:
+        items: list[tuple[str, object]] = []
+        for key in sorted(engine_kwargs):
+            value = engine_kwargs[key]
+            if isinstance(value, Path):
+                items.append((key, str(value)))
+            else:
+                items.append((key, value))
+        return tuple(items)
+
     def _get_engine(self) -> Any:
-        if self._engine is None:
+        if self._engine is not None:
+            return self._engine
+        with _PADDLE_OCR_INIT_LOCK:
+            if self._engine is not None:
+                return self._engine
             os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
             try:
                 with suppress_known_paddle_runtime_warnings():
@@ -141,6 +202,12 @@ class OcrEngine:
                 ) from error
 
             engine_kwargs = self._build_engine_kwargs()
+            cache_key = self._engine_cache_key(engine_kwargs)
+            cached = _PADDLE_OCR_ENGINE_CACHE.get(cache_key)
+            if cached is not None:
+                self._engine = cached
+                return self._engine
+
             logger.info(
                 "Initializing PaddleOCR engine for lang=%s with model_root=%s doc_orientation=%s textline_orientation=%s",
                 self.lang,
@@ -150,12 +217,37 @@ class OcrEngine:
             )
             try:
                 with suppress_known_paddle_runtime_warnings():
-                    self._engine = PaddleOCR(**engine_kwargs)
+                    engine = PaddleOCR(**engine_kwargs)
             except Exception as error:
+                message = str(error)
+                if any(marker in message for marker in _PDX_ALREADY_INITIALIZED_MARKERS):
+                    # Another thread finished init (or an abandoned worker left PDX
+                    # up). Reuse any cached engine rather than constructing again.
+                    for existing in _PADDLE_OCR_ENGINE_CACHE.values():
+                        self._engine = existing
+                        logger.warning(
+                            "PaddleOCR reported PDX already initialized; reusing cached engine instance."
+                        )
+                        return self._engine
+                    raise OcrInitializationError(
+                        "PaddleOCR PDX is already initialized but no cached engine is available. "
+                        "Avoid constructing multiple OCR engines in one process."
+                    ) from error
                 raise OcrInitializationError(
                     "Failed to initialize PaddleOCR. Verify model downloads and environment dependencies."
                 ) from error
+            _PADDLE_OCR_ENGINE_CACHE[cache_key] = engine
+            self._engine = engine
         return self._engine
+
+    def warm_up(self) -> None:
+        """Construct the underlying PaddleOCR engine (idempotent).
+
+        Call this on the shared timeout lane before timed OCR batches so model
+        load is not charged against the first page/batch timeout.
+        """
+
+        self._get_engine()
 
     def _build_engine_kwargs(self) -> dict[str, Any]:
         local_model_kwargs = build_local_ocr_model_kwargs(
@@ -188,7 +280,8 @@ class OcrEngine:
         rgb_image = image.convert("RGB")
         image_array = np.array(rgb_image)
         try:
-            results = self._get_engine().predict(image_array)
+            with _PADDLE_PREDICT_LOCK:
+                results = self._get_engine().predict(image_array)
         except OcrInitializationError:
             raise
         except Exception as error:
@@ -223,7 +316,8 @@ class OcrEngine:
         rgb_images = [image.convert("RGB") for image in images]
         image_arrays = [np.array(image) for image in rgb_images]
         try:
-            results = list(self._get_engine().predict(image_arrays))
+            with _PADDLE_PREDICT_LOCK:
+                results = list(self._get_engine().predict(image_arrays))
         except OcrInitializationError:
             raise
         except Exception as error:
