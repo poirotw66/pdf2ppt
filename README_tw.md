@@ -29,31 +29,82 @@
 
 ## 安裝
 
-需求：Python 3.11 以上，建議 Linux。OCR 請使用獨立環境並固定 `numpy<2`（PaddleOCR / PaddleX 較穩定）。
+需求：Python 3.11 以上，建議 Linux。使用 OCR 時請固定 `numpy<2`（PaddleOCR / PaddleX 較穩定）。
+
+更短的逐步說明見 [`docs/quickstart.md`](docs/quickstart.md)。
+
+### pip / venv
 
 ```bash
 cd pdf2ppt
-conda create -n ppocr python=3.12 numpy=1.26.4 -y
-conda activate ppocr
-# 或使用 venv：python -m venv .venv && source .venv/bin/activate
-python -m pip install -e .
+python -m venv .venv && source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install ".[ocr]"          # 轉檔 + OCR
+# python -m pip install -e ".[dev]"    # 開發用：OCR + Review UI API + lint/pytest
 ```
 
-若已有環境：
+### pipx
 
 ```bash
-python -m pip install "numpy<2"
-python -m pip install -e .
+pipx install ".[ocr]"                   # 從本機 clone 安裝
+pdf2ppt --help
 ```
 
-請一律使用本 repo 的 editable 安裝（`pip install -e .`），不要把 `PYTHONPATH` 指到 `build/lib/`——那是過期的 setuptools 殘留，且已列入 `.gitignore`。
+### Extras
 
-選用：測試可安裝 `python -m pip install pytest`。OCR 模型預設放在 `./model`（可用 `--ocr-model-root` 覆寫）。
+| Extra | 內容 |
+| --- | --- |
+| *（核心）* | 數位／原生 PDF → PPTX |
+| `[ocr]` | PaddleOCR + **paddlepaddle==3.2.0**（3.3.1 會弄壞 OCR，請勿升級） |
+| `[server]` | FastAPI Review UI 後端（`pdf2ppt-api`） |
+| `[dev]` | `[ocr]` + `[server]` + ruff + mypy + pytest |
+| `[all]` | `[ocr]` + `[server]` + CPU ONNX Runtime |
+| `[cpu]` / `[gpu]` | `lama-onnx` 用的 ONNX Runtime |
+
+開發請優先用本 repo 的 editable 安裝（`pip install -e ".[dev]"`），不要把
+`PYTHONPATH` 指到 `build/lib/`——那是過期的 setuptools 殘留，且已列入
+`.gitignore`。OCR 模型預設放在 `./model`（可用 `--ocr-model-root` 覆寫）。
+
+### Docker
+
+```bash
+docker compose up --build
+# Review UI：http://127.0.0.1:8080
+# API health：http://127.0.0.1:8008/health
+```
+
+OCR 模型預設寫入具名 volume `pdf2ppt-models`（容器 uid 10001 可寫）。若改掛主機目錄，請設
+`PDF2PPT_MODEL_DIR=./model` 並 `chown 10001:10001`——在 Linux 上主機使用者擁有的
+`./model` 對容器使用者通常不可寫。Job 產物在 `pdf2ppt-jobs` volume（沒有 `./output` bind）。
+
+一次性 CLI（掛載工作目錄）：
+
+```bash
+docker build -t pdf2ppt .
+# 對齊主機 uid，才能寫入 bind mount（映像內預設 USER 為 10001）。
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work" -w /work pdf2ppt \
+  pdf2ppt tests/fixtures/solid_background.pdf /work/output.pptx
+```
+
+`GEMINI_API_KEY` **可選**（僅版面規劃器／生成式 Gemini 需要），必須在執行時以
+`-e` 或 Compose `.env` 傳入——**絕不會**寫進映像檔。見 `.env.example`。
+預設映像不含 LibreOffice；若要用 `--refine`，請以
+`--build-arg INSTALL_LIBREOFFICE=1` 重建。
 
 ## 快速開始
 
+安裝後三個指令即可產出 PPTX：
+
 ```bash
-pdf2ppt input.pdf output.pptx
+python -m pip install ".[ocr]"
+pdf2ppt tests/fixtures/solid_background.pdf output.pptx
+# 等價入口：
+python -m pdf2ppt tests/fixtures/solid_background.pdf output.pptx
+```
+
+常用旗標：
+
+```bash
 pdf2ppt input.pdf output.pptx --report output.report.json --debug-dir output_debug
 pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
 
@@ -72,18 +123,29 @@ pdf2ppt from-ir deck.slideir.json rebuilt.pptx
 
 ```bash
 # Terminal 1 — API
-cd pdf2ppt
-conda activate ppocr   # 或：source .venv/bin/activate
-python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
+python -m pip install -e ".[ocr,server]"
+pdf2ppt-api
+# 或：python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
 
 # Terminal 2 — 前端
-cd pdf2ppt/frontend
+cd frontend
 npm install            # 第一次或前端依賴變更後
 npm run dev
 ```
 
 瀏覽器開啟 `http://127.0.0.1:5173`。完整流程、job 儲存與 API 說明見
-[`docs/review-ui.md`](docs/review-ui.md)。
+[`docs/review-ui.md`](docs/review-ui.md)。也可 `docker compose up --build` 後開啟
+`http://127.0.0.1:8080`。
+
+### 疑難排解
+
+| 狀況 | 處理 |
+| --- | --- |
+| `Failed to import PaddleOCR` | 安裝 `[ocr]`；維持 `numpy<2` |
+| 升級 Paddle 後 OCR 失敗 | 固定 **paddlepaddle==3.2.0**（3.3.1 會弄壞 PP-OCRv5） |
+| CJK／refine 字型異常 | 安裝 `fonts-noto-cjk` |
+| `--refine` 被略過 | 安裝 LibreOffice Impress（`soffice` 需在 PATH） |
+| fastapi／pydantic 衝突 | 使用乾淨 venv 並安裝 `[server]` |
 
 ### 轉換前預覽（Preview before convert）
 
@@ -216,6 +278,7 @@ PDF → 頁面分類（digital / scanned / hybrid）
 
 | 文件 | 內容 |
 | --- | --- |
+| [`docs/quickstart.md`](docs/quickstart.md) | 安裝、首次轉檔、Docker、疑難排解 |
 | [`docs/cli-reference.md`](docs/cli-reference.md) | 參數、模式、輸出、限制 |
 | [`docs/background-engines.md`](docs/background-engines.md) | 背景引擎與 `auto` 路由 |
 | [`docs/review-ui.md`](docs/review-ui.md) | Review UI 與 API |
@@ -225,7 +288,8 @@ PDF → 頁面分類（digital / scanned / hybrid）
 | [`docs/generative-inpaint.md`](docs/generative-inpaint.md) | 雲端生成式後端 |
 | [`docs/slide-quality.md`](docs/slide-quality.md) | 畫質／可編輯性評估 |
 
-CI（`.github/workflows/ci.yml`）會跑 pytest、ruff + mypy、前端測試與建置，以及僅報告用的 slide-quality bench。
+CI（`.github/workflows/ci.yml`）會跑 pytest、ruff + mypy、前端測試與建置、packaging
+wheel 煙霧測試，以及僅報告用的 slide-quality bench。本機快捷指令：`make help`。
 
 ## 授權
 

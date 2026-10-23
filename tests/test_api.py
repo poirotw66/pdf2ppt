@@ -32,6 +32,11 @@ class ApiTests(unittest.TestCase):
         self.job_store_patcher.start()
         self.addCleanup(self.job_store_patcher.stop)
 
+    def test_health_endpoint(self) -> None:
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
     def test_create_job_and_fetch_metadata(self) -> None:
         pdf_bytes = build_sample_pdf_bytes()
 

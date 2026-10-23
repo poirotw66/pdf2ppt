@@ -22,10 +22,47 @@ jobs:
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest
+          # Unit tests mock OCR; paddlepaddle is heavy — install paddleocr for
+          # import/patch surfaces, plus server + pytest. Full [ocr] (with the
+          # paddlepaddle==3.2.0 pin) is exercised via Docker / local OCR runs.
+          python -m pip install -e ".[server,lint]" "paddleocr>=3.4.0,<4.0" "pytest>=8.0,<9" httpx
 
       - name: Run backend tests
         run: pytest -q
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -la dist
+
+      - name: Install wheel in clean venv and run CLI
+        run: |
+          python -m venv /tmp/pdf2ppt-wheel-venv
+          /tmp/pdf2ppt-wheel-venv/bin/python -m pip install --upgrade pip
+          WHEEL=$(ls dist/pdf2ppt-*.whl | head -1)
+          /tmp/pdf2ppt-wheel-venv/bin/python -m pip install "$WHEEL"
+          /tmp/pdf2ppt-wheel-venv/bin/pdf2ppt --help >/dev/null
+          /tmp/pdf2ppt-wheel-venv/bin/python -m pdf2ppt --help >/dev/null
+          /tmp/pdf2ppt-wheel-venv/bin/pdf2ppt \
+            tests/fixtures/solid_background.pdf /tmp/wheel-smoke.pptx
+          test -s /tmp/wheel-smoke.pptx
+          # Schema package data must ship in the wheel.
+          /tmp/pdf2ppt-wheel-venv/bin/python -c "from importlib.resources import files; p=files('pdf2ppt')/'schemas'/'slideir.schema.json'; print(p); assert p.is_file()"
+
+      - name: Dockerfile lint (no Docker daemon required)
+        run: python scripts/check_dockerfiles.py
 
   lint:
     # Phase 2 (docs/optimization-roadmap.md): blocking static analysis.
@@ -46,7 +83,7 @@ jobs:
       - name: Install lint tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[lint]"
+          python -m pip install -e ".[lint,server]"
 
       - name: ruff check
         run: python -m ruff check .
@@ -78,7 +115,7 @@ jobs:
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest
+          python -m pip install -e ".[server]" "paddleocr>=3.4.0,<4.0" "pytest>=8.0,<9"
 
       - name: Run slide-quality metric tests
         run: pytest -q tests/test_render_compare.py

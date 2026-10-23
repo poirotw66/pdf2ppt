@@ -32,35 +32,86 @@ backgrounds only where text was removed.
 
 ## Install
 
-Requirements: Python 3.11+, Linux recommended. For OCR, use a dedicated
-environment with `numpy<2` (PaddleOCR / PaddleX are more reliable that way).
+Requirements: Python 3.11+, Linux recommended. Keep `numpy<2` when using OCR
+(PaddleOCR / PaddleX are more reliable that way).
+
+Shorter walkthrough: [`docs/quickstart.md`](docs/quickstart.md).
+
+### pip / venv
 
 ```bash
 cd pdf2ppt
-conda create -n ppocr python=3.12 numpy=1.26.4 -y
-conda activate ppocr
-# Or with venv: python -m venv .venv && source .venv/bin/activate
-python -m pip install -e .
+python -m venv .venv && source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install ".[ocr]"          # conversion + OCR
+# python -m pip install -e ".[dev]"    # editable: OCR + Review UI API + lint/pytest
 ```
 
-If you already have an environment:
+### pipx
 
 ```bash
-python -m pip install "numpy<2"
-python -m pip install -e .
+pipx install ".[ocr]"                   # from a local clone
+pdf2ppt --help
 ```
 
-Always use the editable install from this repo (`pip install -e .`). Do not
-point `PYTHONPATH` at `build/lib/` — that directory is a stale setuptools
-artifact and is gitignored.
+### Extras
 
-Optional: `python -m pip install pytest` for tests. OCR models default to
-`./model` (override with `--ocr-model-root`).
+| Extra | What you get |
+| --- | --- |
+| *(core)* | Digital/native PDF → PPTX |
+| `[ocr]` | PaddleOCR + **paddlepaddle==3.2.0** (3.3.1 breaks OCR — do not upgrade) |
+| `[server]` | FastAPI Review UI backend (`pdf2ppt-api`) |
+| `[dev]` | `[ocr]` + `[server]` + ruff + mypy + pytest |
+| `[all]` | `[ocr]` + `[server]` + CPU ONNX Runtime |
+| `[cpu]` / `[gpu]` | ONNX Runtime for `lama-onnx` |
+
+Always prefer an editable install from this repo for development
+(`pip install -e ".[dev]"`). Do not point `PYTHONPATH` at `build/lib/` — that
+directory is a stale setuptools artifact and is gitignored. OCR models default
+to `./model` (override with `--ocr-model-root`).
+
+### Docker
+
+```bash
+docker compose up --build
+# Review UI: http://127.0.0.1:8080
+# API health: http://127.0.0.1:8008/health
+```
+
+OCR models default to the named volume `pdf2ppt-models` (writable by
+container uid 10001). To bind a host directory instead, set
+`PDF2PPT_MODEL_DIR=./model` and `chown 10001:10001` it — a plain host-owned
+`./model` is not writable by the container user on Linux. Job outputs use the
+`pdf2ppt-jobs` volume (no `./output` bind).
+
+One-shot CLI (mount inputs/outputs):
+
+```bash
+docker build -t pdf2ppt .
+# Match the host uid so writes under the bind mount succeed (image USER is 10001).
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work" -w /work pdf2ppt \
+  pdf2ppt tests/fixtures/solid_background.pdf /work/output.pptx
+```
+
+`GEMINI_API_KEY` is **optional** (layout planner / generative Gemini only) and
+must be passed at runtime (`-e` / Compose `.env`) — it is never baked into
+images. See `.env.example`. LibreOffice is omitted by default; rebuild with
+`--build-arg INSTALL_LIBREOFFICE=1` for `--refine`.
 
 ## Quick start
 
+Three commands to a PPTX (after install):
+
 ```bash
-pdf2ppt input.pdf output.pptx
+python -m pip install ".[ocr]"
+pdf2ppt tests/fixtures/solid_background.pdf output.pptx
+# same entry point:
+python -m pdf2ppt tests/fixtures/solid_background.pdf output.pptx
+```
+
+Common flags:
+
+```bash
 pdf2ppt input.pdf output.pptx --report output.report.json --debug-dir output_debug
 pdf2ppt input.pdf output.pptx --inpaint-engine opencv-fast
 
@@ -79,18 +130,29 @@ pdf2ppt from-ir deck.slideir.json rebuilt.pptx
 
 ```bash
 # Terminal 1 — API
-cd pdf2ppt
-conda activate ppocr   # or: source .venv/bin/activate
-python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
+python -m pip install -e ".[ocr,server]"
+pdf2ppt-api
+# or: python -m uvicorn pdf2ppt.api:app --host 127.0.0.1 --port 8008
 
 # Terminal 2 — frontend
-cd pdf2ppt/frontend
+cd frontend
 npm install            # first time / after dependency changes
 npm run dev
 ```
 
 Open `http://127.0.0.1:5173`. Full workflow, job storage, and API details:
-[`docs/review-ui.md`](docs/review-ui.md).
+[`docs/review-ui.md`](docs/review-ui.md). Or use `docker compose up --build`
+and open `http://127.0.0.1:8080`.
+
+### Troubleshooting
+
+| Issue | Fix |
+| --- | --- |
+| `Failed to import PaddleOCR` | Install `[ocr]`; keep `numpy<2` |
+| OCR fails after upgrading Paddle | Stay on **paddlepaddle==3.2.0** (3.3.1 breaks PP-OCRv5) |
+| CJK metrics / refine look wrong | Install `fonts-noto-cjk` |
+| `--refine` skipped | Install LibreOffice Impress (`soffice` on PATH) |
+| Conflicting fastapi/pydantic | Use a dedicated venv with `[server]` |
 
 ### Preview before convert
 
@@ -241,6 +303,7 @@ available, otherwise `white-box`. Details:
 
 | Doc | Contents |
 | --- | --- |
+| [`docs/quickstart.md`](docs/quickstart.md) | Install, first convert, Docker, troubleshooting |
 | [`docs/cli-reference.md`](docs/cli-reference.md) | Flags, modes, outputs, limitations |
 | [`docs/background-engines.md`](docs/background-engines.md) | Inpaint engines and `auto` routing |
 | [`docs/review-ui.md`](docs/review-ui.md) | Review UI setup and API |
@@ -251,7 +314,8 @@ available, otherwise `white-box`. Details:
 | [`docs/slide-quality.md`](docs/slide-quality.md) | Fidelity / editability evaluation |
 
 CI (`.github/workflows/ci.yml`) runs pytest, ruff + mypy, frontend tests and
-build, plus a report-only slide-quality bench.
+build, a packaging wheel smoke test, plus a report-only slide-quality bench.
+Local shortcuts: `make help`.
 
 ## License
 

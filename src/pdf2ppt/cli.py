@@ -12,6 +12,7 @@ from .core import (
     DEFAULT_PAGE_TIMEOUT_SECONDS,
     ConversionOptions,
     InputValidationError,
+    OcrInitializationError,
 )
 from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
 from .pipeline import convert_from_ir, convert_pdf
@@ -857,3 +858,7 @@ def main(argv: list[str] | None = None) -> int:
     except InputValidationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    except OcrInitializationError as error:
+        # Core installs (no [ocr] extra) land here for scanned/OCR pages.
+        print(f"error: {error}", file=sys.stderr)
+        return 3

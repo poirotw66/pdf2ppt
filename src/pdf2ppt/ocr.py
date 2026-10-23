@@ -198,7 +198,8 @@ class OcrEngine:
                     from paddleocr import PaddleOCR
             except ImportError as error:
                 raise OcrInitializationError(
-                    "Failed to import PaddleOCR. Check that the OCR environment is installed and compatible."
+                    "Failed to import PaddleOCR. Install the OCR extra (pip install 'pdf2ppt[ocr]', which pins "
+                    "paddlepaddle==3.2.0) and keep numpy<2."
                 ) from error
 
             engine_kwargs = self._build_engine_kwargs()
