@@ -352,15 +352,27 @@ async def from_ir_upload(
     work = Path(tempfile.mkdtemp(prefix="pdf2ppt-from-ir-", dir=str(job_store.root)))
     try:
         ir_path = work / Path(ir_file.filename).name
-        ir_bytes = await ir_file.read()
-        _reject_oversized_upload(len(ir_bytes), label="SlideIR JSON")
+        try:
+            ir_bytes = await _read_upload_capped(
+                ir_file,
+                max_bytes=MAX_FROM_IR_FILE_BYTES,
+                label="SlideIR JSON",
+            )
+        except InputValidationError as error:
+            raise _to_http_exception(error) from error
         ir_path.write_bytes(ir_bytes)
 
         if assets_zip is not None and assets_zip.filename:
-            zip_bytes = await assets_zip.read()
             zip_limits = ZipSafetyLimits.from_environ()
             try:
-                reject_oversized_compressed(len(zip_bytes), limits=zip_limits, label="assets zip")
+                zip_bytes = await _read_upload_capped(
+                    assets_zip,
+                    max_bytes=zip_limits.max_compressed_bytes,
+                    label="assets zip",
+                    size_checker=lambda size: reject_oversized_compressed(
+                        size, limits=zip_limits, label="assets zip"
+                    ),
+                )
             except InputValidationError as error:
                 raise _to_http_exception(error) from error
             zip_path = work / "assets.zip"
@@ -499,11 +511,50 @@ def run() -> None:
 
 def _reject_oversized_upload(size: int, *, label: str) -> None:
     if size > MAX_FROM_IR_FILE_BYTES:
-        raise _to_http_exception(
-            InputValidationError(
-                f"{label} exceeds the {MAX_FROM_IR_FILE_BYTES // (1024 * 1024)} MiB upload limit."
-            )
+        raise InputValidationError(
+            f"{label} exceeds the {MAX_FROM_IR_FILE_BYTES // (1024 * 1024)} MiB upload limit."
         )
+
+
+async def _read_upload_capped(
+    upload: UploadFile,
+    *,
+    max_bytes: int,
+    label: str,
+    size_checker: Any | None = None,
+) -> bytes:
+    """Reject oversized uploads before / while reading so RSS stays bounded."""
+
+    declared = getattr(upload, "size", None)
+    if declared is not None:
+        try:
+            declared_size = int(declared)
+        except (TypeError, ValueError):
+            declared_size = None
+        if declared_size is not None:
+            if size_checker is not None:
+                size_checker(declared_size)
+            elif declared_size > max_bytes:
+                _reject_oversized_upload(declared_size, label=label)
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise InputValidationError(
+                f"{label} exceeds the {max_bytes // (1024 * 1024)} MiB upload limit."
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if size_checker is not None:
+        size_checker(len(data))
+    else:
+        _reject_oversized_upload(len(data), label=label)
+    return data
 
 
 def _safe_extract_zip(archive: zipfile.ZipFile, dest: Path) -> None:
@@ -570,7 +621,11 @@ def _conversion_options_from_request(
         ocr_drop_score=request.drop_score,
         ocr_return_word_box=request.return_word_box,
         ocr_batch_size=request.ocr_batch_size,
-        page_timeout_s=float(getattr(request, "page_timeout_s", 120.0)),
+        page_timeout_s=(
+            float(request.page_timeout_s)
+            if request.page_timeout_s is not None
+            else None
+        ),
         render_dpi=request.dpi,
         background_dpi=request.background_dpi,
         background_image_format=request.background_format,

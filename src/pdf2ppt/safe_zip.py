@@ -207,32 +207,48 @@ def safe_extract_zip(
             target.relative_to(dest_resolved)
         except ValueError as error:
             raise InputValidationError(f"Unsafe path in zip: {info.filename!r}") from error
-        target.parent.mkdir(parents=True, exist_ok=True)
+        if target == dest_resolved:
+            raise InputValidationError(
+                f"Unsafe zip entry resolves to the extraction root: {info.filename!r}"
+            )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise InputValidationError(
+                f"Cannot create directory for zip entry {info.filename!r}: {error}"
+            ) from error
 
         # Extract via streaming so a lying file_size cannot blow past limits.
         written_entry = 0
-        with archive.open(info, "r") as source, target.open("wb") as out:
-            while True:
-                chunk = source.read(chunk_size)
-                if not chunk:
-                    break
-                written_entry += len(chunk)
-                written_total += len(chunk)
-                if written_entry > resolved.max_entry_bytes:
-                    raise InputValidationError(
-                        f"zip entry {info.filename!r} exceeded per-entry size limit while extracting."
-                    )
-                if written_total > resolved.max_uncompressed_bytes:
-                    raise InputValidationError(
-                        "zip exceeded total uncompressed size limit while extracting."
-                    )
-                # Compression-ratio check against observed bytes (zip bomb).
-                compressed = max(1, int(info.compress_size))
-                if written_entry / compressed > resolved.max_compression_ratio + 1e-9:
-                    raise InputValidationError(
-                        f"zip entry {info.filename!r} failed compression-ratio check while extracting."
-                    )
-                out.write(chunk)
+        try:
+            with archive.open(info, "r") as source, target.open("wb") as out:
+                while True:
+                    chunk = source.read(chunk_size)
+                    if not chunk:
+                        break
+                    written_entry += len(chunk)
+                    written_total += len(chunk)
+                    if written_entry > resolved.max_entry_bytes:
+                        raise InputValidationError(
+                            f"zip entry {info.filename!r} exceeded per-entry size limit while extracting."
+                        )
+                    if written_total > resolved.max_uncompressed_bytes:
+                        raise InputValidationError(
+                            "zip exceeded total uncompressed size limit while extracting."
+                        )
+                    # Compression-ratio check against observed bytes (zip bomb).
+                    compressed = max(1, int(info.compress_size))
+                    if written_entry / compressed > resolved.max_compression_ratio + 1e-9:
+                        raise InputValidationError(
+                            f"zip entry {info.filename!r} failed compression-ratio check while extracting."
+                        )
+                    out.write(chunk)
+        except InputValidationError:
+            raise
+        except OSError as error:
+            raise InputValidationError(
+                f"Failed to extract zip entry {info.filename!r}: {error}"
+            ) from error
 
         # Refuse to leave a symlink behind even if the archive lied about type.
         if target.is_symlink():

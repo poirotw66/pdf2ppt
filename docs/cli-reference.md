@@ -32,7 +32,7 @@
 - `--ocr-drop-score`: PaddleOCR recognition score threshold, optional, uses the PaddleOCR default when omitted
 - `--ocr-return-word-box`: return PaddleOCR word-level boxes; disabled by default so pdf2ppt merges same-line detection boxes after OCR
 - `--ocr-batch-size`: number of pages processed together for full-page OCR, default `3`
-- `--page-timeout-s`: wall-clock seconds for per-page OCR/layout before abandoning that page (default `120`, env `PDF2PPT_PAGE_TIMEOUT_S`; `<=0` disables). Hung pages continue with empty OCR / raster fallback so the job does not stall.
+- `--page-timeout-s`: wall-clock seconds for per-page OCR/layout before abandoning that page (default `120`, env `PDF2PPT_PAGE_TIMEOUT_S`; also honoured by the API/library when the request omits the field; `<=0` disables). OCR runs on one persistent daemon worker thread (Paddle thread-affinity). A timed-out OCR **batch** is retried per-page so only the hung page loses OCR. Hung workers are daemon threads so the process can exit.
 - `--dpi`: render DPI for OCR-oriented page rasterization
 - `--background-dpi`: render DPI for embedded full-page and overlay backgrounds
 - `--background-format`: `jpeg` or `png` for embedded backgrounds; `jpeg` is smaller

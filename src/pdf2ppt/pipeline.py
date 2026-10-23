@@ -996,24 +996,47 @@ def prepare_batched_ocr_page_data(
                 label=f"OCR batch pages {batch_numbers}",
             )
         except TimeoutError as error:
+            # Do not blank the whole batch: retry each page so only a hung page
+            # loses OCR (siblings that finish under page_timeout_s are kept).
             logger.warning(
-                "OCR batch timed out for pages %s (%s); continuing with empty OCR for those pages",
+                "OCR batch timed out for pages %s (%s); retrying per-page with timeout %.1fs",
                 batch_numbers,
                 error,
+                float(page_timeout or 0.0),
             )
-            batch_ocr_results = [OcrPageData(blocks=[], image=image) for image in batch_images]
+            batch_ocr_results = []
+            for image, page_number in zip(batch_images, batch_numbers):
+                try:
+                    page_data = call_with_timeout(
+                        ocr_engine.extract_text_blocks,
+                        page_timeout,
+                        image,
+                        page_number,
+                        label=f"OCR page {page_number}",
+                    )
+                except TimeoutError as page_error:
+                    logger.warning(
+                        "OCR timed out on page %s (%s); continuing with empty OCR / raster fallback",
+                        page_number,
+                        page_error,
+                    )
+                    page_data = OcrPageData(blocks=[], image=image)
+                batch_ocr_results.append(page_data)
         for (page, page_number), page_image, ocr_page_data in zip(batch, batch_images, batch_ocr_results):
             batched_results[page_number] = (page_image, ocr_page_data)
     return batched_results
 
 
 def _page_timeout_s(options: ConversionOptions) -> float | None:
-    """Resolve the per-page OCR/layout timeout; env overrides the options default."""
+    """Resolve the per-page OCR/layout timeout.
+
+    ``ConversionOptions.page_timeout_s is None`` (API / library default) reads
+    ``PDF2PPT_PAGE_TIMEOUT_S``; an explicit float from CLI/API wins.
+    """
 
     configured = getattr(options, "page_timeout_s", None)
     if configured is None:
         return page_timeout_seconds_from_environ()
-    # Explicit option wins; env is only the ConversionOptions default source via CLI.
     return float(configured)
 
 

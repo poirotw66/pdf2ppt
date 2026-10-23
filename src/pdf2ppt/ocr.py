@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 # Process-level PaddleOCR cache + lock: PDX allows only one init per process, and
 # abandoned timeout workers must not race a second constructor.
 _PADDLE_OCR_INIT_LOCK = threading.RLock()
+# Serialize predict() so an abandoned timed-out worker cannot overlap the next
+# call (heap corruption / SIGSEGV when two threads share one Paddle engine).
+_PADDLE_PREDICT_LOCK = threading.RLock()
 _PADDLE_OCR_ENGINE_CACHE: dict[tuple[tuple[str, object], ...], Any] = {}
 _PDX_ALREADY_INITIALIZED_MARKERS = (
     "PDX has already been initialized",
@@ -235,7 +238,8 @@ class OcrEngine:
         rgb_image = image.convert("RGB")
         image_array = np.array(rgb_image)
         try:
-            results = self._get_engine().predict(image_array)
+            with _PADDLE_PREDICT_LOCK:
+                results = self._get_engine().predict(image_array)
         except OcrInitializationError:
             raise
         except Exception as error:
@@ -270,7 +274,8 @@ class OcrEngine:
         rgb_images = [image.convert("RGB") for image in images]
         image_arrays = [np.array(image) for image in rgb_images]
         try:
-            results = list(self._get_engine().predict(image_arrays))
+            with _PADDLE_PREDICT_LOCK:
+                results = list(self._get_engine().predict(image_arrays))
         except OcrInitializationError:
             raise
         except Exception as error:

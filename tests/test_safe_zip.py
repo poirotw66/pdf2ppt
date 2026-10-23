@@ -145,6 +145,48 @@ class SafeZipTests(unittest.TestCase):
                 safe_extract_zip(archive, dest, limits=ZipSafetyLimits())
             self.assertEqual((dest / "nested" / "a.txt").read_text(encoding="utf-8"), "hello")
 
+    def test_rejects_dot_entry_name(self) -> None:
+        data = _zip_bytes(lambda z: z.writestr(".", b"root"))
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "out"
+            dest.mkdir()
+            with self.assertRaises(InputValidationError) as ctx:
+                safe_extract_zip_bytes(data, dest, limits=ZipSafetyLimits())
+            self.assertIn("extraction root", str(ctx.exception).lower())
+
+    def test_rejects_file_then_nested_path(self) -> None:
+        def write(archive: zipfile.ZipFile) -> None:
+            archive.writestr("pages", b"i-am-a-file")
+            archive.writestr("pages/y.txt", b"nested")
+
+        data = _zip_bytes(write)
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "out"
+            dest.mkdir()
+            with self.assertRaises(InputValidationError) as ctx:
+                safe_extract_zip_bytes(data, dest, limits=ZipSafetyLimits())
+            message = str(ctx.exception).lower()
+            self.assertTrue(
+                "failed to extract" in message
+                or "cannot create directory" in message
+                or "file exists" in message,
+                msg=message,
+            )
+
+    def test_rejects_overlong_filename(self) -> None:
+        long_name = "a" * 400 + ".bin"
+        data = _zip_bytes(lambda z: z.writestr(long_name, b"x"))
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "out"
+            dest.mkdir()
+            with self.assertRaises(InputValidationError) as ctx:
+                safe_extract_zip_bytes(data, dest, limits=ZipSafetyLimits())
+            message = str(ctx.exception).lower()
+            self.assertTrue(
+                "failed to extract" in message or "file name" in message or "too long" in message,
+                msg=message,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

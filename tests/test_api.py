@@ -6,7 +6,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import fitz
 from fastapi.testclient import TestClient
@@ -14,7 +14,7 @@ from PIL import Image
 from pptx import Presentation
 
 from pdf2ppt.api import app
-from pdf2ppt.core import OcrInitializationError, PageConversionError
+from pdf2ppt.core import InputValidationError, OcrInitializationError, PageConversionError
 from pdf2ppt.ir_io import default_assets_dir_name, write_slide_ir
 from pdf2ppt.job_store import JobStore
 from pdf2ppt.models import ImagePlacement, PageResult, QualityScore, ShapeElement, TextBlock
@@ -739,6 +739,36 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(sibling_evil.exists())
         leftover = list(self.job_store.root.glob("pdf2ppt-from-ir-*"))
         self.assertEqual(leftover, [])
+
+    def test_from_ir_rejects_oversized_before_full_read(self) -> None:
+        """UploadFile.size must be checked before reading the body (Z1)."""
+        huge = SimpleNamespace(
+            filename="assets.zip",
+            size=400 * 1024 * 1024,
+            read=MagicMock(side_effect=AssertionError("must not read oversized body")),
+        )
+        # Drive the helper directly — TestClient always buffers multipart bodies.
+        import asyncio
+
+        from pdf2ppt.api import _read_upload_capped
+        from pdf2ppt.safe_zip import reject_oversized_compressed
+
+        limits = ZipSafetyLimits(max_compressed_bytes=50 * 1024 * 1024)
+
+        async def _run() -> None:
+            await _read_upload_capped(
+                huge,  # type: ignore[arg-type]
+                max_bytes=limits.max_compressed_bytes,
+                label="assets zip",
+                size_checker=lambda size: reject_oversized_compressed(
+                    size, limits=limits, label="assets zip"
+                ),
+            )
+
+        with self.assertRaises(InputValidationError) as ctx:
+            asyncio.run(_run())
+        self.assertIn("compressed", str(ctx.exception).lower())
+        huge.read.assert_not_called()
 
     def test_from_ir_zip_bomb_rejected(self) -> None:
         ir_bytes, _zip_bytes = build_slideir_upload_pair(self.temp_dir.name)
