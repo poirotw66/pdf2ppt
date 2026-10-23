@@ -92,6 +92,16 @@ npm run dev
 Open `http://127.0.0.1:5173`. Full workflow, job storage, and API details:
 [`docs/review-ui.md`](docs/review-ui.md).
 
+### Preview before convert
+
+In the Review UI, switch to **Preview before convert** after uploading a PDF:
+
+1. Click **Build Preview** — runs analysis → SlideIR (layout planner off; no Gemini key needed) and shows each page image with overlays for text blocks (role + reading order), tables/cells, images, and vector shapes.
+2. Toggle overlay layers, exclude individual blocks/tables/images/shapes, change a text block’s role (`title` / `body` / `header` / `footer` / `page_number`), or mark a page as **raster fallback**.
+3. Click **Convert** — edits are saved, then PPTX is built with `from-ir` so what you previewed is what you download.
+
+HTTP helpers (same backend): `POST /jobs/{id}/preview`, `GET /jobs/{id}/preview`, `PUT /jobs/{id}/preview-edits`, `POST /jobs/{id}/from-ir`. The default CLI convert path is unchanged when this UI flow is not used.
+
 ## SlideIR
 
 SlideIR is pdf2ppt’s **versioned JSON intermediate representation** (schema
@@ -167,6 +177,10 @@ HTTP (Review UI backend, default `http://127.0.0.1:8008`):
 | Endpoint | Behavior |
 | --- | --- |
 | `POST /jobs/{id}/emit-ir` | Analysis → SlideIR only |
+| `POST /jobs/{id}/preview` | Analyze → SlideIR (planner forced off) + overlay preview JSON |
+| `GET /jobs/{id}/preview` | Overlay preview from existing SlideIR + saved edits |
+| `PUT /jobs/{id}/preview-edits` | Save exclude / role / raster-fallback edits |
+| `POST /jobs/{id}/from-ir` | Apply edits → render job SlideIR to PPTX |
 | `GET /jobs/{id}/slideir.json` | Download IR JSON |
 | `GET /jobs/{id}/slideir-assets.zip` | Download assets directory as a zip |
 | `POST /from-ir` | Multipart: required `ir_file` + optional `assets_zip` → PPTX |
