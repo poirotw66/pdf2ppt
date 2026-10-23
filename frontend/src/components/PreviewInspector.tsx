@@ -1,4 +1,5 @@
 import type { OverlayVisibility, PreviewBlockRole, PreviewElementRef, PreviewPage } from "../types";
+import { pageHasExistingTitle } from "../utils/previewEdits";
 
 const ROLE_OPTIONS: PreviewBlockRole[] = ["title", "body", "header", "footer", "page_number"];
 
@@ -22,6 +23,13 @@ export function PreviewInspector({
   onRasterFallbackChange,
 }: PreviewInspectorProps) {
   const selected = resolveSelected(page, selectedElement);
+  const titleConflict =
+    page &&
+    selected?.kind === "text" &&
+    selected.block_role === "title" &&
+    pageHasExistingTitle(page, selected.id);
+  const bakedExcludeWarning =
+    page?.baked_background && selected && (selected.kind === "shape" || selected.kind === "image");
 
   return (
     <aside className="inspector-panel" data-testid="preview-inspector">
@@ -62,6 +70,13 @@ export function PreviewInspector({
       {page ? (
         <div className="panel-block">
           <strong>Page {page.page}</strong>
+          {page.baked_background ? (
+            <span className="muted step-hint" data-testid="baked-background-hint">
+              This page uses a baked background raster (overlay/full-page). Excluding shapes or images
+              only drops native IR objects — pixels already painted into the background stay. Prefer
+              raster fallback if you need a full-page image.
+            </span>
+          ) : null}
           <label className="control-field checkbox-field">
             <input
               type="checkbox"
@@ -73,6 +88,7 @@ export function PreviewInspector({
           </label>
           <span className="muted step-hint">
             When enabled, Convert embeds the page image and drops native text / shapes / tables / images for this page.
+            Element overlays are hidden while this is on.
           </span>
         </div>
       ) : null}
@@ -100,7 +116,19 @@ export function PreviewInspector({
                 </select>
               </label>
               <span className="muted step-hint">Reading order: {selected.reading_order}</span>
+              {titleConflict ? (
+                <span className="muted step-hint" data-testid="title-conflict-hint">
+                  This page already has another title block. PowerPoint keeps a single title placeholder —
+                  the other title stays as a normal text box.
+                </span>
+              ) : null}
             </>
+          ) : null}
+          {bakedExcludeWarning ? (
+            <span className="muted step-hint" data-testid="baked-exclude-warning">
+              Excluding this {selected.kind} will not remove it from the baked background image. Use
+              raster fallback for a full-page photo instead.
+            </span>
           ) : null}
           <div className="inspector-actions">
             <button type="button" onClick={onToggleExcluded} data-testid="toggle-excluded">

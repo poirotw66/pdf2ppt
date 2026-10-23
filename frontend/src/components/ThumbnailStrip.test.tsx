@@ -21,7 +21,7 @@ describe("ThumbnailStrip", () => {
       <ThumbnailStrip
         apiBase=""
         pages={[
-          { page: 1, image_url: "/jobs/j/pages/1.jpg" },
+          { page: 1, image_url: "/jobs/j/pages/1.jpg", thumbnail_url: "/jobs/j/pages/1.jpg?width=120" },
           { page: 2, image_url: "/jobs/j/pages/2.jpg" },
         ]}
         selectedPageIndex={0}
@@ -32,5 +32,8 @@ describe("ThumbnailStrip", () => {
     fireEvent.click(screen.getByLabelText("Page 2"));
     expect(onSelectPage).toHaveBeenCalledWith(1);
     expect(screen.getByLabelText("Page 1")).toHaveAttribute("aria-current", "page");
+    const images = document.querySelectorAll("img");
+    expect(images[0]).toHaveAttribute("src", "/jobs/j/pages/1.jpg?width=120");
+    expect(images[1]).toHaveAttribute("src", "/jobs/j/pages/2.jpg?width=120");
   });
 });

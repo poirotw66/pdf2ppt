@@ -69,7 +69,7 @@ export function SlideIrPreview({
           >
             <img src={`${apiBase}${page.image_url}`} alt={`Page ${page.page}`} draggable={false} />
 
-            {overlayVisibility.shapes
+            {!page.raster_fallback && overlayVisibility.shapes
               ? page.shapes.map((shape) => (
                   <button
                     key={shape.id}
@@ -84,7 +84,7 @@ export function SlideIrPreview({
                 ))
               : null}
 
-            {overlayVisibility.images
+            {!page.raster_fallback && overlayVisibility.images
               ? page.images.map((image) => (
                   <button
                     key={image.id}
@@ -99,7 +99,7 @@ export function SlideIrPreview({
                 ))
               : null}
 
-            {overlayVisibility.tables
+            {!page.raster_fallback && overlayVisibility.tables
               ? page.tables.flatMap((table) => [
                   <button
                     key={table.id}
@@ -124,7 +124,7 @@ export function SlideIrPreview({
                 ])
               : null}
 
-            {overlayVisibility.text
+            {!page.raster_fallback && overlayVisibility.text
               ? page.text_blocks.map((block) => (
                   <button
                     key={block.id}

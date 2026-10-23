@@ -98,10 +98,12 @@ export type PreviewShape = {
 export type PreviewPage = {
   page: number;
   image_url: string;
+  thumbnail_url?: string | null;
   width_pt: number;
   height_pt: number;
   page_kind: string;
   background_mode: string;
+  baked_background?: boolean;
   raster_fallback: boolean;
   text_blocks: PreviewTextBlock[];
   tables: PreviewTable[];

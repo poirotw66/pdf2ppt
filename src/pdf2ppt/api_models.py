@@ -206,13 +206,13 @@ PreviewBlockRole = Literal["title", "body", "header", "footer", "page_number"]
 
 class PreviewPageEdits(BaseModel):
     page: int = Field(ge=1)
-    excluded_ids: list[str] = Field(default_factory=list)
-    role_overrides: dict[str, PreviewBlockRole] = Field(default_factory=dict)
+    excluded_ids: list[str] = Field(default_factory=list, max_length=20_000)
+    role_overrides: dict[str, PreviewBlockRole] = Field(default_factory=dict, max_length=20_000)
     raster_fallback: bool = False
 
 
 class PreviewEditsRequest(BaseModel):
-    pages: list[PreviewPageEdits] = Field(default_factory=list)
+    pages: list[PreviewPageEdits] = Field(default_factory=list, max_length=10_000)
 
 
 class PreviewEditsResponse(BaseModel):
@@ -266,10 +266,12 @@ class PreviewShape(BaseModel):
 class PreviewPageResponse(BaseModel):
     page: int
     image_url: str
+    thumbnail_url: str | None = None
     width_pt: float
     height_pt: float
     page_kind: str = "digital"
     background_mode: str = "elements"
+    baked_background: bool = False
     raster_fallback: bool = False
     text_blocks: list[PreviewTextBlock] = Field(default_factory=list)
     tables: list[PreviewTable] = Field(default_factory=list)

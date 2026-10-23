@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +19,11 @@ PREVIEW_EDITS_FILENAME = "preview_edits.json"
 EDITED_SLIDEIR_FILENAME = "output.edited.slideir.json"
 
 ALLOWED_BLOCK_ROLES = frozenset({"title", "body", "header", "footer", "page_number"})
+MAX_PREVIEW_EDIT_PAGES = 10_000
+MAX_EXCLUDED_IDS_PER_PAGE = 20_000
+MAX_ROLE_OVERRIDES_PER_PAGE = 20_000
+THUMBNAIL_WIDTH_PX = 120
+
 ElementKind = Literal["text", "table", "image", "shape"]
 ELEMENT_KIND_TO_ARRAY = {
     "text": "text_blocks",
@@ -43,10 +49,21 @@ def load_preview_edits(path: Path) -> dict[str, Any]:
     return normalize_preview_edits(payload)
 
 
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Write ``text`` via a same-directory temp file + ``os.replace`` (atomic on POSIX)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding=encoding)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
 def save_preview_edits(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_preview_edits(payload)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(normalized, ensure_ascii=False, indent=2) + "\n")
     return normalized
 
 
@@ -57,6 +74,10 @@ def normalize_preview_edits(payload: dict[str, Any]) -> dict[str, Any]:
         pages_raw = []
     if not isinstance(pages_raw, list):
         raise SlideIrError("preview edits 'pages' must be an array.")
+    if len(pages_raw) > MAX_PREVIEW_EDIT_PAGES:
+        raise SlideIrError(
+            f"preview edits 'pages' exceeds the limit of {MAX_PREVIEW_EDIT_PAGES} entries."
+        )
 
     pages: list[dict[str, Any]] = []
     seen_pages: set[int] = set()
@@ -76,15 +97,27 @@ def normalize_preview_edits(payload: dict[str, Any]) -> dict[str, Any]:
         excluded_raw = item.get("excluded_ids") or []
         if not isinstance(excluded_raw, list):
             raise SlideIrError(f"pages[{index}].excluded_ids must be an array.")
+        if len(excluded_raw) > MAX_EXCLUDED_IDS_PER_PAGE:
+            raise SlideIrError(
+                f"pages[{index}].excluded_ids exceeds the limit of {MAX_EXCLUDED_IDS_PER_PAGE} entries."
+            )
         excluded_ids: list[str] = []
+        seen_excluded: set[str] = set()
         for eid in excluded_raw:
             if not isinstance(eid, str) or not eid.strip():
                 raise SlideIrError(f"pages[{index}].excluded_ids entries must be non-empty strings.")
+            if eid in seen_excluded:
+                continue
+            seen_excluded.add(eid)
             excluded_ids.append(eid)
 
         roles_raw = item.get("role_overrides") or {}
         if not isinstance(roles_raw, dict):
             raise SlideIrError(f"pages[{index}].role_overrides must be an object.")
+        if len(roles_raw) > MAX_ROLE_OVERRIDES_PER_PAGE:
+            raise SlideIrError(
+                f"pages[{index}].role_overrides exceeds the limit of {MAX_ROLE_OVERRIDES_PER_PAGE} entries."
+            )
         role_overrides: dict[str, str] = {}
         for block_id, role in roles_raw.items():
             if not isinstance(block_id, str) or not block_id.strip():
@@ -197,14 +230,22 @@ def build_preview_payload(
                 }
             )
 
+        background_mode = str(page.get("background_mode") or "elements")
+        # Overlay/full-page rasters bake photos and many shapes into the background
+        # image; excluding IR shapes/images does not change the baked pixels.
+        baked_background = background_mode in {"overlay", "full-page"}
         pages_out.append(
             {
                 "page": page_number,
                 "image_url": f"/jobs/{job_id}/pages/{page_number}.jpg",
+                "thumbnail_url": (
+                    f"/jobs/{job_id}/pages/{page_number}.jpg?width={THUMBNAIL_WIDTH_PX}"
+                ),
                 "width_pt": float(page["width_pt"]),
                 "height_pt": float(page["height_pt"]),
                 "page_kind": str(page.get("page_kind") or "digital"),
-                "background_mode": str(page.get("background_mode") or "elements"),
+                "background_mode": background_mode,
+                "baked_background": baked_background,
                 "raster_fallback": raster_fallback,
                 "text_blocks": text_blocks,
                 "tables": tables,

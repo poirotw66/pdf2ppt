@@ -48,6 +48,13 @@ Optional second mode (no Gemini / layout planner required):
 2. Inspect per-page source images with SlideIR overlays (text roles / reading order, tables, images, shapes). Toggle layers, exclude elements, change text roles, or mark a page as raster fallback (`PUT /jobs/{id}/preview-edits`).
 3. Click **Convert** (`POST /jobs/{id}/from-ir`) to apply edits and download the PPTX built from the edited IR.
 
+Notes:
+
+- Re-running **Build Preview** deletes `preview_edits.json` for that job (element ids are positional and go stale after OCR box edits). The UI also resets its local edit state.
+- Exclude only removes native SlideIR objects. On `overlay` / `full-page` pages (`baked_background: true`), content painted into the background raster is unchanged — use raster fallback for a full-page image.
+- Thumbnails use `GET /jobs/{id}/pages/{n}.jpg?width=120`.
+- Rotated PDF pages may show overlay/image mismatch (pre-existing SlideIR/geometry issue on `main`); prefer raster fallback there.
+
 ## Job storage and cleanup
 
 - Uploaded PDFs, OCR detection payloads, approved box payloads, and conversion outputs are stored under `.pdf2ppt_jobs/` by default.

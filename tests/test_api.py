@@ -879,6 +879,89 @@ class ApiTests(unittest.TestCase):
         presentation = Presentation(io.BytesIO(pptx_response.content))
         self.assertEqual(len(presentation.slides), 1)
 
+    @patch("pdf2ppt.api.convert_pdf")
+    def test_rebuild_preview_clears_stale_edits(
+        self,
+        convert_pdf_mock: unittest.mock.Mock,
+    ) -> None:
+        """Re-analysis must drop preview_edits.json so positional ids cannot 400 Convert."""
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        job_dir = self.job_store.job_dir(job_id)
+        ir_path = job_dir / "output.slideir.json"
+
+        def _write_ir(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            write_slide_ir([_api_slideir_page()], ir_path, slide_width_pt=320.0, slide_height_pt=240.0)
+            return SimpleNamespace(pages=[object()])
+
+        convert_pdf_mock.side_effect = _write_ir
+        first = self.client.post(f"/jobs/{job_id}/preview", json={})
+        self.assertEqual(first.status_code, 200)
+
+        save_response = self.client.put(
+            f"/jobs/{job_id}/preview-edits",
+            json={
+                "pages": [
+                    {
+                        "page": 1,
+                        "excluded_ids": ["s1"],
+                        "role_overrides": {"t1": "title"},
+                        "raster_fallback": False,
+                    }
+                ]
+            },
+        )
+        self.assertEqual(save_response.status_code, 200)
+        edits_path = job_dir / "preview_edits.json"
+        self.assertTrue(edits_path.exists())
+
+        rebuild = self.client.post(f"/jobs/{job_id}/preview", json={})
+        self.assertEqual(rebuild.status_code, 200)
+        self.assertFalse(edits_path.exists())
+        self.assertEqual(rebuild.json()["edits"], {"pages": []})
+
+        convert_response = self.client.post(f"/jobs/{job_id}/from-ir")
+        self.assertEqual(convert_response.status_code, 200)
+
+    def test_preview_edits_rejects_oversized_body(self) -> None:
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        job_dir = self.job_store.job_dir(job_id)
+        write_slide_ir(
+            [_api_slideir_page()],
+            job_dir / "output.slideir.json",
+            slide_width_pt=320.0,
+            slide_height_pt=240.0,
+        )
+        self.job_store.update_job(job_id, status="ir-emitted")
+
+        huge = {"pages": [{"page": 1, "excluded_ids": ["x"] * 50_000, "role_overrides": {}}]}
+        response = self.client.put(f"/jobs/{job_id}/preview-edits", json=huge)
+        self.assertIn(response.status_code, {413, 422})
+
+    def test_page_preview_thumbnail_width(self) -> None:
+        pdf_bytes = build_sample_pdf_bytes()
+        create_response = self.client.post(
+            "/jobs",
+            files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        )
+        job_id = create_response.json()["job_id"]
+        full = self.client.get(f"/jobs/{job_id}/pages/1.jpg")
+        thumb = self.client.get(f"/jobs/{job_id}/pages/1.jpg?width=120")
+        self.assertEqual(full.status_code, 200)
+        self.assertEqual(thumb.status_code, 200)
+        self.assertLess(len(thumb.content), len(full.content))
+        thumb_image = Image.open(io.BytesIO(thumb.content))
+        self.assertEqual(thumb_image.width, 120)
+
     def test_from_ir_job_with_raster_fallback(self) -> None:
         pdf_bytes = build_sample_pdf_bytes()
         create_response = self.client.post(

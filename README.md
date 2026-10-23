@@ -102,6 +102,12 @@ In the Review UI, switch to **Preview before convert** after uploading a PDF:
 
 HTTP helpers (same backend): `POST /jobs/{id}/preview`, `GET /jobs/{id}/preview`, `PUT /jobs/{id}/preview-edits`, `POST /jobs/{id}/from-ir`. The default CLI convert path is unchanged when this UI flow is not used.
 
+**Limitations**
+
+- **Exclude vs baked backgrounds:** On `overlay` / `full-page` pages, photos and many shapes are already painted into the background raster. Excluding an IR shape/image drops the native object only — baked pixels stay. Use **raster fallback** when you need a full-page image. Preview responses set `baked_background: true` on those pages.
+- **Re-analysis clears edits:** Element ids are positional (`layout_text_1_N`). Building preview again deletes saved `preview_edits.json` so Convert cannot fail with unknown ids after OCR box changes.
+- **Rotated pages (known, pre-existing):** For pages rotated 90/180/270°, SlideIR bboxes may not match the preview image (same mismatch as CLI PPTX on `main`). Prefer raster fallback on those pages until fixed upstream.
+
 ## SlideIR
 
 SlideIR is pdf2ppt’s **versioned JSON intermediate representation** (schema

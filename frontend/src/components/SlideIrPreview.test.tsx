@@ -93,4 +93,19 @@ describe("SlideIrPreview", () => {
     expect(screen.queryByTitle(/title/i)).not.toBeInTheDocument();
     expect(screen.getByTitle("rect s1")).toBeInTheDocument();
   });
+
+  it("does not draw element overlays when raster fallback is enabled", () => {
+    render(
+      <SlideIrPreview
+        apiBase=""
+        overlayVisibility={overlays}
+        page={{ ...page, raster_fallback: true }}
+        selectedElement={null}
+        onSelectElement={vi.fn()}
+        zoom={1}
+      />,
+    );
+    expect(screen.queryByTitle("rect s1")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("table tbl1")).not.toBeInTheDocument();
+  });
 });

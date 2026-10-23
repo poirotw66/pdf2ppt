@@ -80,4 +80,58 @@ describe("PreviewInspector", () => {
     fireEvent.click(screen.getByTestId("toggle-excluded"));
     expect(onToggleExcluded).toHaveBeenCalled();
   });
+
+  it("warns when setting a second title and when excluding baked shapes", () => {
+    const pageWithTitle: PreviewPage = {
+      ...page,
+      baked_background: true,
+      text_blocks: [
+        {
+          id: "t1",
+          kind: "text",
+          bbox: [10, 10, 80, 40],
+          text: "Hello",
+          block_role: "title",
+          reading_order: 0,
+          excluded: false,
+        },
+        {
+          id: "t2",
+          kind: "text",
+          bbox: [10, 50, 80, 80],
+          text: "Other",
+          block_role: "title",
+          reading_order: 1,
+          excluded: false,
+        },
+      ],
+      shapes: [{ id: "s1", kind: "shape", shape_kind: "rect", bbox: [0, 0, 20, 20], excluded: false }],
+    };
+
+    const { rerender } = render(
+      <PreviewInspector
+        overlayVisibility={overlays}
+        onOverlayVisibilityChange={vi.fn()}
+        page={pageWithTitle}
+        selectedElement={{ kind: "text", id: "t2" }}
+        onToggleExcluded={vi.fn()}
+        onRoleChange={vi.fn()}
+        onRasterFallbackChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("title-conflict-hint")).toBeInTheDocument();
+
+    rerender(
+      <PreviewInspector
+        overlayVisibility={overlays}
+        onOverlayVisibilityChange={vi.fn()}
+        page={pageWithTitle}
+        selectedElement={{ kind: "shape", id: "s1" }}
+        onToggleExcluded={vi.fn()}
+        onRoleChange={vi.fn()}
+        onRasterFallbackChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("baked-exclude-warning")).toBeInTheDocument();
+  });
 });

@@ -125,6 +125,11 @@ export default function App() {
       api.setStatusText("Create a job first.");
       return;
     }
+    // Clear local edits immediately: server also deletes preview_edits.json after re-analysis
+    // because element ids are positional and become stale after OCR box changes.
+    setPreviewEdits({ pages: [] });
+    setSelectedElement(null);
+    setOriginalRoles({});
     const payload = await api.buildPreview(api.job.job_id);
     if (!payload) {
       return;

@@ -75,6 +75,7 @@ export function applyEditsToPreviewPage(page: PreviewPage, edits: PreviewEdits):
   const excluded = new Set(pageEdits.excluded_ids);
   return {
     ...page,
+    baked_background: Boolean(page.baked_background),
     raster_fallback: pageEdits.raster_fallback,
     text_blocks: page.text_blocks.map((block) => ({
       ...block,
@@ -85,6 +86,12 @@ export function applyEditsToPreviewPage(page: PreviewPage, edits: PreviewEdits):
     images: page.images.map((image) => ({ ...image, excluded: excluded.has(image.id) })),
     shapes: page.shapes.map((shape) => ({ ...shape, excluded: excluded.has(shape.id) })),
   };
+}
+
+export function pageHasExistingTitle(page: PreviewPage, excludingBlockId?: string): boolean {
+  return page.text_blocks.some(
+    (block) => block.id !== excludingBlockId && (block.block_role === "title" || block.block_role === "Title"),
+  );
 }
 
 export function bboxToPercentStyle(

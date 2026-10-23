@@ -208,6 +208,42 @@ class PreviewEditsTests(unittest.TestCase):
             self.assertEqual(saved["pages"][0]["page"], 2)
             self.assertTrue(path.exists())
 
+    def test_normalize_dedupes_excluded_ids(self) -> None:
+        normalized = normalize_preview_edits(
+            {"pages": [{"page": 1, "excluded_ids": ["a", "b", "a", "b"], "role_overrides": {}}]}
+        )
+        self.assertEqual(normalized["pages"][0]["excluded_ids"], ["a", "b"])
+
+    def test_normalize_rejects_too_many_excluded_ids(self) -> None:
+        with self.assertRaises(SlideIrError):
+            normalize_preview_edits(
+                {"pages": [{"page": 1, "excluded_ids": [f"id_{i}" for i in range(20_001)]}]}
+            )
+
+    def test_overlay_page_sets_baked_background(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = _sample_page()
+            page.background_mode = "overlay"
+            ir_path = Path(tmp) / "deck.slideir.json"
+            write_slide_ir([page], ir_path, slide_width_pt=320.0, slide_height_pt=240.0)
+            slideir = json.loads(ir_path.read_text(encoding="utf-8"))
+            payload = build_preview_payload(slideir, job_id="abc")
+            self.assertTrue(payload["pages"][0]["baked_background"])
+            self.assertIn("width=120", payload["pages"][0]["thumbnail_url"])
+
+    def test_atomic_save_replaces_existing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "preview_edits.json"
+            path.write_text('{"pages":[]}\n', encoding="utf-8")
+            save_preview_edits(
+                path,
+                {"pages": [{"page": 1, "excluded_ids": ["t1"], "role_overrides": {}}]},
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["pages"][0]["excluded_ids"], ["t1"])
+            leftovers = list(Path(tmp).glob(".preview_edits.json.*.tmp"))
+            self.assertEqual(leftovers, [])
+
 
 if __name__ == "__main__":
     unittest.main()
