@@ -14,6 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Job lock for contended preview-edits / from-ir: ~5s wait, max **4** waiters, then **409** `job-busy`; frontend auto-retries preview-edits with **1s / 2s / 4s** backoff (not upload / final convert / from-ir) (#25, #26).
 - Hardening: safe `assets_zip` limits for `POST /from-ir` (`PDF2PPT_ZIP_MAX_*`, defaults 50 / 200 MiB, 10k entries, 50 MiB/entry, ratio 100); per-page OCR/layout timeout `--page-timeout-s` / `PDF2PPT_PAGE_TIMEOUT_S` (default **120s**, `<=0` disables) with OCR timeout-lane degrade; layout-planner circuit cancels reserved USD calls when opened (#23, #25).
 
+### Fixed
+
+- `pdf2ppt emit-ir --help` / `from-ir --help` (and `-h`) now print argparse help and exit **0** instead of failing the subcommand argv rewrite with exit **2**.
+- Single-file CLI convert handles `KeyboardInterrupt` like batch: prints `Interrupted` to stderr, removes any `*.pptx.partial`, exits **130** (no traceback; no half-written `.pptx`).
+- Stop importing the deprecated PyMuPDF `fitz` alias (`import pymupdf as fitz`) so CLI runs no longer print the fitz deprecation warning.
+
+### Changed
+
+- `ConversionOptions.inpaint_lama_patch_hybrid` library default is now **False**, matching the CLI/API default derived from `--inpaint-engine` / `inpaint_engine` default `opencv-fast` (via shared `DEFAULT_INPAINT_LAMA_PATCH_HYBRID`). Previously the dataclass defaulted to `True` while CLI/API callers got `False`.
+- `DEFAULT_PAGE_TIMEOUT_SECONDS` is defined once in `timeouts.py` and re-exported from `core.py` so both import paths stay the same object.
+
 ### Documentation
 
 - README / README_tw restructured (features, quick start, batch, Review UI, env table, known limitations, FAQ); `docs/README.md` index; env template and docs synced to CLI/API defaults (#14–#27 wrap-up).

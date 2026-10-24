@@ -38,7 +38,7 @@ Behaviour:
 | `1` | One or more PDFs failed (others may have succeeded) |
 | `2` | Usage / validation error (bad args, missing input dir, …) |
 
-Single-file mode additionally uses exit code `3` for OCR initialization failures on a core install without `[ocr]`.
+Single-file mode additionally uses exit code `3` for OCR initialization failures on a core install without `[ocr]`, and exit code `130` for `KeyboardInterrupt` (writes PPTX via `*.pptx.partial` then rename so an interrupt leaves no truncated `.pptx`).
 
 ## Main arguments
 

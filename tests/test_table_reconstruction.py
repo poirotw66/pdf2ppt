@@ -7,8 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import fitz
 import numpy as np
+import pymupdf as fitz
 from PIL import Image
 from pptx import Presentation
 

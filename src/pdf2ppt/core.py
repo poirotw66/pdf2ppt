@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from PIL import Image
 
+from .timeouts import DEFAULT_PAGE_TIMEOUT_SECONDS as DEFAULT_PAGE_TIMEOUT_SECONDS
+
 DEFAULT_OCR_BATCH_SIZE = 3
-# Generous default so normal pages are unaffected; hung OCR/layout is abandoned.
-DEFAULT_PAGE_TIMEOUT_SECONDS = 120.0
+# Keep library ConversionOptions defaults aligned with CLI/API argparse defaults.
+DEFAULT_INPAINT_ENGINE: Literal["opencv-fast"] = "opencv-fast"
+# Matches ``uses_lama_patch_hybrid(DEFAULT_INPAINT_ENGINE)`` (False for opencv-fast).
+DEFAULT_INPAINT_LAMA_PATCH_HYBRID = False
 
 
 class Pdf2PptError(RuntimeError):
@@ -98,7 +102,7 @@ class ConversionOptions:
     background_jpeg_quality: int = 82
     debug_dir: Path | None = None
     use_doc_unwarping: bool = False
-    inpaint_engine: str = "opencv-fast"
+    inpaint_engine: str = DEFAULT_INPAINT_ENGINE
     inpaint_padding_px: int = 6
     # Absolute floor for mask dilation (px). Combined with line-height-scaled
     # dilation below so AA glyph fringes stay covered for all engines.
@@ -118,7 +122,7 @@ class ConversionOptions:
     approved_ocr_blocks_by_page: dict[int, list[Any]] = field(default_factory=dict)
     approved_ocr_image_size_by_page: dict[int, tuple[int, int]] = field(default_factory=dict)
     apply_notebooklm_watermark_fallback: bool = True
-    inpaint_lama_patch_hybrid: bool = True
+    inpaint_lama_patch_hybrid: bool = DEFAULT_INPAINT_LAMA_PATCH_HYBRID
     # Opt-in generative (cloud) image-edit backend. Defaults keep behaviour identical
     # when no API key is present and when inpaint_engine is not generative-*.
     generative_model: str | None = None

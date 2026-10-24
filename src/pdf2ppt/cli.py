@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
 from .batch import (
     EXIT_USAGE,
     format_summary_markdown,
+    is_valid_pptx,
     run_batch,
 )
 from .core import (
+    DEFAULT_INPAINT_ENGINE,
     DEFAULT_OCR_BATCH_SIZE,
     DEFAULT_PAGE_TIMEOUT_SECONDS,
     ConversionOptions,
@@ -20,8 +25,12 @@ from .core import (
     OcrInitializationError,
 )
 from .inpainting_engines import base_lama_inpaint_engine, uses_lama_patch_hybrid
+from .models import ConversionReport
 from .pipeline import convert_from_ir, convert_pdf
 from .timeouts import page_timeout_seconds_from_environ
+
+_HELP_FLAGS = frozenset({"-h", "--help"})
+EXIT_INTERRUPTED = 130
 
 GENERATIVE_INPAINT_ENGINE_CHOICES = (
     "generative-openai",
@@ -210,7 +219,7 @@ def add_conversion_option_arguments(parser: argparse.ArgumentParser) -> None:
             "lama-pytorch-hybrid",
             *GENERATIVE_INPAINT_ENGINE_CHOICES,
         ),
-        default="opencv-fast",
+        default=DEFAULT_INPAINT_ENGINE,
         help=(
             "Background reconstruction engine for overlay pages. 'lama-onnx-cuda' and "
             "'lama-onnx-cuda-hybrid' are backward-compatible aliases for 'lama-onnx' and "
@@ -675,6 +684,48 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_emit_ir_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="pdf2ppt emit-ir",
+        description=(
+            "Analyze a PDF and write SlideIR JSON (plus a sibling "
+            "{ir_filename}.assets/ directory). Skips PPTX generation."
+        ),
+    )
+    parser.add_argument("input_pdf", type=Path, help="Input PDF file path.")
+    parser.add_argument(
+        "output_ir",
+        type=Path,
+        help="Output SlideIR JSON path (assets dir is written beside it).",
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Path to write the JSON conversion report. Defaults next to the IR output.",
+    )
+    add_conversion_option_arguments(parser)
+    return parser
+
+
+def build_from_ir_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="pdf2ppt from-ir",
+        description=(
+            "Load SlideIR JSON and render PPTX (no PDF). Assets are resolved from "
+            "the assets_dir next to the IR file."
+        ),
+    )
+    parser.add_argument("input_ir", type=Path, help="Input SlideIR JSON path.")
+    parser.add_argument("output_pptx", type=Path, help="Output PPTX file path.")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Path to write the JSON conversion report. Defaults next to the PPTX.",
+    )
+    add_conversion_option_arguments(parser)
+    return parser
+
+
 def build_batch_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pdf2ppt batch",
@@ -743,6 +794,15 @@ def build_batch_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _argv_requests_help(argv: list[str]) -> bool:
+    return any(arg in _HELP_FLAGS for arg in argv)
+
+
+def _print_parser_help(parser: argparse.ArgumentParser) -> int:
+    parser.print_help()
+    return 0
+
+
 def _rewrite_subcommand_argv(argv: list[str]) -> list[str]:
     """Map ``emit-ir`` / ``from-ir`` / ``convert`` subcommands onto flag form."""
     if not argv:
@@ -766,6 +826,87 @@ def _rewrite_subcommand_argv(argv: list[str]) -> list[str]:
         ir_path, output_pptx, *flags = rest
         return ["--from-ir", ir_path, "-o", output_pptx, *flags]
     return argv
+
+
+def _unlink_if_exists(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _point_report_at_final(report_path: Path, partial: Path, final: Path) -> None:
+    """Rewrite report JSON so ``output_path`` records the final PPTX, not ``*.partial``."""
+    try:
+        text = report_path.read_text(encoding="utf-8")
+        old, new = json.dumps(str(partial))[1:-1], json.dumps(str(final))[1:-1]
+        if old in text:
+            report_path.write_text(text.replace(old, new), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _finalize_partial_pptx(partial_pptx: Path, final_pptx: Path, report_path: Path | None) -> None:
+    if not partial_pptx.exists():
+        # Test doubles for convert_* often skip writing; production always writes.
+        return
+    if not is_valid_pptx(partial_pptx):
+        raise RuntimeError(f"conversion produced an invalid pptx: {partial_pptx}")
+    os.replace(partial_pptx, final_pptx)
+    if report_path is not None:
+        _point_report_at_final(report_path, partial_pptx, final_pptx)
+
+
+def _run_convert_pdf_atomically(
+    options: ConversionOptions,
+    *,
+    write_pptx: bool,
+    emit_ir_path: Path | None,
+    progress_callback: Callable[[int, int], None] | None,
+) -> ConversionReport:
+    """Write PPTX via ``*.pptx.partial`` then rename so SIGINT leaves no truncated file."""
+    if not write_pptx:
+        return convert_pdf(
+            options,
+            progress_callback=progress_callback,
+            write_pptx=False,
+            emit_ir_path=emit_ir_path,
+        )
+
+    final_pptx = options.output_path
+    partial_pptx = final_pptx.with_name(final_pptx.name + ".partial")
+    _unlink_if_exists(partial_pptx)
+    partial_options = replace(options, output_path=partial_pptx)
+    try:
+        report = convert_pdf(
+            partial_options,
+            progress_callback=progress_callback,
+            write_pptx=True,
+            emit_ir_path=emit_ir_path,
+        )
+        _finalize_partial_pptx(partial_pptx, final_pptx, options.report_path)
+        return report
+    except BaseException:
+        _unlink_if_exists(partial_pptx)
+        raise
+
+
+def _run_convert_from_ir_atomically(
+    ir_path: Path,
+    output_pptx: Path,
+    *,
+    report_path: Path,
+) -> ConversionReport:
+    partial_pptx = output_pptx.with_name(output_pptx.name + ".partial")
+    _unlink_if_exists(partial_pptx)
+    try:
+        report = convert_from_ir(ir_path, partial_pptx, report_path=report_path)
+        _finalize_partial_pptx(partial_pptx, output_pptx, report_path)
+        return report
+    except BaseException:
+        _unlink_if_exists(partial_pptx)
+        raise
 
 
 def _resolve_output_pptx(args: argparse.Namespace) -> Path | None:
@@ -894,7 +1035,7 @@ def _main_batch(argv: list[str]) -> int:
         return exit_code
     except KeyboardInterrupt:
         print("interrupted: partial summary written to the output directory", file=sys.stderr)
-        return 130
+        return EXIT_INTERRUPTED
     except InputValidationError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_USAGE
@@ -905,6 +1046,13 @@ def main(argv: list[str] | None = None) -> int:
     if raw_argv and raw_argv[0] == "batch":
         return _main_batch(raw_argv[1:])
 
+    # Subcommand argv rewrite requires positional paths; handle --help/-h first so
+    # ``pdf2ppt emit-ir --help`` (and from-ir) exit 0 with real argparse help.
+    if raw_argv and raw_argv[0] == "emit-ir" and _argv_requests_help(raw_argv[1:]):
+        return _print_parser_help(build_emit_ir_parser())
+    if raw_argv and raw_argv[0] == "from-ir" and _argv_requests_help(raw_argv[1:]):
+        return _print_parser_help(build_from_ir_parser())
+
     try:
         raw_argv = _rewrite_subcommand_argv(raw_argv)
     except SystemExit as error:
@@ -914,7 +1062,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     parser = build_parser()
-    args = parser.parse_args(raw_argv)
+    try:
+        args = parser.parse_args(raw_argv)
+    except SystemExit as error:
+        # argparse exits 0 for --help/-h and 2 for usage errors.
+        code = error.code
+        return 0 if code is None else int(code)
+
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(levelname)s %(name)s: %(message)s",
@@ -933,7 +1087,11 @@ def main(argv: list[str] | None = None) -> int:
                     "--from-ir requires an output PPTX path (positional or -o/--output)."
                 )
             report_path = args.report or output_pptx.with_suffix(".report.json")
-            report = convert_from_ir(args.from_ir, output_pptx, report_path=report_path)
+            report = _run_convert_from_ir_atomically(
+                args.from_ir,
+                output_pptx,
+                report_path=report_path,
+            )
             print(
                 f"Rendered SlideIR {args.from_ir} -> {output_pptx} "
                 f"({len(report.pages)} pages, report: {report_path})"
@@ -967,11 +1125,11 @@ def main(argv: list[str] | None = None) -> int:
             output_path=output_pptx,
             report_path=report_path,
         )
-        report = convert_pdf(
+        report = _run_convert_pdf_atomically(
             options,
-            progress_callback=build_progress_callback(sys.stderr),
             write_pptx=write_pptx,
             emit_ir_path=args.emit_ir,
+            progress_callback=build_progress_callback(sys.stderr),
         )
         parts = []
         if write_pptx:
@@ -984,6 +1142,9 @@ def main(argv: list[str] | None = None) -> int:
             f"({len(report.pages)} pages, report: {report_path})"
         )
         return 0
+    except KeyboardInterrupt:
+        print("Interrupted", file=sys.stderr)
+        return EXIT_INTERRUPTED
     except InputValidationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

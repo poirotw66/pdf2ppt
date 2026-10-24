@@ -479,7 +479,7 @@ class PipelineLayoutOptionTests(unittest.TestCase):
         from pdf2ppt.pipeline import analyze_page
 
         pdf_path = FIXTURES / "flowchart.pdf"
-        import fitz
+        import pymupdf as fitz
 
         options = ConversionOptions(
             input_path=pdf_path,
@@ -908,7 +908,7 @@ class BulletListPositionTests(unittest.TestCase):
 
     @unittest.skipUnless((FIXTURES / "bullet_list.pdf").exists(), "fixture missing")
     def test_bullet_list_line_positions_near_pdf(self) -> None:
-        import fitz
+        import pymupdf as fitz
 
         from pdf2ppt.core import ConversionOptions
         from pdf2ppt.layout import _LINE_HEIGHT_FACTOR
@@ -1046,7 +1046,7 @@ class MultilineBodySpacingTests(unittest.TestCase):
 
     @unittest.skipUnless((FIXTURES / "large_mask.pdf").exists(), "fixture missing")
     def test_large_mask_layout_baselines_within_3pt_of_pdf(self) -> None:
-        import fitz
+        import pymupdf as fitz
 
         from pdf2ppt.layout import _LINE_HEIGHT_FACTOR
         from pdf2ppt.native_extraction import extract_native_text_blocks

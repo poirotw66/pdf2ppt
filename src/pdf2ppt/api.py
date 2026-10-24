@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-import fitz
+import pymupdf as fitz
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware

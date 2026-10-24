@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from .core import DEFAULT_OCR_BATCH_SIZE
+from .core import DEFAULT_INPAINT_ENGINE, DEFAULT_OCR_BATCH_SIZE
 
 DEFAULT_DETECT_CONFIDENCE_THRESHOLD = 0.75
 
@@ -127,7 +127,7 @@ class ConvertRequest(BaseModel):
         "lama-pytorch-hybrid",
         "generative-openai",
         "generative-gemini",
-    ] = "opencv-fast"
+    ] = DEFAULT_INPAINT_ENGINE
     inpaint_padding_px: int = Field(default=6, ge=0, le=128)
     inpaint_mask_dilate_px: int = Field(default=2, ge=0, le=32)
     inpaint_mask_dilate_line_height_ratio: float = Field(default=0.18, ge=0.0, le=1.0)

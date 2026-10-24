@@ -37,8 +37,8 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import fitz
 import numpy as np
+import pymupdf as fitz
 from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -353,8 +353,8 @@ def render_text_free_background(
         # gradients / photos (images + line art are preserved).
         page.add_redact_annot(page.rect, fill=False)  # type: ignore[arg-type]
         page.apply_redactions(
-            images=fitz.PDF_REDACT_IMAGE_NONE,
-            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+            images=fitz.PDF_REDACT_IMAGE_NONE,  # type: ignore[attr-defined]
+            graphics=fitz.PDF_REDACT_LINE_ART_NONE,  # type: ignore[attr-defined]
         )
         scale = dpi / 72.0
         pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)

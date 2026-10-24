@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import fitz
+import pymupdf as fitz
 from fastapi.testclient import TestClient
 from PIL import Image
 from pptx import Presentation

@@ -5,8 +5,8 @@ import logging
 import math
 
 import cv2
-import fitz
 import numpy as np
+import pymupdf as fitz
 from PIL import Image
 
 from .core import ConversionOptions

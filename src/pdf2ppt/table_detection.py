@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any
 
-import fitz
+import pymupdf as fitz
 
 from .models import BBox, TableCell, TableElement, TextBlock
 from .vector_nativization import (

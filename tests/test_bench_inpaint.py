@@ -165,7 +165,7 @@ class ResidualTextDetectionRateTests(unittest.TestCase):
             return OcrPageData(blocks=self._blocks, image=self._image)
 
     def test_full_overlap_yields_rate_one(self) -> None:
-        import fitz
+        import pymupdf as fitz
 
         image = _solid_image((100, 100), (255, 255, 255))
         page_rect = fitz.Rect(0, 0, 100, 100)
@@ -181,7 +181,7 @@ class ResidualTextDetectionRateTests(unittest.TestCase):
         self.assertEqual(rate, 1.0)
 
     def test_no_detections_yields_rate_zero(self) -> None:
-        import fitz
+        import pymupdf as fitz
 
         image = _solid_image((100, 100), (255, 255, 255))
         page_rect = fitz.Rect(0, 0, 100, 100)
@@ -194,7 +194,7 @@ class ResidualTextDetectionRateTests(unittest.TestCase):
         self.assertEqual(rate, 0.0)
 
     def test_partial_overlap_is_proportional(self) -> None:
-        import fitz
+        import pymupdf as fitz
 
         image = _solid_image((100, 100), (255, 255, 255))
         page_rect = fitz.Rect(0, 0, 100, 100)

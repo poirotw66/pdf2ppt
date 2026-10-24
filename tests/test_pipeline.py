@@ -9,8 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import cv2
-import fitz
 import numpy as np
+import pymupdf as fitz
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from pptx.util import Pt

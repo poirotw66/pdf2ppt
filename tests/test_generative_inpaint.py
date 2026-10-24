@@ -1223,7 +1223,7 @@ class MaskDilateOptionTests(unittest.TestCase):
         self.assertEqual(options.generative_safety_block_retries, 1)
 
     def test_line_height_dilate_scales_and_merges(self) -> None:
-        import fitz
+        import pymupdf as fitz
 
         # Two nearby boxes: after line-height dilation they must merge into one
         # connected component (avoids solid_background 1→3 generative calls).
