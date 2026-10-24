@@ -5,7 +5,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from statistics import median
 
-import fitz
+import pymupdf as fitz
 from PIL import Image
 
 from .models import BBox, ImagePlacement, TextBlock

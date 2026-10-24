@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import fitz
+import pymupdf as fitz
 
 DEFAULT_JOB_ROOT = Path(".pdf2ppt_jobs")
 DEFAULT_JOB_RETENTION_HOURS = 24

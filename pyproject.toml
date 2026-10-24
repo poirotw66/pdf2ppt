@@ -25,6 +25,8 @@ classifiers = [
 # optional extras so `pip install .` stays lean; install `[ocr]` for scanned
 # pages and `[server]` for the FastAPI backend.
 dependencies = [
+  # ``import pymupdf`` (preferred over deprecated ``import fitz``) is supported
+  # throughout the 1.2x line; keep the floor high enough for current APIs.
   "PyMuPDF>=1.27.0,<2.0",
   "python-pptx>=1.0.0",
   "chardet<6",

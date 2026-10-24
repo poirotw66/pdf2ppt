@@ -329,7 +329,8 @@ class SlideIrCliTests(unittest.TestCase):
         convert_from_ir_mock.assert_called_once()
         call_args = convert_from_ir_mock.call_args
         self.assertEqual(call_args.args[0], Path("deck.slideir.json"))
-        self.assertEqual(call_args.args[1], Path("out.pptx"))
+        # Single-file path writes via ``*.pptx.partial`` then renames (SIGINT-safe).
+        self.assertEqual(call_args.args[1], Path("out.pptx.partial"))
 
     @patch("pdf2ppt.cli.convert_pdf")
     def test_default_convert_still_writes_pptx(self, convert_pdf_mock: unittest.mock.Mock) -> None:

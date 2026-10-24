@@ -6,8 +6,8 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-import fitz
 import numpy as np
+import pymupdf as fitz
 from PIL import Image
 
 from ..block_analysis import map_blocks_to_page_coordinates

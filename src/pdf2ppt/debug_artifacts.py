@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 from typing import TypedDict
 
-import fitz
 import numpy as np
+import pymupdf as fitz
 from PIL import Image, ImageDraw
 
 from .models import TextBlock

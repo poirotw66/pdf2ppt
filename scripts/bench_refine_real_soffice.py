@@ -18,7 +18,7 @@ import io
 import tempfile
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from PIL import Image
 
 from pdf2ppt.models import PageResult, QualityScore, ShapeElement, TextBlock

@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import unittest
 
-import fitz
+import pymupdf as fitz
 from PIL import Image
 
 from pdf2ppt.core import InputValidationError

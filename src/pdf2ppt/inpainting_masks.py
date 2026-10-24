@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import cv2
-import fitz
 import numpy as np
+import pymupdf as fitz
 from PIL import Image, ImageDraw
 
 from .debug_artifacts import build_mask_shapes

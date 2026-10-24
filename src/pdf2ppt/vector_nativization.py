@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any
 
-import fitz
 import numpy as np
+import pymupdf as fitz
 
 from .models import (
     ArrowDirection,

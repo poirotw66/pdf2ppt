@@ -43,8 +43,8 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import fitz
 import numpy as np
+import pymupdf as fitz
 from PIL import Image, ImageDraw, ImageFont
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

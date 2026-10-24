@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import fitz
+import pymupdf as fitz
 from pptx import Presentation
 
 from pdf2ppt.core import ConversionOptions

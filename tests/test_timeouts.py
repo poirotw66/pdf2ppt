@@ -190,7 +190,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
         reset_timeout_lane_for_tests()
 
     def test_analyze_page_ocr_timeout_uses_empty_ocr(self) -> None:
-        import fitz
+        import pymupdf as fitz
 
         document = fitz.open()
         page = document.new_page(width=200, height=200)
@@ -220,7 +220,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
         document.close()
 
     def test_batched_ocr_timeout_retries_per_page(self) -> None:
-        import fitz
+        import pymupdf as fitz
 
         document = fitz.open()
         document.new_page(width=100, height=100)
@@ -274,7 +274,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
     def test_wedged_predict_skips_remaining_pages_quickly(self) -> None:
         """Abandoned timed-out predict holding the lock → skip remaining OCR after one wait."""
 
-        import fitz
+        import pymupdf as fitz
 
         document = fitz.open()
         for _ in range(4):
@@ -328,7 +328,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
     def test_busy_lock_without_abandoned_call_is_not_wedged(self) -> None:
         """N3: another job's slow-but-live predict must not blank this job's OCR."""
 
-        import fitz
+        import pymupdf as fitz
 
         document = fitz.open()
         for _ in range(2):
@@ -374,7 +374,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
     def test_ocr_processing_error_after_lane_swap_degrades(self) -> None:
         """N1: OcrProcessingError after a timeout lane replacement → empty OCR, not abort."""
 
-        import fitz
+        import pymupdf as fitz
 
         document = fitz.open()
         document.new_page(width=80, height=80)
@@ -420,7 +420,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
     def test_ocr_processing_error_when_lane_already_swapped_degrades(self) -> None:
         """N1: A later job must degrade when generation is already > 1 from an earlier swap."""
 
-        import fitz
+        import pymupdf as fitz
 
         document = fitz.open()
         document.new_page(width=80, height=80)
@@ -469,7 +469,7 @@ class PageOcrTimeoutFallbackTests(unittest.TestCase):
     def test_ocr_processing_error_without_lane_swap_still_raises(self) -> None:
         """Genuine OCR failures (no timeout / generation change) must still abort."""
 
-        import fitz
+        import pymupdf as fitz
 
         document = fitz.open()
         document.new_page(width=80, height=80)

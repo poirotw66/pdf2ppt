@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-import fitz
+import pymupdf as fitz
 from PIL import Image
 
 from .core import PageSignals
