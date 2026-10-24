@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `pdf2ppt emit-ir --help` / `from-ir --help` (and `-h`) now print argparse help and exit **0** instead of failing the subcommand argv rewrite with exit **2**.
-- Single-file CLI convert handles `KeyboardInterrupt` like batch: prints `Interrupted` to stderr, removes any `*.pptx.partial`, exits **130** (no traceback; no half-written `.pptx`).
+- Single-file CLI convert handles `KeyboardInterrupt` like batch: prints `interrupted: discarded incomplete output` to stderr, removes any `*.pptx.partial`, exits **130** (no traceback; no half-written `.pptx`).
+- Single-file atomic `*.pptx.partial` writes pin the default `--refine` report to `<output>.refine.json` (not `<output>.pptx.refine.json`).
 - Stop importing the deprecated PyMuPDF `fitz` alias (`import pymupdf as fitz`) so CLI runs no longer print the fitz deprecation warning.
 
 ### Changed

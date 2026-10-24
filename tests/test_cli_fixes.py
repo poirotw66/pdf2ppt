@@ -149,7 +149,7 @@ class SingleFileKeyboardInterruptTests(unittest.TestCase):
 
             self.assertEqual(code, EXIT_INTERRUPTED)
             err = stderr.getvalue()
-            self.assertIn("Interrupted", err)
+            self.assertIn("interrupted:", err)
             self.assertNotIn("Traceback", err)
             self.assertNotIn("KeyboardInterrupt", err)
             self.assertFalse(out.exists())
@@ -166,6 +166,50 @@ class SingleFileKeyboardInterruptTests(unittest.TestCase):
         ):
             code = main(["input.pdf", "output.pptx"])
         self.assertEqual(code, 0)
+
+
+class AtomicPartialSidecarTests(unittest.TestCase):
+    def test_refine_report_default_uses_final_pptx_stem(self) -> None:
+        captured: list[object] = []
+
+        def fake_convert(options, **_kwargs):  # noqa: ANN001
+            captured.append(options)
+            return SimpleNamespace(
+                input_path="in.pdf",
+                output_path=str(options.output_path),
+                pages=[object()],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            with patch("pdf2ppt.cli.convert_pdf", side_effect=fake_convert):
+                code = main(["in.pdf", str(out), "--refine"])
+            self.assertEqual(code, 0)
+            self.assertEqual(len(captured), 1)
+            options = captured[0]
+            self.assertEqual(options.output_path, out.with_name(out.name + ".partial"))
+            self.assertEqual(options.refine_report_path, out.with_suffix(".refine.json"))
+            self.assertEqual(options.report_path, out.with_suffix(".report.json"))
+            self.assertFalse(str(options.refine_report_path).endswith(".pptx.refine.json"))
+
+    def test_explicit_refine_report_path_is_preserved(self) -> None:
+        captured: list[object] = []
+
+        def fake_convert(options, **_kwargs):  # noqa: ANN001
+            captured.append(options)
+            return SimpleNamespace(
+                input_path="in.pdf",
+                output_path=str(options.output_path),
+                pages=[object()],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.pptx"
+            custom = Path(tmp) / "custom-refine.json"
+            with patch("pdf2ppt.cli.convert_pdf", side_effect=fake_convert):
+                code = main(["in.pdf", str(out), "--refine", "--refine-report", str(custom)])
+            self.assertEqual(code, 0)
+            self.assertEqual(captured[0].refine_report_path, custom)
 
 
 if __name__ == "__main__":

@@ -877,7 +877,18 @@ def _run_convert_pdf_atomically(
     final_pptx = options.output_path
     partial_pptx = final_pptx.with_name(final_pptx.name + ".partial")
     _unlink_if_exists(partial_pptx)
-    partial_options = replace(options, output_path=partial_pptx)
+    # Pin sidecars derived from the PPTX stem (refine report default is
+    # ``<output>.refine.json``) to the *final* path. Only the PPTX write is
+    # redirected to ``*.partial``; report_path / emit_ir / debug_dir are already
+    # final-path based by the caller.
+    refine_report_path = options.refine_report_path
+    if refine_report_path is None:
+        refine_report_path = final_pptx.with_suffix(".refine.json")
+    partial_options = replace(
+        options,
+        output_path=partial_pptx,
+        refine_report_path=refine_report_path,
+    )
     try:
         report = convert_pdf(
             partial_options,
@@ -1143,7 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except KeyboardInterrupt:
-        print("Interrupted", file=sys.stderr)
+        print("interrupted: discarded incomplete output", file=sys.stderr)
         return EXIT_INTERRUPTED
     except InputValidationError as error:
         print(f"error: {error}", file=sys.stderr)
